@@ -1,0 +1,101 @@
+repo_url: https://github.com/ryneches/quarmimo
+repo_name: GitHub
+site_url: https://quarimo.vort.org
+site_description: Deep analysis of phylogenetic tree ensembles with quartets
+site_author: Russell Neches
+
+# Preserve CNAME file for custom domain
+docs_dir: docs
+site_dir: site
+
+site_name: Quarimo
+theme:
+  name: material
+  features:
+    - content.code.annotate
+    - content.code.copy
+    - content.tabs.link
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.tracking
+    - navigation.sections
+    - navigation.expand
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  palette:
+    - scheme: default
+      primary: teal
+      accent: purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: teal
+      accent: purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  font:
+    text: Roboto
+    code: Roboto Mono
+  icon:
+    repo: fontawesome/brands/github
+  logo: assets/cpu-tree.svg
+  favicon: assets/cpu-tree.svg
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ryneches/quarimo
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/quarimo/
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - javascripts/config.js
+  - https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+nav:
+  - Introduction: index.md
+  - Release Notes: release_notes.md
+  - Benchmarks: benchmarks.md
+  - API Reference: api.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.arithmatex:
+      generic: true
+
+plugins:
+  - search
+  - social:
+      cards: true
+      cards_layout_options:
+        background_color: "#009688"
+        color: "#ffffff"
+        font_family: Roboto
+        logo: assets/cpu-tree.svg
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          inventories:
+            - https://docs.python.org/3/objects.inv
+          options:
+            show_signature_annotations: true
+            show_source: false
+            group_by_category: true
+            show_root_heading: false
+            members_order: source
+            docstring_style: google
+            docstring_section_style: table
+            merge_init_into_class: true
+            show_if_no_docstring: false
