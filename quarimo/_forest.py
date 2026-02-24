@@ -133,6 +133,7 @@ from typing import Union, List, Tuple, Optional, Dict, Any
 import numpy as np
 
 from quarimo._tree import Tree
+from quarimo._quartets import Quartets
 
 # Import logging functions from separate module
 from quarimo._logging import (
@@ -552,7 +553,7 @@ class Forest:
         return result
 
     def quartet_topology(
-        self, quartets: Any, steiner: bool = False, backend: str = "best"
+        self, quartets: Quartets, steiner: bool = False, backend: str = "best"
     ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """
         Count the three possible unrooted quartet topologies for one or more
@@ -576,10 +577,19 @@ class Forest:
 
         Parameters
         ----------
-        quartets : iterable of (a, b, c, d)
-            Each element is a 4-tuple of taxon names (str) or global IDs (int),
-            in any order.  The iterable is fully consumed once; generators are
-            accepted.
+        quartets : Quartets
+            A Quartets object specifying which quartets to analyze.
+            
+            Use Quartets.from_list() for explicit quartet lists:
+                >>> from quarimo._quartets import Quartets
+                >>> q = Quartets.from_list(forest, [('A','B','C','D')])
+                >>> counts = forest.quartet_topology(q)
+            
+            Use Quartets.random() for random sampling with GPU generation:
+                >>> q = Quartets.random(forest, count=1_000_000, seed=42)
+                >>> counts = forest.quartet_topology(q)  # 8-24× faster!
+            
+            See quarimo._quartets.Quartets for complete documentation.
         steiner : bool, default False
             If True, also return per-tree Steiner distances for the winning
             topology in each quartet.
@@ -654,33 +664,45 @@ class Forest:
 
         Examples
         --------
+        >>> from quarimo._quartets import Quartets
+        
         Single quartet:
 
-        >>> counts = c.quartet_topology([['A', 'B', 'C', 'D']])
+        >>> q = Quartets.from_list(forest, [('A', 'B', 'C', 'D')])
+        >>> counts = forest.quartet_topology(q)
         >>> print(counts[0])          # topology distribution: (3,) view of row 0
         [10, 3, 7]
 
-        >>> counts, dists = c.quartet_topology([['A', 'B', 'C', 'D']], steiner=True)
+        >>> counts, dists = forest.quartet_topology(q, steiner=True)
         >>> print(dists[0, :, :].sum(axis=0))   # total Steiner per topology
         [34.1   0.   0. ]
 
         Multiple quartets:
 
-        >>> quartets = [('A','B','C','D'), ('A','B','C','E'), ('B','C','D','E')]
-        >>> counts = c.quartet_topology(quartets)
+        >>> quartet_list = [('A','B','C','D'), ('A','B','C','E'), ('B','C','D','E')]
+        >>> q = Quartets.from_list(forest, quartet_list)
+        >>> counts = forest.quartet_topology(q)
         >>> print(counts.shape)
         (3, 3)
 
-        >>> counts, dists = c.quartet_topology(quartets, steiner=True)
+        >>> counts, dists = forest.quartet_topology(q, steiner=True)
         >>> print(dists.shape)
         (3, 20, 3)          # n_quartets × n_trees × 3 topologies
+        
+        Random sampling (8-24× faster on GPU):
+        
+        >>> q = Quartets.random(forest, count=1_000_000, seed=42)
+        >>> counts = forest.quartet_topology(q)
+        >>> print(counts.shape)
+        (1000000, 3)
 
         Backend selection:
 
-        >>> counts = c.quartet_topology(quartets)                        # 'best' (default)
-        >>> counts = c.quartet_topology(quartets, backend='python')      # unoptimized
-        >>> counts = c.quartet_topology(quartets, backend='cpu-parallel') # numba CPU
-        >>> counts = c.quartet_topology(quartets, backend='cuda')        # GPU (if available)
+        >>> q = Quartets.from_list(forest, quartet_list)
+        >>> counts = forest.quartet_topology(q)                        # 'best' (default)
+        >>> counts = forest.quartet_topology(q, backend='python')      # unoptimized
+        >>> counts = forest.quartet_topology(q, backend='cpu-parallel') # numba CPU
+        >>> counts = forest.quartet_topology(q, backend='cuda')        # GPU (if available)
 
         Backend
         -------
@@ -717,26 +739,24 @@ class Forest:
         level.  On first invocation of a JIT-compiled backend, an additional
         message indicates whether the kernel was compiled or loaded from cache.
         """
-        # ── 1. Materialise and validate the input ────────────────────────
-        quartet_list = list(quartets)
-        n_quartets = len(quartet_list)
+        # ── 1. Validate input type ───────────────────────────────────────
+        if not isinstance(quartets, Quartets):
+            raise TypeError(
+                f"quartets must be a Quartets object, got {type(quartets).__name__}. "
+                f"Use Quartets.from_list(forest, your_quartets) or "
+                f"Quartets.random(forest, count=N)."
+            )
+        
+        n_quartets = len(quartets)
         if n_quartets == 0:
             counts_out = np.zeros((0, 3), dtype=np.int32)
             if steiner:
                 return counts_out, np.zeros((0, self.n_trees, 3), dtype=np.float64)
             return counts_out
 
-        # ── 2. Resolve names → global IDs, sort each quartet ────────────
-        # Validation (KeyError on unknown names) happens here, before the
-        # kernel, so callers get an immediate, informative error rather than
-        # a silent wrong result or an index fault inside the kernel.
-        sorted_ids = np.empty((n_quartets, 4), dtype=np.int32)
-        for qi, quad in enumerate(quartet_list):
-            ids = sorted([self._resolve_global(x) for x in quad])
-            sorted_ids[qi, 0] = ids[0]
-            sorted_ids[qi, 1] = ids[1]
-            sorted_ids[qi, 2] = ids[2]
-            sorted_ids[qi, 3] = ids[3]
+        # ── 2. Materialize quartets ──────────────────────────────────────
+        # Quartets iterator yields (a, b, c, d) as global IDs, already sorted
+        sorted_ids = np.array(list(quartets), dtype=np.int32)
 
         # ── 3. Pre-allocate outputs and call kernel ──────────────────────
         common_args = (

@@ -155,7 +155,7 @@ def _(Forest, combinations, ensembleA, ensembleB, ensembleC, time):
     t1 = time.time()
 
     elapsed = t1 - t0
-    problem_size = len(quartets)*QFL.n_trees
+    problem_size = len(quartets)*QFL.n_treesoffline
 
     print( f'Completed {problem_size} in {t1-t0:.2f} seconds at {problem_size/elapsed:.2f} quartets per second' )
     return
