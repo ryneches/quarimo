@@ -26,6 +26,7 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 from quarimo._forest import Forest, _CUDA_AVAILABLE
+from quarimo._quartets import Quartets
 
 print("=" * 70)
 print("CUDA Data Transfer Logging Validation")
@@ -56,7 +57,7 @@ print("\n" + "=" * 70)
 print("Test 1: Counts-only mode")
 print("=" * 70)
 
-counts = c.quartet_topology(quartets, backend="cuda")
+counts = c.quartet_topology(Quartets.from_list(c, quartets), backend="cuda")
 
 logs = log_capture.getvalue()
 print("\nLogging output:")
@@ -106,7 +107,7 @@ print("\n" + "=" * 70)
 print("Test 2: Steiner mode")
 print("=" * 70)
 
-counts, dists = c.quartet_topology(quartets, steiner=True, backend="cuda")
+counts, dists = c.quartet_topology(Quartets.from_list(c, quartets), steiner=True, backend="cuda")
 
 logs = log_capture.getvalue()
 print("\nLogging output:")

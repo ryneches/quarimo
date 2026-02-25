@@ -7,6 +7,7 @@ Tests for tree group labels functionality in PhyloTreeCollection.
 import pytest
 import numpy as np
 from quarimo._forest import Forest, _jaccard
+from quarimo._quartets import Quartets
 
 
 class TestGroupLabels:
@@ -236,7 +237,7 @@ class TestSplitQuartetResults:
         quartets = [("a", "b", "c", "d")]
 
         # Get total results
-        counts, dists = c.quartet_topology(quartets, steiner=True)
+        counts, dists = c.quartet_topology(Quartets.from_list(c, quartets), steiner=True)
 
         # Split by group
         by_group = c.split_quartet_results_by_group(counts, dists)
@@ -266,7 +267,7 @@ class TestSplitQuartetResults:
         c = Forest(groups)
         quartets = [("a", "b", "c", "d")]
 
-        counts, dists = c.quartet_topology(quartets, steiner=True)
+        counts, dists = c.quartet_topology(Quartets.from_list(c, quartets), steiner=True)
         by_group = c.split_quartet_results_by_group(counts, dists)
 
         # Check shapes
@@ -286,7 +287,7 @@ class TestSplitQuartetResults:
         c = Forest(groups)
         quartets = [("a", "b", "c", "d")]
 
-        counts = c.quartet_topology(quartets, steiner=False)
+        counts = c.quartet_topology(Quartets.from_list(c, quartets), steiner=False)
 
         with pytest.raises(
             ValueError, match="Cannot split counts without per-tree data"
@@ -306,7 +307,7 @@ class TestSplitQuartetResults:
             ("a", "b", "d", "c"),  # Same as above but different order
         ]
 
-        counts, dists = c.quartet_topology(quartets, steiner=True)
+        counts, dists = c.quartet_topology(Quartets.from_list(c, quartets), steiner=True)
         by_group = c.split_quartet_results_by_group(counts, dists)
 
         # Check dimensions
@@ -320,36 +321,38 @@ class TestBackwardCompatibility:
     """Tests to ensure backward compatibility with existing API."""
 
     def test_list_input_behaves_like_old_api(self):
-        """Test that list input maintains old behavior (with new attributes)."""
+        """Test that wrapping a list in Quartets.from_list() maintains old behavior."""
         trees = ["((A:1,B:1):1,(C:1,D:1):1);", "((A:1,C:1):1,(B:1,D:1):1);"]
 
         c = Forest(trees)
 
-        # Old attributes still work
+        # Forest attributes
         assert c.n_trees == 2
         assert c.n_global_taxa == 4
         assert "A" in c.global_names
 
-        # New attributes are present but transparent
+        # Group attributes
         assert hasattr(c, "n_groups")
         assert hasattr(c, "group_labels")
 
-        # Functionality unchanged
-        counts = c.quartet_topology([("A", "B", "C", "D")])
+        # Functionality via new Quartets interface
+        counts = c.quartet_topology(Quartets.from_list(c, [("A", "B", "C", "D")]))
         assert counts.shape == (1, 3)
 
     def test_quartet_topology_unchanged(self):
-        """Test that quartet_topology works same as before."""
+        """Test that quartet_topology works correctly via Quartets.from_list."""
         trees = ["((A:1,B:1):1,(C:1,D:1):1);"] * 3
         c = Forest(trees)
 
         # Counts-only mode
-        counts = c.quartet_topology([("A", "B", "C", "D")])
+        counts = c.quartet_topology(Quartets.from_list(c, [("A", "B", "C", "D")]))
         assert counts.shape == (1, 3)
         assert counts.sum() == 3  # All 3 trees
 
         # Steiner mode
-        counts, dists = c.quartet_topology([("A", "B", "C", "D")], steiner=True)
+        counts, dists = c.quartet_topology(
+            Quartets.from_list(c, [("A", "B", "C", "D")]), steiner=True
+        )
         assert counts.shape == (1, 3)
         assert dists.shape == (1, 3, 3)
 

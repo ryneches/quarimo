@@ -22,10 +22,13 @@ def test_quartets_cpu_gpu_match():
     from quarimo import Forest
     from quarimo._quartets import Quartets
     
-    # Create simple forest
+    # Create forest with 5 taxa (A-E) so random sampling has meaningful variation.
+    # With only 4 taxa there is exactly one unique 4-combination, making every
+    # random quartet identical regardless of seed.
     trees = [
         '((A:1,B:1):1,(C:1,D:1):1);',
         '((A:1,C:1):1,(B:1,D:1):1);',
+        '((A:1,E:1):1,(B:1,C:1):1);',
     ]
     forest = Forest(trees)
     
@@ -46,15 +49,15 @@ def test_quartets_cpu_gpu_match():
     
     assert cpu_quartets == cpu_quartets2, "Repeated calls should give same sequence"
     
-    # Test 3: Custom seed quartet
-    seed_quartet = (0, 1, 2, 3)
+    # Test 3: Custom seed quartet — must differ from default seed (0,1,2,3)
+    seed_quartet = (0, 1, 2, 4)
     q3 = Quartets.random(forest, count=100, seed=seed_quartet)
     cpu_quartets3 = list(q3)
     
     # Should be different from default seed
     assert cpu_quartets3 != cpu_quartets, "Different seeds should give different sequences"
     
-    # But repeated with same seed should match
+    # But repeated with same seed should give same sequence
     q4 = Quartets.random(forest, count=100, seed=seed_quartet)
     cpu_quartets4 = list(q4)
     assert cpu_quartets3 == cpu_quartets4, "Same seed should give same sequence"
@@ -73,12 +76,14 @@ def test_quartets_explicit_seed_handling():
     from quarimo import Forest
     from quarimo._quartets import Quartets
     
+    # 5-taxon forest so random quartets are not always (0,1,2,3)
     trees = [
         '((A:1,B:1):1,(C:1,D:1):1);',
         '((A:1,C:1):1,(B:1,D:1):1);',
+        '((A:1,E:1):1,(B:1,C:1):1);',
     ]
     forest = Forest(trees)
-    
+
     # Test 1: Single seed quartet with offset=0 includes the seed
     seed = (0, 1, 2, 3)
     q = Quartets(forest, seed=seed, offset=0, count=3)
@@ -102,13 +107,14 @@ def test_quartets_explicit_seed_handling():
     
     assert quartets3 == seeds, "from_list should return exactly the seed quartets"
     
-    # Test 4: Using seed quartets then generating random
+    # Test 4: Seed quartets then random — verify offset mechanism, not specific values
     q4 = Quartets(forest, seed=seeds, offset=0, count=5)
     quartets4 = list(q4)
-    
+
     assert quartets4[:3] == seeds, "First 3 should be seeds"
-    assert quartets4[3] not in seeds, "4th should be random"
-    assert quartets4[4] not in seeds, "5th should be random"
+    # Positions 3+ come from the RNG; verify they match an equivalent offset window
+    q4_tail = Quartets(forest, seed=seeds, offset=3, count=2)
+    assert list(q4_tail) == quartets4[3:], "offset=3 should reproduce positions 3-4"
 
 
 def test_quartets_validation():
@@ -152,6 +158,14 @@ def test_quartets_validation():
     with pytest.raises(ValueError, match="must be specified"):
         Quartets(forest, seed=None, offset=0)
 
+    # Test 8: mixed str/int within a single quartet
+    with pytest.raises(TypeError):
+        Quartets(forest, seed=('A', 0, 'B', 'C'), offset=0, count=1)
+
+    # Test 9: mixed str/int across quartets in a list
+    with pytest.raises(TypeError):
+        Quartets(forest, seed=[('A', 'B', 'C', 'D'), (0, 1, 2, 3)], offset=0, count=2)
+
 
 def test_quartets_name_to_id_mapping():
     """Test that taxon names are correctly mapped to global IDs."""
@@ -175,13 +189,10 @@ def test_quartets_name_to_id_mapping():
     assert q_names.seed == q_ids.seed
     assert list(q_names) == list(q_ids)
     
-    # Test mixed
-    q_mixed = Quartets(forest, seed=[('A', 'B', 'C', 'D'), (1, 2, 3, 4)], 
-                       offset=0, count=2)
-    quartets = list(q_mixed)
-    
-    assert quartets[0] == (0, 1, 2, 3), "Names should map to IDs"
-    assert quartets[1] == (1, 2, 3, 4), "IDs should pass through"
+    # Mixed str/int quartets are rejected — types must be uniform across all quartets
+    with pytest.raises(TypeError):
+        Quartets(forest, seed=[('A', 'B', 'C', 'D'), (1, 2, 3, 4)],
+                 offset=0, count=2)
 
 
 if __name__ == '__main__':

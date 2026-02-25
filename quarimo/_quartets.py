@@ -23,10 +23,12 @@ class Quartets:
     forest : Forest
         The forest instance (provides namespace and validation)
     seed : quartet, list of quartets, or None
-        Seed quartet(s). Each quartet can be:
-        - Tuple of 4 taxon names (str)
-        - Tuple of 4 global indices (int)
-        If None, uses default [(0, 1, 2, 3)]
+        Seed quartet(s). Each quartet must be one of:
+        - Tuple of 4 taxon names (all str)
+        - Tuple of 4 global indices (all int)
+        All quartets in one call must use the same type (all str or all int).
+        Mixing str and int within a quartet or across quartets raises TypeError.
+        If None, uses default [(0, 1, 2, 3)].
     offset : int, default 0
         Starting index in the infinite sequence
     count : int
@@ -92,11 +94,20 @@ class Quartets:
     def _normalize_seed(self, seed) -> List[Tuple[int, int, int, int]]:
         """
         Convert seed to list of (global_id, global_id, global_id, global_id).
-        
+
+        Disambiguates a single quartet from a list of quartets by inspecting
+        the type of seed[0]: if it is a str or int the whole seed is treated
+        as one quartet; if it is itself a sequence, seed is treated as a list
+        of quartets.
+
+        All quartet elements across the entire call must be the same type —
+        either all str (taxon names) or all int (global IDs).  Mixing types
+        raises TypeError.
+
         Returns
         -------
         list of tuples
-            Each tuple is 4 global namespace indices, sorted
+            Each tuple is 4 global namespace indices, sorted.
         """
         if seed is None:
             # Default seed: first 4 taxa in global namespace
@@ -105,52 +116,103 @@ class Quartets:
                     "Forest must have at least 4 taxa for quartet generation"
                 )
             return [(0, 1, 2, 3)]
-        
-        # Single quartet → list
-        if isinstance(seed, tuple) and len(seed) == 4:
-            seed = [seed]
-        
-        # Validate is iterable
-        if not hasattr(seed, '__iter__'):
-            raise TypeError("seed must be a quartet or list of quartets")
-        
-        # Convert each quartet
+
+        # Materialise once so we can safely inspect seed[0]
+        seed = list(seed)
+
+        if len(seed) == 0:
+            raise ValueError("seed must not be empty")
+
+        # Disambiguate: single quartet vs. list of quartets
+        first = seed[0]
+        if isinstance(first, (str, int, np.integer)):
+            # seed IS the single quartet (first element is a scalar)
+            quartet_list = [tuple(seed)]
+        elif hasattr(first, '__iter__') or hasattr(first, '__len__'):
+            # seed is a list/tuple of quartets
+            quartet_list = [tuple(q) for q in seed]
+        else:
+            raise TypeError(
+                f"seed elements must be str or int, got {type(first).__name__}"
+            )
+
+        # Determine expected element type from first element of first quartet
+        first_quartet = quartet_list[0]
+        if len(first_quartet) == 0:
+            raise ValueError("Quartet must have exactly 4 elements, got 0")
+        first_elem = first_quartet[0]
+        if isinstance(first_elem, str):
+            use_names = True
+        elif isinstance(first_elem, (int, np.integer)):
+            use_names = False
+        else:
+            raise TypeError(
+                f"Quartet elements must be str (taxon names) or int (global IDs), "
+                f"got {type(first_elem).__name__}"
+            )
+
+        # Validate length, type consistency, and convert each quartet
         normalized = []
-        for quartet in seed:
-            normalized.append(self._normalize_quartet(quartet))
-        
+        for quartet in quartet_list:
+            if len(quartet) != 4:
+                raise ValueError(
+                    f"Quartet must have exactly 4 elements, got {len(quartet)}: {quartet}"
+                )
+            normalized.append(self._normalize_quartet(quartet, use_names))
+
         return normalized
     
-    def _normalize_quartet(self, quartet) -> Tuple[int, int, int, int]:
+    def _normalize_quartet(self, quartet, use_names: bool) -> Tuple[int, int, int, int]:
         """
-        Convert single quartet to (global_id, global_id, global_id, global_id).
-        
+        Convert a single length-validated quartet to sorted global IDs.
+
         Parameters
         ----------
         quartet : tuple of 4 elements
-            Each element is either:
-            - str: taxon name (will be mapped to global ID)
-            - int: global namespace index (will be validated)
-        
+            Length already confirmed to be 4 by _normalize_seed.
+        use_names : bool
+            True  — all elements must be str taxon names; map to global IDs.
+            False — all elements must be int global namespace indices; validate
+                    range.
+
         Returns
         -------
         tuple of 4 ints
-            Global namespace indices, sorted
+            Global namespace indices, sorted.
+
+        Raises
+        ------
+        TypeError
+            If any element has the wrong type (catches within-quartet mixing).
+        ValueError
+            If a taxon name is absent from the forest namespace, a global ID is
+            out of range, or the quartet contains duplicate taxa.
         """
-        if len(quartet) != 4:
-            raise ValueError(
-                f"Quartet must have exactly 4 elements, got {len(quartet)}"
-            )
-        
+        # Validate element types — catches within-quartet str/int mixing
+        for taxon in quartet:
+            if use_names:
+                if not isinstance(taxon, str):
+                    raise TypeError(
+                        f"Mixed types in quartet: expected all str (taxon names) "
+                        f"but got {type(taxon).__name__} for {taxon!r} in {quartet}. "
+                        f"Do not mix str and int within a single quartet."
+                    )
+            else:
+                if not isinstance(taxon, (int, np.integer)):
+                    raise TypeError(
+                        f"Mixed types in quartet: expected all int (global IDs) "
+                        f"but got {type(taxon).__name__} for {taxon!r} in {quartet}. "
+                        f"Do not mix str and int within a single quartet."
+                    )
+
         # Check for duplicates
         if len(set(quartet)) != 4:
             raise ValueError(f"Quartet contains duplicates: {quartet}")
-        
+
         # Convert to global IDs
         global_ids = []
-        for taxon in quartet:
-            if isinstance(taxon, str):
-                # Map name to global ID
+        if use_names:
+            for taxon in quartet:
                 try:
                     global_id = self.forest.global_names.index(taxon)
                 except ValueError:
@@ -159,21 +221,16 @@ class Quartets:
                         f"Available taxa: {self.forest.global_names[:10]}..."
                     )
                 global_ids.append(global_id)
-            elif isinstance(taxon, (int, np.integer)):
-                # Validate global ID
-                if not 0 <= taxon < self.forest.n_global_taxa:
+        else:
+            for taxon in quartet:
+                taxon_int = int(taxon)
+                if not 0 <= taxon_int < self.forest.n_global_taxa:
                     raise ValueError(
-                        f"Global ID {taxon} out of range "
+                        f"Global ID {taxon_int} out of range "
                         f"[0, {self.forest.n_global_taxa})"
                     )
-                global_ids.append(int(taxon))
-            else:
-                raise TypeError(
-                    f"Quartet element must be str (taxon name) or "
-                    f"int (global ID), got {type(taxon)}"
-                )
-        
-        # Return sorted tuple
+                global_ids.append(taxon_int)
+
         return tuple(sorted(global_ids))
     
     def _hash_seed(self, seed_quartets: List[Tuple]) -> int:

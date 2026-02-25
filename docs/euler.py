@@ -28,7 +28,7 @@ def _():
     from itertools import combinations
 
     from SuchTree import SuchTree
-    from quarimo import Tree, Forest
+    from quarimo import Tree, Forest, Quartets
 
     treefile  = 'Projects/quarimo/data/gopher.tree'
     ensembleA = 'Projects/quarimo/data/iqtree_capsid.ufboot'
