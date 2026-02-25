@@ -93,6 +93,167 @@ if _CUDA_AVAILABLE:
             lca_local = li
         return euler_tour[tour_base + lca_local]
 
+    # ======================================================================== #
+    # RNG Device Functions for On-GPU Quartet Generation                       #
+    # ======================================================================== #
+
+    @cuda.jit(device=True)
+    def init_xorshift128(base_seed, offset, state):
+        """
+        Initialize XorShift128 RNG state.
+        
+        Parameters
+        ----------
+        base_seed : uint32
+            Base seed from hash of seed quartets
+        offset : int
+            Offset into random sequence (absolute_idx - n_seed)
+        state : array of 4 uint32
+            Output: initialized RNG state
+        
+        Notes
+        -----
+        Must match _quartets.py::_init_rng() exactly.
+        """
+        # Combine seed and offset
+        combined = np.uint64(base_seed) + np.uint64(offset)
+        
+        # Initialize 4-word state
+        state[0] = np.uint32(combined & 0xFFFFFFFF)
+        state[1] = np.uint32((combined >> 32) & 0xFFFFFFFF)
+        state[2] = np.uint32(0x9e3779b9)  # Golden ratio
+        state[3] = np.uint32(0x7f4a7c13)  # Arbitrary constant
+
+    @cuda.jit(device=True)
+    def xorshift128_next(state):
+        """
+        Generate next random number with XorShift128.
+        
+        Parameters
+        ----------
+        state : array of 4 uint32
+            RNG state (modified in place)
+        
+        Returns
+        -------
+        uint32
+            Random number
+        
+        Notes
+        -----
+        Must match _quartets.py::_sample_quartet() XorShift step exactly.
+        """
+        t = state[3]
+        s = state[0]
+        
+        # Rotate state
+        state[3] = state[2]
+        state[2] = state[1]
+        state[1] = s
+        
+        # XorShift operations
+        t ^= (t << np.uint32(11))
+        t ^= (t >> np.uint32(8))
+        state[0] = t ^ s ^ (s >> np.uint32(19))
+        
+        return state[0]
+
+    @cuda.jit(device=True)
+    def sample_4_unique_cuda(rng_state, n_taxa):
+        """
+        Sample 4 unique taxa indices using XorShift128.
+        
+        Parameters
+        ----------
+        rng_state : array of 4 uint32
+            XorShift128 state (modified in place)
+        n_taxa : int
+            Namespace size
+        
+        Returns
+        -------
+        tuple of 4 ints
+            Sampled indices (a, b, c, d) where a < b < c < d
+        
+        Notes
+        -----
+        Must match _quartets.py::_sample_quartet() exactly.
+        Uses rejection sampling to ensure uniqueness.
+        """
+        # Use local array for samples
+        samples = cuda.local.array(4, np.int32)
+        n_samples = 0
+        
+        # Sample with rejection until we have 4 unique values
+        while n_samples < 4:
+            # Generate candidate
+            rand_val = xorshift128_next(rng_state)
+            candidate = np.int32(rand_val % n_taxa)
+            
+            # Check uniqueness
+            is_unique = True
+            for i in range(n_samples):
+                if samples[i] == candidate:
+                    is_unique = False
+                    break
+            
+            if is_unique:
+                samples[n_samples] = candidate
+                n_samples += 1
+        
+        # Sort in-place using simple insertion sort (fast for 4 elements)
+        for i in range(1, 4):
+            key = samples[i]
+            j = i - 1
+            while j >= 0 and samples[j] > key:
+                samples[j + 1] = samples[j]
+                j -= 1
+            samples[j + 1] = key
+        
+        return samples[0], samples[1], samples[2], samples[3]
+
+    @cuda.jit(device=True)
+    def get_quartet_at_index(
+        absolute_idx,
+        seed_quartets,
+        n_seed,
+        rng_seed,
+        n_taxa
+    ):
+        """
+        Get quartet at absolute index in the deterministic sequence.
+        
+        Parameters
+        ----------
+        absolute_idx : int
+            Index in the infinite sequence
+        seed_quartets : array, shape (n_seed, 4)
+            Explicit seed quartets
+        n_seed : int
+            Number of seed quartets
+        rng_seed : uint32
+            Hash of seed quartets for RNG initialization
+        n_taxa : int
+            Namespace size for random generation
+        
+        Returns
+        -------
+        tuple of 4 ints
+            Quartet (a, b, c, d) where a < b < c < d
+        """
+        if absolute_idx < n_seed:
+            # Return seed quartet
+            a = seed_quartets[absolute_idx, 0]
+            b = seed_quartets[absolute_idx, 1]
+            c = seed_quartets[absolute_idx, 2]
+            d = seed_quartets[absolute_idx, 3]
+            return a, b, c, d
+        else:
+            # Generate random quartet
+            rng_state = cuda.local.array(4, np.uint32)
+            init_xorshift128(rng_seed, absolute_idx - n_seed, rng_state)
+            return sample_4_unique_cuda(rng_state, n_taxa)
+
     @cuda.jit
     def _quartet_counts_cuda(
             sorted_quartet_ids,
@@ -365,6 +526,281 @@ if _CUDA_AVAILABLE:
                      + all_root_distance[nb + ln3])
         S = leaf_rd_sum - (r_winner + r0 + r1 + r2) * 0.5
         steiner_out[qi, ti, topo] = S
+
+
+    # ======================================================================== #
+    # Unified Kernels with On-GPU Quartet Generation                          #
+    # ======================================================================== #
+
+    @cuda.jit
+    def quartet_counts_cuda_unified(
+        # Quartet generation parameters
+        seed_quartets,      # [n_seed, 4] int32 - explicit seed quartets
+        n_seed,             # int - number of seed quartets
+        offset,             # int - starting index in sequence
+        count,              # int - number of quartets to process
+        rng_seed,           # uint32 - hash of seed for RNG
+        n_global_taxa,      # int - namespace size
+        # Forest data (CSR format)
+        global_to_local,    # [n_trees, n_global_taxa] int32
+        all_first_occ,      # [total_nodes] int32
+        all_root_distance,  # [total_nodes] float64
+        all_euler_tour,     # [total_tour_len] int32
+        all_euler_depth,    # [total_tour_len] int32
+        all_sparse_table,   # [total_sp_size] int32
+        all_log2_table,     # [total_log2_size] int32
+        node_offsets,       # [n_trees + 1] int64
+        tour_offsets,       # [n_trees + 1] int64
+        sp_offsets,         # [n_trees + 1] int64
+        lg_offsets,         # [n_trees + 1] int64
+        sp_tour_widths,     # [n_trees] int32
+        # Output
+        counts              # [count, 3] int32 - topology counts
+    ):
+        """
+        Unified kernel: process quartets from deterministic sequence.
+        
+        For each local index i in [0, count):
+          absolute_idx = offset + i
+          if absolute_idx < n_seed:
+              quartet = seed_quartets[absolute_idx]  # Explicit
+          else:
+              quartet = generate_random(...)         # Random
+          
+          Process quartet across all trees
+        
+        Grid/Block Configuration
+        -------------------------
+        - Grid: 1D grid over quartets
+        - Threads per block: typically 256
+        - Each thread processes one quartet across all trees
+        """
+        local_idx = cuda.grid(1)
+        if local_idx >= count:
+            return
+        
+        # Determine absolute index in the infinite sequence
+        absolute_idx = offset + local_idx
+        
+        # Get quartet for this index
+        a, b, c, d = get_quartet_at_index(
+            absolute_idx,
+            seed_quartets,
+            n_seed,
+            rng_seed,
+            n_global_taxa
+        )
+        
+        # Get number of trees
+        n_trees = node_offsets.shape[0] - 1
+        
+        # Process this quartet across all trees
+        for tree_idx in range(n_trees):
+            # Get local IDs for this tree
+            local_a = global_to_local[tree_idx, a]
+            local_b = global_to_local[tree_idx, b]
+            local_c = global_to_local[tree_idx, c]
+            local_d = global_to_local[tree_idx, d]
+            
+            # Check if all 4 taxa present (-1 means absent)
+            if local_a == -1 or local_b == -1 or local_c == -1 or local_d == -1:
+                continue
+            
+            # Get offsets for this tree's data
+            node_start = node_offsets[tree_idx]
+            tour_start = tour_offsets[tree_idx]
+            sp_start = sp_offsets[tree_idx]
+            lg_start = lg_offsets[tree_idx]
+            sp_stride = sp_tour_widths[tree_idx]
+            
+            # Get first occurrences in Euler tour
+            occ_a = all_first_occ[node_start + local_a]
+            occ_b = all_first_occ[node_start + local_b]
+            occ_c = all_first_occ[node_start + local_c]
+            occ_d = all_first_occ[node_start + local_d]
+            
+            # Find LCAs using RMQ
+            left_ab = min(occ_a, occ_b)
+            right_ab = max(occ_a, occ_b)
+            lca_ab = _rmq_csr_cuda(
+                left_ab, right_ab,
+                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
+                tour_start, sp_start, lg_start, sp_stride
+            )
+            
+            left_cd = min(occ_c, occ_d)
+            right_cd = max(occ_c, occ_d)
+            lca_cd = _rmq_csr_cuda(
+                left_cd, right_cd,
+                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
+                tour_start, sp_start, lg_start, sp_stride
+            )
+            
+            left_ac = min(occ_a, occ_c)
+            right_ac = max(occ_a, occ_c)
+            lca_ac = _rmq_csr_cuda(
+                left_ac, right_ac,
+                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
+                tour_start, sp_start, lg_start, sp_stride
+            )
+            
+            # Get root distances for LCAs
+            rd_ab = all_root_distance[node_start + lca_ab]
+            rd_cd = all_root_distance[node_start + lca_cd]
+            rd_ac = all_root_distance[node_start + lca_ac]
+            
+            # Determine topology by comparing root distances
+            # Topology 0: (AB|CD), Topology 1: (AC|BD), Topology 2: (AD|BC)
+            if rd_ab >= rd_cd and rd_ab >= rd_ac:
+                topology = 0
+            elif rd_cd >= rd_ab and rd_cd >= rd_ac:
+                topology = 1
+            else:
+                topology = 2
+            
+            # Accumulate count
+            cuda.atomic.add(counts, (local_idx, topology), 1)
+
+    @cuda.jit
+    def quartet_steiner_cuda_unified(
+        # Quartet generation parameters
+        seed_quartets,      # [n_seed, 4] int32
+        n_seed,             # int
+        offset,             # int
+        count,              # int
+        rng_seed,           # uint32
+        n_global_taxa,      # int
+        # Forest data
+        global_to_local,    # [n_trees, n_global_taxa] int32
+        all_first_occ,      # [total_nodes] int32
+        all_root_distance,  # [total_nodes] float64
+        all_euler_tour,     # [total_tour_len] int32
+        all_euler_depth,    # [total_tour_len] int32
+        all_sparse_table,   # [total_sp_size] int32
+        all_log2_table,     # [total_log2_size] int32
+        node_offsets,       # [n_trees + 1] int64
+        tour_offsets,       # [n_trees + 1] int64
+        sp_offsets,         # [n_trees + 1] int64
+        lg_offsets,         # [n_trees + 1] int64
+        sp_tour_widths,     # [n_trees] int32
+        # Outputs
+        counts,             # [count, 3] int32
+        steiner_out         # [count, n_trees, 3] float64
+    ):
+        """
+        Unified kernel with Steiner distances.
+        
+        Same as quartet_counts_cuda_unified but also computes Steiner
+        spanning lengths for winning topologies.
+        """
+        local_idx = cuda.grid(1)
+        if local_idx >= count:
+            return
+        
+        # Determine absolute index and get quartet
+        absolute_idx = offset + local_idx
+        a, b, c, d = get_quartet_at_index(
+            absolute_idx, seed_quartets, n_seed, rng_seed, n_global_taxa
+        )
+        
+        n_trees = node_offsets.shape[0] - 1
+        
+        # Process across all trees
+        for tree_idx in range(n_trees):
+            # Get local IDs
+            local_a = global_to_local[tree_idx, a]
+            local_b = global_to_local[tree_idx, b]
+            local_c = global_to_local[tree_idx, c]
+            local_d = global_to_local[tree_idx, d]
+            
+            # Check presence
+            if local_a == -1 or local_b == -1 or local_c == -1 or local_d == -1:
+                continue
+            
+            # Get offsets
+            node_start = node_offsets[tree_idx]
+            tour_start = tour_offsets[tree_idx]
+            sp_start = sp_offsets[tree_idx]
+            lg_start = lg_offsets[tree_idx]
+            sp_stride = sp_tour_widths[tree_idx]
+            
+            # Get occurrences
+            occ_a = all_first_occ[node_start + local_a]
+            occ_b = all_first_occ[node_start + local_b]
+            occ_c = all_first_occ[node_start + local_c]
+            occ_d = all_first_occ[node_start + local_d]
+            
+            # Find all 6 LCAs for Steiner computation
+            lca_ab = _rmq_csr_cuda(
+                min(occ_a, occ_b), max(occ_a, occ_b),
+                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
+                tour_start, sp_start, lg_start, sp_stride
+            )
+            lca_cd = _rmq_csr_cuda(
+                min(occ_c, occ_d), max(occ_c, occ_d),
+                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
+                tour_start, sp_start, lg_start, sp_stride
+            )
+            lca_ac = _rmq_csr_cuda(
+                min(occ_a, occ_c), max(occ_a, occ_c),
+                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
+                tour_start, sp_start, lg_start, sp_stride
+            )
+            lca_bd = _rmq_csr_cuda(
+                min(occ_b, occ_d), max(occ_b, occ_d),
+                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
+                tour_start, sp_start, lg_start, sp_stride
+            )
+            lca_ad = _rmq_csr_cuda(
+                min(occ_a, occ_d), max(occ_a, occ_d),
+                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
+                tour_start, sp_start, lg_start, sp_stride
+            )
+            lca_bc = _rmq_csr_cuda(
+                min(occ_b, occ_c), max(occ_b, occ_c),
+                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
+                tour_start, sp_start, lg_start, sp_stride
+            )
+            
+            # Get root distances
+            rd_ab = all_root_distance[node_start + lca_ab]
+            rd_cd = all_root_distance[node_start + lca_cd]
+            rd_ac = all_root_distance[node_start + lca_ac]
+            rd_bd = all_root_distance[node_start + lca_bd]
+            rd_ad = all_root_distance[node_start + lca_ad]
+            rd_bc = all_root_distance[node_start + lca_bc]
+            
+            # Determine topology
+            if rd_ab >= rd_cd and rd_ab >= rd_ac:
+                topology = 0
+            elif rd_cd >= rd_ab and rd_cd >= rd_ac:
+                topology = 1
+            else:
+                topology = 2
+            
+            # Compute Steiner distance for winning topology
+            rd_a = all_root_distance[node_start + local_a]
+            rd_b = all_root_distance[node_start + local_b]
+            rd_c = all_root_distance[node_start + local_c]
+            rd_d = all_root_distance[node_start + local_d]
+            
+            leaf_sum = rd_a + rd_b + rd_c + rd_d
+            r0 = rd_ab + rd_cd
+            r1 = rd_ac + rd_bd
+            r2 = rd_ad + rd_bc
+            
+            if topology == 0:
+                r_winner = r0
+            elif topology == 1:
+                r_winner = r1
+            else:
+                r_winner = r2
+            
+            steiner = leaf_sum - (r_winner + r0 + r1 + r2) / 2.0
+            
+            # Store results
+            cuda.atomic.add(counts, (local_idx, topology), 1)
+            steiner_out[local_idx, tree_idx, topology] = steiner
 
 
 def _compute_cuda_grid(n_quartets, n_trees, threads_per_block=(16, 16)):

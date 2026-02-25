@@ -754,11 +754,32 @@ class Forest:
                 return counts_out, np.zeros((0, self.n_trees, 3), dtype=np.float64)
             return counts_out
 
-        # ── 2. Materialize quartets ──────────────────────────────────────
+        # ── 2. Resolve backend and log execution mode ─────────────────────
+        # Check for backend override from context manager
+        backend_override = get_backend_override()
+        if backend_override is not None:
+            backend = backend_override
+
+        try:
+            resolved_backend = resolve_backend(backend)
+        except ValueError as e:
+            # Backend not available, fall back to best available
+            logger.warning(str(e))
+            resolved_backend = get_best_backend()
+
+        # Log execution mode
+        mode_str = "Steiner" if steiner else "counts-only"
+        logger.info(f"quartet_topology({mode_str}, backend={resolved_backend!r})")
+
+        # ── 3. Dispatch to backend ────────────────────────────────────────
+        # CUDA backend uses unified kernel with on-GPU generation
+        if resolved_backend == "cuda":
+            return self._quartet_topology_cuda_unified(quartets, steiner)
+        
+        # CPU/Python backends materialize quartets to array
         # Quartets iterator yields (a, b, c, d) as global IDs, already sorted
         sorted_ids = np.array(list(quartets), dtype=np.int32)
-
-        # ── 3. Pre-allocate outputs and call kernel ──────────────────────
+        
         common_args = (
             sorted_ids,
             self.global_to_local,
@@ -777,208 +798,9 @@ class Forest:
             self.n_trees,
         )
 
-        # ── 3. Resolve backend and log execution mode ────────────────────
-        # Check for backend override from context manager
-        backend_override = get_backend_override()
-        if backend_override is not None:
-            backend = backend_override
-
-        try:
-            resolved_backend = resolve_backend(backend)
-        except ValueError as e:
-            # Backend not available, fall back to best available
-            logger.warning(str(e))
-            resolved_backend = get_best_backend()
-
-        # Log execution mode
-        mode_str = "Steiner" if steiner else "counts-only"
-        logger.info(f"quartet_topology({mode_str}, backend={resolved_backend!r})")
-
-        # ── 4. Dispatch to the selected backend ──────────────────────────
         counts_out = np.zeros((n_quartets, 3), dtype=np.int32)
 
-        if resolved_backend == "cuda":
-            # Track compilation status
-            kernel_key = f"cuda-{'steiner' if steiner else 'counts'}"
-            if _kernel_first_call.get(kernel_key, False):
-                logger.info(
-                    f"  Compiling {kernel_key} kernel (cached for future calls)"
-                )
-                _kernel_first_call[kernel_key] = False
-
-            # ── Log data transfer: Host → Device ─────────────────────────
-            # Calculate transfer sizes
-            tree_data_arrays = [
-                ("global_to_local", self.global_to_local),
-                ("all_first_occ", self.all_first_occ),
-                ("all_root_distance", self.all_root_distance),
-                ("all_euler_tour", self.all_euler_tour),
-                ("all_euler_depth", self.all_euler_depth),
-                ("all_sparse_table", self.all_sparse_table),
-                ("all_log2_table", self.all_log2_table),
-                ("node_offsets", self.node_offsets),
-                ("tour_offsets", self.tour_offsets),
-                ("sp_offsets", self.sp_offsets),
-                ("lg_offsets", self.lg_offsets),
-                ("sp_tour_widths", self.sp_tour_widths),
-            ]
-
-            query_data_arrays = [
-                ("sorted_quartet_ids", sorted_ids),
-                ("counts_out (zeros)", counts_out),
-            ]
-
-            tree_bytes = sum(arr.nbytes for _, arr in tree_data_arrays)
-            query_bytes = sum(arr.nbytes for _, arr in query_data_arrays)
-
-            logger.info(f"  Transferring data to GPU device:")
-            logger.info(
-                f"    Tree data: {len(tree_data_arrays)} arrays, "
-                f"{tree_bytes / (1024**2):.2f} MB"
-            )
-            logger.info(
-                f"      - global_to_local: {self.global_to_local.shape} {self.global_to_local.dtype}"
-            )
-            logger.info(
-                f"      - CSR packed arrays: {self.n_trees} trees, "
-                f"{self.all_sparse_table.size} sparse table entries"
-            )
-            logger.info(
-                f"    Query data: {len(query_data_arrays)} arrays, "
-                f"{query_bytes / (1024**2):.2f} MB"
-            )
-            logger.info(
-                f"      - sorted_quartet_ids: {sorted_ids.shape} {sorted_ids.dtype}"
-            )
-
-            if steiner:
-                steiner_bytes = n_quartets * self.n_trees * 3 * 8  # float64
-                logger.info(
-                    f"    Output arrays: {steiner_bytes / (1024**2):.2f} MB "
-                    f"(steiner_out {(n_quartets, self.n_trees, 3)} float64)"
-                )
-                total_bytes = tree_bytes + query_bytes + steiner_bytes
-            else:
-                total_bytes = tree_bytes + query_bytes
-
-            logger.info(f"    Total H→D transfer: {total_bytes / (1024**2):.2f} MB")
-
-            # Transfer data to GPU
-            d_sorted_ids = cuda.to_device(sorted_ids)
-            d_global_to_local = cuda.to_device(self.global_to_local)
-            d_all_first_occ = cuda.to_device(self.all_first_occ)
-            d_all_root_distance = cuda.to_device(self.all_root_distance)
-            d_all_euler_tour = cuda.to_device(self.all_euler_tour)
-            d_all_euler_depth = cuda.to_device(self.all_euler_depth)
-            d_all_sparse_table = cuda.to_device(self.all_sparse_table)
-            d_all_log2_table = cuda.to_device(self.all_log2_table)
-            d_node_offsets = cuda.to_device(self.node_offsets)
-            d_tour_offsets = cuda.to_device(self.tour_offsets)
-            d_sp_offsets = cuda.to_device(self.sp_offsets)
-            d_lg_offsets = cuda.to_device(self.lg_offsets)
-            d_sp_tour_widths = cuda.to_device(self.sp_tour_widths)
-            d_counts_out = cuda.to_device(counts_out)
-
-            # Compute grid dimensions
-            blocks_per_grid, threads_per_block = _compute_cuda_grid(
-                n_quartets, self.n_trees
-            )
-            total_threads = (
-                blocks_per_grid[0]
-                * threads_per_block[0]
-                * blocks_per_grid[1]
-                * threads_per_block[1]
-            )
-            active_threads = n_quartets * self.n_trees
-
-            logger.info(f"  Launching CUDA kernel:")
-            logger.info(
-                f"    Grid: {blocks_per_grid[0]}×{blocks_per_grid[1]} blocks, "
-                f"{threads_per_block[0]}×{threads_per_block[1]} threads/block"
-            )
-            logger.info(
-                f"    Total threads: {total_threads:,} "
-                f"(active: {active_threads:,}, idle: {total_threads - active_threads:,})"
-            )
-
-            if steiner:
-                steiner_out = np.zeros((n_quartets, self.n_trees, 3), dtype=np.float64)
-                d_steiner_out = cuda.to_device(steiner_out)
-
-                # Launch kernel
-                _quartet_steiner_cuda[blocks_per_grid, threads_per_block](
-                    d_sorted_ids,
-                    d_global_to_local,
-                    d_all_first_occ,
-                    d_all_root_distance,
-                    d_all_euler_tour,
-                    d_all_euler_depth,
-                    d_all_sparse_table,
-                    d_all_log2_table,
-                    d_node_offsets,
-                    d_tour_offsets,
-                    d_sp_offsets,
-                    d_lg_offsets,
-                    d_sp_tour_widths,
-                    n_quartets,
-                    self.n_trees,
-                    d_counts_out,
-                    d_steiner_out,
-                )
-
-                # Copy results back
-                result_bytes = counts_out.nbytes + steiner_out.nbytes
-                logger.info(f"  Transferring results from GPU device:")
-                logger.info(
-                    f"    counts_out: {counts_out.shape} {counts_out.dtype}, "
-                    f"{counts_out.nbytes / 1024:.1f} KB"
-                )
-                logger.info(
-                    f"    steiner_out: {steiner_out.shape} {steiner_out.dtype}, "
-                    f"{steiner_out.nbytes / (1024**2):.2f} MB"
-                )
-                logger.info(
-                    f"    Total D→H transfer: {result_bytes / (1024**2):.2f} MB"
-                )
-
-                d_counts_out.copy_to_host(counts_out)
-                d_steiner_out.copy_to_host(steiner_out)
-                return counts_out, steiner_out
-            else:
-                # Launch kernel
-                _quartet_counts_cuda[blocks_per_grid, threads_per_block](
-                    d_sorted_ids,
-                    d_global_to_local,
-                    d_all_first_occ,
-                    d_all_root_distance,
-                    d_all_euler_tour,
-                    d_all_euler_depth,
-                    d_all_sparse_table,
-                    d_all_log2_table,
-                    d_node_offsets,
-                    d_tour_offsets,
-                    d_sp_offsets,
-                    d_lg_offsets,
-                    d_sp_tour_widths,
-                    n_quartets,
-                    self.n_trees,
-                    d_counts_out,
-                )
-
-                # Copy results back
-                logger.info(f"  Transferring results from GPU device:")
-                logger.info(
-                    f"    counts_out: {counts_out.shape} {counts_out.dtype}, "
-                    f"{counts_out.nbytes / 1024:.1f} KB"
-                )
-                logger.info(
-                    f"    Total D→H transfer: {counts_out.nbytes / 1024:.1f} KB"
-                )
-
-                d_counts_out.copy_to_host(counts_out)
-                return counts_out
-
-        elif resolved_backend == "cpu-parallel":
+        if resolved_backend == "cpu-parallel":
             # Track compilation status
             kernel_key = f"cpu-parallel-{'steiner' if steiner else 'counts'}"
             if _kernel_first_call.get(kernel_key, False):
@@ -1009,6 +831,204 @@ class Forest:
             raise RuntimeError(
                 f"Internal error: unhandled backend {resolved_backend!r}"
             )
+
+    def _quartet_topology_cuda_unified(
+        self, quartets: Quartets, steiner: bool
+    ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+        """
+        GPU implementation using unified kernel with on-GPU quartet generation.
+        
+        This method leverages the Quartets class to generate quartets directly
+        on the GPU, avoiding the need to transfer large quartet arrays. The
+        unified kernel receives:
+        - seed quartets (small array)
+        - offset into the deterministic sequence
+        - count of quartets to generate
+        - RNG seed for random generation
+        
+        For explicit quartets (offset < len(seed)), uses seed array directly.
+        For random quartets (offset >= len(seed)), generates on-GPU using RNG.
+        
+        Parameters
+        ----------
+        quartets : Quartets
+            Quartet specification with seed and generation parameters
+        steiner : bool
+            Whether to compute Steiner distances
+        
+        Returns
+        -------
+        counts : ndarray, shape (n_quartets, 3)
+            Topology counts
+        steiner_distances : ndarray, shape (n_quartets, n_trees, 3), optional
+            Steiner distances (only if steiner=True)
+        """
+        from numba import cuda
+        
+        n_quartets = len(quartets)
+        
+        # Track compilation status
+        kernel_key = f"cuda-unified-{'steiner' if steiner else 'counts'}"
+        if _kernel_first_call.get(kernel_key, False):
+            logger.info(
+                f"  Compiling {kernel_key} kernel (cached for future calls)"
+            )
+            _kernel_first_call[kernel_key] = False
+        
+        # ── Prepare seed array (very small!) ──────────────────────────────
+        seed_array = np.array(quartets.seed, dtype=np.int32)
+        seed_bytes = seed_array.nbytes
+        
+        # Tree data arrays
+        tree_data_arrays = [
+            ("global_to_local", self.global_to_local),
+            ("all_first_occ", self.all_first_occ),
+            ("all_root_distance", self.all_root_distance),
+            ("all_euler_tour", self.all_euler_tour),
+            ("all_euler_depth", self.all_euler_depth),
+            ("all_sparse_table", self.all_sparse_table),
+            ("all_log2_table", self.all_log2_table),
+            ("node_offsets", self.node_offsets),
+            ("tour_offsets", self.tour_offsets),
+            ("sp_offsets", self.sp_offsets),
+            ("lg_offsets", self.lg_offsets),
+            ("sp_tour_widths", self.sp_tour_widths),
+        ]
+        
+        tree_bytes = sum(arr.nbytes for _, arr in tree_data_arrays)
+        
+        logger.info(f"  Transferring data to GPU device:")
+        logger.info(
+            f"    Tree data: {len(tree_data_arrays)} arrays, "
+            f"{tree_bytes / (1024**2):.2f} MB"
+        )
+        logger.info(
+            f"    Quartet seed: {seed_array.shape} {seed_array.dtype}, "
+            f"{seed_bytes} bytes"
+        )
+        logger.info(f"      Generates {n_quartets} quartets on GPU")
+        
+        # Calculate output size
+        if steiner:
+            output_bytes = (n_quartets * 3 * 4) + (n_quartets * self.n_trees * 3 * 8)
+            logger.info(
+                f"    Output arrays: {output_bytes / (1024**2):.2f} MB "
+                f"(counts + steiner)"
+            )
+        else:
+            output_bytes = n_quartets * 3 * 4
+            logger.info(
+                f"    Output arrays: {output_bytes / (1024**2):.2f} MB (counts only)"
+            )
+        
+        total_bytes = tree_bytes + seed_bytes + output_bytes
+        logger.info(f"    Total H→D transfer: {total_bytes / (1024**2):.2f} MB")
+        
+        # Log speedup from on-GPU generation
+        if n_quartets > len(quartets.seed):
+            traditional_quartet_bytes = n_quartets * 4 * 4  # 4 ints per quartet
+            speedup = traditional_quartet_bytes / seed_bytes
+            logger.info(
+                f"    On-GPU generation speedup: "
+                f"{speedup:.0f}× reduction in quartet data transfer"
+            )
+        
+        # ── Transfer data to GPU ──────────────────────────────────────────
+        d_seed_quartets = cuda.to_device(seed_array)
+        d_global_to_local = cuda.to_device(self.global_to_local)
+        d_all_first_occ = cuda.to_device(self.all_first_occ)
+        d_all_root_distance = cuda.to_device(self.all_root_distance)
+        d_all_euler_tour = cuda.to_device(self.all_euler_tour)
+        d_all_euler_depth = cuda.to_device(self.all_euler_depth)
+        d_all_sparse_table = cuda.to_device(self.all_sparse_table)
+        d_all_log2_table = cuda.to_device(self.all_log2_table)
+        d_node_offsets = cuda.to_device(self.node_offsets)
+        d_tour_offsets = cuda.to_device(self.tour_offsets)
+        d_sp_offsets = cuda.to_device(self.sp_offsets)
+        d_lg_offsets = cuda.to_device(self.lg_offsets)
+        d_sp_tour_widths = cuda.to_device(self.sp_tour_widths)
+        
+        # ── Allocate output ───────────────────────────────────────────────
+        counts_out = np.zeros((n_quartets, 3), dtype=np.int32)
+        d_counts = cuda.to_device(counts_out)
+        
+        if steiner:
+            steiner_out = np.zeros((n_quartets, self.n_trees, 3), dtype=np.float64)
+            d_steiner = cuda.to_device(steiner_out)
+        
+        # ── Launch unified kernel ─────────────────────────────────────────
+        threads_per_block = 256
+        blocks = (n_quartets + threads_per_block - 1) // threads_per_block
+        
+        logger.info(
+            f"  Launching kernel: {blocks} blocks × {threads_per_block} threads "
+            f"({n_quartets} active)"
+        )
+        
+        if steiner:
+            # Import unified Steiner kernel
+            from quarimo._cuda_kernels import quartet_steiner_cuda_unified
+            
+            quartet_steiner_cuda_unified[blocks, threads_per_block](
+                d_seed_quartets,
+                len(quartets.seed),
+                quartets.offset,
+                n_quartets,
+                quartets.rng_seed,
+                self.n_global_taxa,
+                d_global_to_local,
+                d_all_first_occ,
+                d_all_root_distance,
+                d_all_euler_tour,
+                d_all_euler_depth,
+                d_all_sparse_table,
+                d_all_log2_table,
+                d_node_offsets,
+                d_tour_offsets,
+                d_sp_offsets,
+                d_lg_offsets,
+                d_sp_tour_widths,
+                d_counts,
+                d_steiner,
+            )
+        else:
+            # Import unified counts kernel
+            from quarimo._cuda_kernels import quartet_counts_cuda_unified
+            
+            quartet_counts_cuda_unified[blocks, threads_per_block](
+                d_seed_quartets,
+                len(quartets.seed),
+                quartets.offset,
+                n_quartets,
+                quartets.rng_seed,
+                self.n_global_taxa,
+                d_global_to_local,
+                d_all_first_occ,
+                d_all_root_distance,
+                d_all_euler_tour,
+                d_all_euler_depth,
+                d_all_sparse_table,
+                d_all_log2_table,
+                d_node_offsets,
+                d_tour_offsets,
+                d_sp_offsets,
+                d_lg_offsets,
+                d_sp_tour_widths,
+                d_counts,
+            )
+        
+        # ── Copy results back to host ─────────────────────────────────────
+        logger.info(f"  Copying results back to host...")
+        counts_out = d_counts.copy_to_host()
+        
+        if steiner:
+            steiner_out = d_steiner.copy_to_host()
+            result_bytes = counts_out.nbytes + steiner_out.nbytes
+            logger.info(f"  D→H transfer: {result_bytes / (1024**2):.2f} MB")
+            return counts_out, steiner_out
+        else:
+            logger.info(f"  D→H transfer: {counts_out.nbytes / 1024:.1f} KB")
+            return counts_out
 
     def split_quartet_results_by_group(
         self, counts: np.ndarray, steiner_distances: Optional[np.ndarray]

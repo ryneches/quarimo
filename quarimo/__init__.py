@@ -67,6 +67,7 @@ __license__ = "MIT"
 # Main classes
 from ._forest import Forest
 from ._tree import Tree
+from ._quartets import Quartets
 
 # Context managers (user-facing utilities)
 from ._context import (
@@ -100,6 +101,7 @@ __all__ = [
     # Main classes
     "Forest",
     "Tree",
+    "Quartets",
     # Context managers
     "suppress_logger",
     "quiet",
