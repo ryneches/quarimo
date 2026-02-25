@@ -529,6 +529,42 @@ if _CUDA_AVAILABLE:
 
 
     # ======================================================================== #
+    # 1D Generation Kernel                                                    #
+    # ======================================================================== #
+
+    @cuda.jit
+    def generate_quartets_cuda(
+        seed_quartets,  # [n_seed, 4] int32
+        n_seed,         # int - number of seed quartets
+        offset,         # int - starting absolute index in the sequence
+        count,          # int - number of quartets to generate
+        rng_seed,       # uint32 - RNG seed
+        n_taxa,         # int - namespace size
+        quartets_out    # [count, 4] int32 - output device array
+    ):
+        """
+        1D generation kernel: materialise quartets from the deterministic sequence.
+
+        One thread per quartet. Thread qi writes the quartet at
+        ``absolute_idx = offset + qi`` to ``quartets_out[qi, :]``.
+
+        After this kernel, ``quartets_out`` can be passed to the 2D processing
+        kernels as a pre-generated seed array (``n_seed=count, offset=0``),
+        so each quartet is computed exactly once rather than once per tree.
+        """
+        qi = cuda.grid(1)
+        if qi >= count:
+            return
+        absolute_idx = offset + qi
+        a, b, c, d = get_quartet_at_index(
+            absolute_idx, seed_quartets, n_seed, rng_seed, n_taxa
+        )
+        quartets_out[qi, 0] = a
+        quartets_out[qi, 1] = b
+        quartets_out[qi, 2] = c
+        quartets_out[qi, 3] = d
+
+    # ======================================================================== #
     # Unified Kernels with On-GPU Quartet Generation                          #
     # ======================================================================== #
 

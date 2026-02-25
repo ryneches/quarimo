@@ -928,6 +928,7 @@ class Forest:
         """
         from quarimo._cuda_kernels import (
             _compute_cuda_grid,
+            generate_quartets_cuda,
             quartet_counts_cuda_unified,
             quartet_steiner_cuda_unified,
         )
@@ -1001,6 +1002,30 @@ class Forest:
                 batch_idx + 1, n_batches, bc, blocks, tpb,
             )
 
+            # ── Quartet source for the 2D processing kernel ────────────────
+            # If the batch contains any randomly-generated quartets, run a
+            # cheap 1D kernel first to materialise all bc quartets into a
+            # scratch array.  The 2D kernel then reads from that scratch array
+            # (n_seed=bc, offset=0) and takes the fast global-read path for
+            # every thread — identical to the deterministic case.
+            # Without this step, every (qi, ti) thread would independently run
+            # XorShift128 for the same qi, causing n_trees-fold RNG duplication.
+            batch_needs_rng = (batch_offset + bc > n_seed)
+            if batch_needs_rng:
+                d_quartet_batch = cuda.device_array((bc, 4), dtype=np.int32)
+                gen_blocks = (bc + 255) // 256
+                generate_quartets_cuda[gen_blocks, 256](
+                    d_seed_quartets, n_seed, batch_offset, bc, rng_seed,
+                    self.n_global_taxa, d_quartet_batch,
+                )
+                proc_seed = d_quartet_batch
+                proc_n_seed = bc
+                proc_offset = 0
+            else:
+                proc_seed = d_seed_quartets
+                proc_n_seed = n_seed
+                proc_offset = batch_offset
+
             # Zero-initialised counts (atomic.add requires it)
             d_counts_b = cuda.to_device(np.zeros((bc, 3), dtype=np.int32))
 
@@ -1009,7 +1034,7 @@ class Forest:
                 # _steiner_init_buf[:bc] is a contiguous view, no copy made on CPU.
                 d_steiner_b = cuda.to_device(_steiner_init_buf[:bc])
                 quartet_steiner_cuda_unified[blocks, tpb](
-                    d_seed_quartets, n_seed, batch_offset, bc, rng_seed,
+                    proc_seed, proc_n_seed, proc_offset, bc, rng_seed,
                     self.n_global_taxa,
                     d_gtl, d_fo, d_rd, d_et, d_ed, d_sp, d_lg,
                     d_no, d_to, d_so, d_lo, d_stw,
@@ -1022,7 +1047,7 @@ class Forest:
                 del d_steiner_b
             else:
                 quartet_counts_cuda_unified[blocks, tpb](
-                    d_seed_quartets, n_seed, batch_offset, bc, rng_seed,
+                    proc_seed, proc_n_seed, proc_offset, bc, rng_seed,
                     self.n_global_taxa,
                     d_gtl, d_fo, d_rd, d_et, d_ed, d_sp, d_lg,
                     d_no, d_to, d_so, d_lo, d_stw,
@@ -1030,6 +1055,8 @@ class Forest:
                 )
                 d_counts_b.copy_to_host(ary=counts_out[bs:bs + bc])
 
+            if batch_needs_rng:
+                del d_quartet_batch
             del d_counts_b
 
         total_bytes = counts_out.nbytes + (steiner_out.nbytes if steiner else 0)
