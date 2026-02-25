@@ -985,6 +985,11 @@ class Forest:
         n_seed = len(quartets.seed)
         rng_seed = quartets.rng_seed
 
+        # Pre-allocate a reusable host zeros buffer for steiner GPU init.
+        # Shared across all batches so we avoid one large allocation per batch.
+        if steiner:
+            _steiner_init_buf = np.zeros((batch_size, self.n_trees, 3), dtype=np.float64)
+
         for batch_idx in range(n_batches):
             bs = batch_idx * batch_size
             bc = min(batch_size, n_quartets - bs)
@@ -1000,10 +1005,9 @@ class Forest:
             d_counts_b = cuda.to_device(np.zeros((bc, 3), dtype=np.int32))
 
             if steiner:
-                # Steiner slots for absent taxa must be 0 (not garbage)
-                d_steiner_b = cuda.to_device(
-                    np.zeros((bc, self.n_trees, 3), dtype=np.float64)
-                )
+                # Use pre-allocated zeros buffer — no per-batch large CPU allocation.
+                # _steiner_init_buf[:bc] is a contiguous view, no copy made on CPU.
+                d_steiner_b = cuda.to_device(_steiner_init_buf[:bc])
                 quartet_steiner_cuda_unified[blocks, tpb](
                     d_seed_quartets, n_seed, batch_offset, bc, rng_seed,
                     self.n_global_taxa,
@@ -1011,8 +1015,10 @@ class Forest:
                     d_no, d_to, d_so, d_lo, d_stw,
                     d_counts_b, d_steiner_b,
                 )
-                counts_out[bs:bs + bc]  = d_counts_b.copy_to_host()
-                steiner_out[bs:bs + bc] = d_steiner_b.copy_to_host()
+                # copy_to_host(ary=...) writes directly into the pre-allocated output
+                # slice — one GPU→CPU transfer, no temporary array, no extra CPU memcpy.
+                d_counts_b.copy_to_host(ary=counts_out[bs:bs + bc])
+                d_steiner_b.copy_to_host(ary=steiner_out[bs:bs + bc])
                 del d_steiner_b
             else:
                 quartet_counts_cuda_unified[blocks, tpb](
@@ -1022,7 +1028,7 @@ class Forest:
                     d_no, d_to, d_so, d_lo, d_stw,
                     d_counts_b,
                 )
-                counts_out[bs:bs + bc] = d_counts_b.copy_to_host()
+                d_counts_b.copy_to_host(ary=counts_out[bs:bs + bc])
 
             del d_counts_b
 
