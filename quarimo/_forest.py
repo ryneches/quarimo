@@ -421,6 +421,11 @@ class Forest:
         logger.info("Packing arrays into CSR flat layout...")
         self._pack_csr()
 
+        # Upload tree structure to GPU once (if available)
+        self._d_tree = None
+        if _CUDA_AVAILABLE:
+            self._upload_to_gpu()
+
         # Log group statistics and Jaccard similarities
         self._log_group_statistics_method()
         self._log_jaccard_similarities_method()
@@ -444,6 +449,45 @@ class Forest:
         self.tree_to_group_idx = np.array(
             [group_to_idx[g] for g in self.group_labels], dtype=np.int32
         )
+
+    def _upload_to_gpu(self) -> None:
+        """Upload all CSR tree-structure arrays to the GPU once at construction time."""
+        tree_arrays = {
+            "global_to_local": self.global_to_local,
+            "all_first_occ":   self.all_first_occ,
+            "all_root_distance": self.all_root_distance,
+            "all_euler_tour":  self.all_euler_tour,
+            "all_euler_depth": self.all_euler_depth,
+            "all_sparse_table": self.all_sparse_table,
+            "all_log2_table":  self.all_log2_table,
+            "node_offsets":    self.node_offsets,
+            "tour_offsets":    self.tour_offsets,
+            "sp_offsets":      self.sp_offsets,
+            "lg_offsets":      self.lg_offsets,
+            "sp_tour_widths":  self.sp_tour_widths,
+        }
+        total_bytes = sum(a.nbytes for a in tree_arrays.values())
+        logger.info(
+            "Uploading %d tree arrays (%.2f MB) to GPU...",
+            len(tree_arrays),
+            total_bytes / (1024 ** 2),
+        )
+        self._d_tree = {name: cuda.to_device(arr) for name, arr in tree_arrays.items()}
+
+    def __del__(self) -> None:
+        """Free GPU device arrays when the Forest is garbage-collected."""
+        if getattr(self, "_d_tree", None) is None:
+            return
+        try:
+            # Only attempt cleanup when a CUDA context is still live.
+            # Importing cuda here avoids errors if numba was never initialised.
+            from numba import cuda as _cuda
+            if _cuda.is_available():
+                for arr in self._d_tree.values():
+                    del arr
+        except Exception:
+            pass
+        self._d_tree = None
 
     def _log_multifurcation_warning_method(
         self, n_multifurcating: int, multifurcating_indices: List[int]
@@ -875,78 +919,44 @@ class Forest:
             )
             _kernel_first_call[kernel_key] = False
         
-        # ── Prepare seed array (very small!) ──────────────────────────────
+        # ── Prepare seed array (very small, per-call) ─────────────────────
         seed_array = np.array(quartets.seed, dtype=np.int32)
         seed_bytes = seed_array.nbytes
-        
-        # Tree data arrays
-        tree_data_arrays = [
-            ("global_to_local", self.global_to_local),
-            ("all_first_occ", self.all_first_occ),
-            ("all_root_distance", self.all_root_distance),
-            ("all_euler_tour", self.all_euler_tour),
-            ("all_euler_depth", self.all_euler_depth),
-            ("all_sparse_table", self.all_sparse_table),
-            ("all_log2_table", self.all_log2_table),
-            ("node_offsets", self.node_offsets),
-            ("tour_offsets", self.tour_offsets),
-            ("sp_offsets", self.sp_offsets),
-            ("lg_offsets", self.lg_offsets),
-            ("sp_tour_widths", self.sp_tour_widths),
-        ]
-        
-        tree_bytes = sum(arr.nbytes for _, arr in tree_data_arrays)
-        
-        logger.info(f"  Transferring data to GPU device:")
+
         logger.info(
-            f"    Tree data: {len(tree_data_arrays)} arrays, "
-            f"{tree_bytes / (1024**2):.2f} MB"
+            f"  Transferring quartet seed to GPU: "
+            f"{seed_array.shape} {seed_array.dtype}, {seed_bytes} bytes "
+            f"(generates {n_quartets} quartets on GPU)"
         )
-        logger.info(
-            f"    Quartet seed: {seed_array.shape} {seed_array.dtype}, "
-            f"{seed_bytes} bytes"
-        )
-        logger.info(f"      Generates {n_quartets} quartets on GPU")
-        
+
         # Calculate output size
         if steiner:
             output_bytes = (n_quartets * 3 * 4) + (n_quartets * self.n_trees * 3 * 8)
             logger.info(
-                f"    Output arrays: {output_bytes / (1024**2):.2f} MB "
-                f"(counts + steiner)"
+                f"  Output arrays: {output_bytes / (1024**2):.2f} MB (counts + steiner)"
             )
         else:
             output_bytes = n_quartets * 3 * 4
             logger.info(
-                f"    Output arrays: {output_bytes / (1024**2):.2f} MB (counts only)"
+                f"  Output arrays: {output_bytes / (1024**2):.2f} MB (counts only)"
             )
-        
-        total_bytes = tree_bytes + seed_bytes + output_bytes
-        logger.info(f"    Total H→D transfer: {total_bytes / (1024**2):.2f} MB")
-        
-        # Log speedup from on-GPU generation
-        if n_quartets > len(quartets.seed):
-            traditional_quartet_bytes = n_quartets * 4 * 4  # 4 ints per quartet
-            speedup = traditional_quartet_bytes / seed_bytes
-            logger.info(
-                f"    On-GPU generation speedup: "
-                f"{speedup:.0f}× reduction in quartet data transfer"
-            )
-        
-        # ── Transfer data to GPU ──────────────────────────────────────────
+
+        # ── Upload per-call arrays (seed quartets only) ───────────────────
         d_seed_quartets = cuda.to_device(seed_array)
-        d_global_to_local = cuda.to_device(self.global_to_local)
-        d_all_first_occ = cuda.to_device(self.all_first_occ)
-        d_all_root_distance = cuda.to_device(self.all_root_distance)
-        d_all_euler_tour = cuda.to_device(self.all_euler_tour)
-        d_all_euler_depth = cuda.to_device(self.all_euler_depth)
-        d_all_sparse_table = cuda.to_device(self.all_sparse_table)
-        d_all_log2_table = cuda.to_device(self.all_log2_table)
-        d_node_offsets = cuda.to_device(self.node_offsets)
-        d_tour_offsets = cuda.to_device(self.tour_offsets)
-        d_sp_offsets = cuda.to_device(self.sp_offsets)
-        d_lg_offsets = cuda.to_device(self.lg_offsets)
-        d_sp_tour_widths = cuda.to_device(self.sp_tour_widths)
+
+        # ── Retrieve pre-uploaded tree arrays from constructor ────────────
+        d_global_to_local  = self._d_tree["global_to_local"]
+        d_all_first_occ    = self._d_tree["all_first_occ"]
+        d_all_root_distance = self._d_tree["all_root_distance"]
+        d_all_euler_tour   = self._d_tree["all_euler_tour"]
+        d_all_euler_depth  = self._d_tree["all_euler_depth"]
+        d_all_sparse_table = self._d_tree["all_sparse_table"]
+        d_all_log2_table   = self._d_tree["all_log2_table"]
+        d_node_offsets     = self._d_tree["node_offsets"]
+        d_tour_offsets     = self._d_tree["tour_offsets"]
+        d_sp_offsets       = self._d_tree["sp_offsets"]
+        d_lg_offsets       = self._d_tree["lg_offsets"]
+        d_sp_tour_widths   = self._d_tree["sp_tour_widths"]
         
         # ── Allocate output ───────────────────────────────────────────────
         counts_out = np.zeros((n_quartets, 3), dtype=np.int32)
