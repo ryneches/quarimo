@@ -957,18 +957,19 @@ class Forest:
             d_steiner = cuda.to_device(steiner_out)
         
         # ── Launch unified kernel ─────────────────────────────────────────
-        threads_per_block = 256
-        blocks = (n_quartets + threads_per_block - 1) // threads_per_block
-        
+        from quarimo._cuda_kernels import _compute_cuda_grid
+        blocks, threads_per_block = _compute_cuda_grid(n_quartets, self.n_trees)
+
         logger.info(
-            f"  Launching kernel: {blocks} blocks × {threads_per_block} threads "
-            f"({n_quartets} active)"
+            f"  Launching kernel: {blocks[0]}×{blocks[1]} blocks, "
+            f"{threads_per_block[0]}×{threads_per_block[1]} threads/block "
+            f"({n_quartets}×{self.n_trees} active)"
         )
-        
+
         if steiner:
             # Import unified Steiner kernel
             from quarimo._cuda_kernels import quartet_steiner_cuda_unified
-            
+
             quartet_steiner_cuda_unified[blocks, threads_per_block](
                 d_seed_quartets,
                 len(quartets.seed),
@@ -994,7 +995,7 @@ class Forest:
         else:
             # Import unified counts kernel
             from quarimo._cuda_kernels import quartet_counts_cuda_unified
-            
+
             quartet_counts_cuda_unified[blocks, threads_per_block](
                 d_seed_quartets,
                 len(quartets.seed),
