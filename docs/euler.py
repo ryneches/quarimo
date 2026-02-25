@@ -36,6 +36,7 @@ def _():
     ensembleC = 'Projects/quarimo/data/iqtree_rnapol1.ufboot'
     return (
         Forest,
+        Quartets,
         SuchTree,
         Tree,
         combinations,
@@ -141,12 +142,13 @@ def _(Forest, SuchTree, combinations, ensembleA, numpy):
 
 
 @app.cell
-def _(Forest, combinations, ensembleA, ensembleB, ensembleC, time):
+def _(Forest, Quartets, combinations, ensembleA, ensembleB, ensembleC, time):
     QFL = Forest( { 'A' : [ t for t in open( ensembleA ) ],
                     'B' : [ t for t in open( ensembleB ) ],
                     'C' : [ t for t in open( ensembleC ) ] } )
 
-    quartets = list( combinations( QFL.global_names, 4 ) )[:10000]
+    ql = list( combinations( QFL.global_names, 4 ) )
+    quartets = Quartets( QFL, seed=ql, count=len(ql) )
 
     print( f'Testing topologies of {len(quartets)} quartets in an ensemble of {QFL.n_trees}...' )
 
@@ -155,14 +157,9 @@ def _(Forest, combinations, ensembleA, ensembleB, ensembleC, time):
     t1 = time.time()
 
     elapsed = t1 - t0
-    problem_size = len(quartets)*QFL.n_treesoffline
+    problem_size = len(quartets)*QFL.n_trees
 
     print( f'Completed {problem_size} in {t1-t0:.2f} seconds at {problem_size/elapsed:.2f} quartets per second' )
-    return
-
-
-@app.cell
-def _():
     return
 
 
