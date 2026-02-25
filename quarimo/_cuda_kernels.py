@@ -624,24 +624,24 @@ if _CUDA_AVAILABLE:
             right_ab = max(occ_a, occ_b)
             lca_ab = _rmq_csr_cuda(
                 left_ab, right_ab,
-                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
-                tour_start, sp_start, lg_start, sp_stride
+                sp_start, sp_stride, all_sparse_table, all_euler_depth,
+                all_log2_table, lg_start, tour_start, all_euler_tour
             )
-            
+
             left_cd = min(occ_c, occ_d)
             right_cd = max(occ_c, occ_d)
             lca_cd = _rmq_csr_cuda(
                 left_cd, right_cd,
-                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
-                tour_start, sp_start, lg_start, sp_stride
+                sp_start, sp_stride, all_sparse_table, all_euler_depth,
+                all_log2_table, lg_start, tour_start, all_euler_tour
             )
-            
+
             left_ac = min(occ_a, occ_c)
             right_ac = max(occ_a, occ_c)
             lca_ac = _rmq_csr_cuda(
                 left_ac, right_ac,
-                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
-                tour_start, sp_start, lg_start, sp_stride
+                sp_start, sp_stride, all_sparse_table, all_euler_depth,
+                all_log2_table, lg_start, tour_start, all_euler_tour
             )
             
             # Get root distances for LCAs
@@ -733,33 +733,33 @@ if _CUDA_AVAILABLE:
             # Find all 6 LCAs for Steiner computation
             lca_ab = _rmq_csr_cuda(
                 min(occ_a, occ_b), max(occ_a, occ_b),
-                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
-                tour_start, sp_start, lg_start, sp_stride
+                sp_start, sp_stride, all_sparse_table, all_euler_depth,
+                all_log2_table, lg_start, tour_start, all_euler_tour
             )
             lca_cd = _rmq_csr_cuda(
                 min(occ_c, occ_d), max(occ_c, occ_d),
-                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
-                tour_start, sp_start, lg_start, sp_stride
+                sp_start, sp_stride, all_sparse_table, all_euler_depth,
+                all_log2_table, lg_start, tour_start, all_euler_tour
             )
             lca_ac = _rmq_csr_cuda(
                 min(occ_a, occ_c), max(occ_a, occ_c),
-                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
-                tour_start, sp_start, lg_start, sp_stride
+                sp_start, sp_stride, all_sparse_table, all_euler_depth,
+                all_log2_table, lg_start, tour_start, all_euler_tour
             )
             lca_bd = _rmq_csr_cuda(
                 min(occ_b, occ_d), max(occ_b, occ_d),
-                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
-                tour_start, sp_start, lg_start, sp_stride
+                sp_start, sp_stride, all_sparse_table, all_euler_depth,
+                all_log2_table, lg_start, tour_start, all_euler_tour
             )
             lca_ad = _rmq_csr_cuda(
                 min(occ_a, occ_d), max(occ_a, occ_d),
-                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
-                tour_start, sp_start, lg_start, sp_stride
+                sp_start, sp_stride, all_sparse_table, all_euler_depth,
+                all_log2_table, lg_start, tour_start, all_euler_tour
             )
             lca_bc = _rmq_csr_cuda(
                 min(occ_b, occ_c), max(occ_b, occ_c),
-                all_euler_tour, all_euler_depth, all_sparse_table, all_log2_table,
-                tour_start, sp_start, lg_start, sp_stride
+                sp_start, sp_stride, all_sparse_table, all_euler_depth,
+                all_log2_table, lg_start, tour_start, all_euler_tour
             )
             
             # Get root distances
