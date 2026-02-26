@@ -1,6 +1,6 @@
 """
-tree.py
-=============
+_tree.py
+========
 A single phylogenetic tree represented as a set of parallel numpy arrays,
 with O(1) LCA lookups via a sparse-table Range Minimum Query structure built
 on the Eulerian tour.

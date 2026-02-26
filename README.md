@@ -2,7 +2,9 @@
 
 **Quartet-based entropy analysis for detecting parallel evolution across phylogenetic tree ensembles.**
 
-*Quarimo* (from "quartet" + "mori" 森 = forest) uses cross-entropy products of quartet frequencies across bootstrap ensembles to estimate the likelihood of parallel evolution in phylogenetic analyses.
+*Quarimo* uses cross-entropy products of quartet frequencies across bootstrap ensembles to estimate the likelihood of parallel evolution.
+
+Quarimo is a made up word formed by smashing "quartet" and "mori" (森, forest) together.
 
 ## Features
 
@@ -11,7 +13,7 @@
 - **Memory efficient** - CSR-like flat-packed layout for large datasets
 - **Clean API** - Context managers for logging, warnings, and backend selection
 - **Well tested** - Comprehensive test suite with 83+ tests
-- **Type hints** - Full type annotations for better IDE support
+- **Type hints** - Full type annotations for IDE support
 
 ## Installation
 
@@ -162,6 +164,7 @@ The package supports three computational backends:
 - **CUDA**: GPU acceleration for large-scale analyses
 
 Typical speedups with numba:
+
 - CPU-parallel: 10-100x faster than Python
 - CUDA: 100-1000x faster than Python (depending on dataset size)
 

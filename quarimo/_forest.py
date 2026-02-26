@@ -1,6 +1,6 @@
 """
-phylo_tree_collection.py
-========================
+_forest.py
+==========
 A memory-efficient collection of phylogenetic trees in a CSR-like flat-packed
 layout, designed for bulk quartet topology queries and eventual GPU transfer.
 
