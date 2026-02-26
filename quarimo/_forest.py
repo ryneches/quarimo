@@ -454,23 +454,23 @@ class Forest:
         """Upload all CSR tree-structure arrays to the GPU once at construction time."""
         tree_arrays = {
             "global_to_local": self.global_to_local,
-            "all_first_occ":   self.all_first_occ,
+            "all_first_occ": self.all_first_occ,
             "all_root_distance": self.all_root_distance,
-            "all_euler_tour":  self.all_euler_tour,
+            "all_euler_tour": self.all_euler_tour,
             "all_euler_depth": self.all_euler_depth,
             "all_sparse_table": self.all_sparse_table,
-            "all_log2_table":  self.all_log2_table,
-            "node_offsets":    self.node_offsets,
-            "tour_offsets":    self.tour_offsets,
-            "sp_offsets":      self.sp_offsets,
-            "lg_offsets":      self.lg_offsets,
-            "sp_tour_widths":  self.sp_tour_widths,
+            "all_log2_table": self.all_log2_table,
+            "node_offsets": self.node_offsets,
+            "tour_offsets": self.tour_offsets,
+            "sp_offsets": self.sp_offsets,
+            "lg_offsets": self.lg_offsets,
+            "sp_tour_widths": self.sp_tour_widths,
         }
         total_bytes = sum(a.nbytes for a in tree_arrays.values())
         logger.info(
             "Uploading %d tree arrays (%.2f MB) to GPU...",
             len(tree_arrays),
-            total_bytes / (1024 ** 2),
+            total_bytes / (1024**2),
         )
         self._d_tree = {name: cuda.to_device(arr) for name, arr in tree_arrays.items()}
 
@@ -482,6 +482,7 @@ class Forest:
             # Only attempt cleanup when a CUDA context is still live.
             # Importing cuda here avoids errors if numba was never initialised.
             from numba import cuda as _cuda
+
             if _cuda.is_available():
                 for arr in self._d_tree.values():
                     del arr
@@ -623,16 +624,16 @@ class Forest:
         ----------
         quartets : Quartets
             A Quartets object specifying which quartets to analyze.
-            
+
             Use Quartets.from_list() for explicit quartet lists:
                 >>> from quarimo._quartets import Quartets
                 >>> q = Quartets.from_list(forest, [('A','B','C','D')])
                 >>> counts = forest.quartet_topology(q)
-            
+
             Use Quartets.random() for random sampling with GPU generation:
                 >>> q = Quartets.random(forest, count=1_000_000, seed=42)
                 >>> counts = forest.quartet_topology(q)  # 8-24× faster!
-            
+
             See quarimo._quartets.Quartets for complete documentation.
         steiner : bool, default False
             If True, also return per-tree Steiner distances for the winning
@@ -709,7 +710,7 @@ class Forest:
         Examples
         --------
         >>> from quarimo._quartets import Quartets
-        
+
         Single quartet:
 
         >>> q = Quartets.from_list(forest, [('A', 'B', 'C', 'D')])
@@ -732,9 +733,9 @@ class Forest:
         >>> counts, dists = forest.quartet_topology(q, steiner=True)
         >>> print(dists.shape)
         (3, 20, 3)          # n_quartets × n_trees × 3 topologies
-        
+
         Random sampling (8-24× faster on GPU):
-        
+
         >>> q = Quartets.random(forest, count=1_000_000, seed=42)
         >>> counts = forest.quartet_topology(q)
         >>> print(counts.shape)
@@ -790,7 +791,7 @@ class Forest:
                 f"Use Quartets.from_list(forest, your_quartets) or "
                 f"Quartets.random(forest, count=N)."
             )
-        
+
         n_quartets = len(quartets)
         if n_quartets == 0:
             counts_out = np.zeros((0, 3), dtype=np.int32)
@@ -819,11 +820,11 @@ class Forest:
         # CUDA backend uses unified kernel with on-GPU generation
         if resolved_backend == "cuda":
             return self._quartet_topology_cuda_unified(quartets, steiner)
-        
+
         # CPU/Python backends materialize quartets to array
         # Quartets iterator yields (a, b, c, d) as global IDs, already sorted
         sorted_ids = np.array(list(quartets), dtype=np.int32)
-        
+
         common_args = (
             sorted_ids,
             self.global_to_local,
@@ -946,23 +947,26 @@ class Forest:
         d_seed_quartets = cuda.to_device(seed_array)
         logger.info(
             "  Quartet seed: %s %s, %d bytes → generates %d quartets on GPU",
-            seed_array.shape, seed_array.dtype, seed_array.nbytes, n_quartets,
+            seed_array.shape,
+            seed_array.dtype,
+            seed_array.nbytes,
+            n_quartets,
         )
 
         # ── Pre-uploaded tree arrays ───────────────────────────────────────
         dt = self._d_tree
-        d_gtl  = dt["global_to_local"]
-        d_fo   = dt["all_first_occ"]
-        d_rd   = dt["all_root_distance"]
-        d_et   = dt["all_euler_tour"]
-        d_ed   = dt["all_euler_depth"]
-        d_sp   = dt["all_sparse_table"]
-        d_lg   = dt["all_log2_table"]
-        d_no   = dt["node_offsets"]
-        d_to   = dt["tour_offsets"]
-        d_so   = dt["sp_offsets"]
-        d_lo   = dt["lg_offsets"]
-        d_stw  = dt["sp_tour_widths"]
+        d_gtl = dt["global_to_local"]
+        d_fo = dt["all_first_occ"]
+        d_rd = dt["all_root_distance"]
+        d_et = dt["all_euler_tour"]
+        d_ed = dt["all_euler_depth"]
+        d_sp = dt["all_sparse_table"]
+        d_lg = dt["all_log2_table"]
+        d_no = dt["node_offsets"]
+        d_to = dt["tour_offsets"]
+        d_so = dt["sp_offsets"]
+        d_lo = dt["lg_offsets"]
+        d_stw = dt["sp_tour_widths"]
 
         # ── Batch size: how many quartets' output fits in free VRAM ───────
         batch_size = self._cuda_batch_size(steiner)
@@ -971,7 +975,7 @@ class Forest:
         bpq = self._cuda_output_bytes_per_quartet(steiner)
         logger.info(
             "  Output: %.2f MB total, batch_size=%d (%d batch%s)",
-            n_quartets * bpq / (1024 ** 2),
+            n_quartets * bpq / (1024**2),
             batch_size,
             n_batches,
             "es" if n_batches != 1 else "",
@@ -989,7 +993,9 @@ class Forest:
         # Pre-allocate a reusable host zeros buffer for steiner GPU init.
         # Shared across all batches so we avoid one large allocation per batch.
         if steiner:
-            _steiner_init_buf = np.zeros((batch_size, self.n_trees, 3), dtype=np.float64)
+            _steiner_init_buf = np.zeros(
+                (batch_size, self.n_trees, 3), dtype=np.float64
+            )
 
         for batch_idx in range(n_batches):
             bs = batch_idx * batch_size
@@ -999,7 +1005,11 @@ class Forest:
             blocks, tpb = _compute_cuda_grid(bc, self.n_trees)
             logger.info(
                 "  Batch %d/%d: %d quartets, %s blocks × %s threads/block",
-                batch_idx + 1, n_batches, bc, blocks, tpb,
+                batch_idx + 1,
+                n_batches,
+                bc,
+                blocks,
+                tpb,
             )
 
             # ── Quartet source for the 2D processing kernel ────────────────
@@ -1010,13 +1020,18 @@ class Forest:
             # every thread — identical to the deterministic case.
             # Without this step, every (qi, ti) thread would independently run
             # XorShift128 for the same qi, causing n_trees-fold RNG duplication.
-            batch_needs_rng = (batch_offset + bc > n_seed)
+            batch_needs_rng = batch_offset + bc > n_seed
             if batch_needs_rng:
                 d_quartet_batch = cuda.device_array((bc, 4), dtype=np.int32)
                 gen_blocks = (bc + 255) // 256
                 generate_quartets_cuda[gen_blocks, 256](
-                    d_seed_quartets, n_seed, batch_offset, bc, rng_seed,
-                    self.n_global_taxa, d_quartet_batch,
+                    d_seed_quartets,
+                    n_seed,
+                    batch_offset,
+                    bc,
+                    rng_seed,
+                    self.n_global_taxa,
+                    d_quartet_batch,
                 )
                 proc_seed = d_quartet_batch
                 proc_n_seed = bc
@@ -1033,34 +1048,68 @@ class Forest:
                 # Use pre-allocated zeros buffer — no per-batch large CPU allocation.
                 # _steiner_init_buf[:bc] is a contiguous view, no copy made on CPU.
                 d_steiner_b = cuda.to_device(_steiner_init_buf[:bc])
+                logger.info("  🖥 launching Steiner kernel...")
                 quartet_steiner_cuda_unified[blocks, tpb](
-                    proc_seed, proc_n_seed, proc_offset, bc, rng_seed,
+                    proc_seed,
+                    proc_n_seed,
+                    proc_offset,
+                    bc,
+                    rng_seed,
                     self.n_global_taxa,
-                    d_gtl, d_fo, d_rd, d_et, d_ed, d_sp, d_lg,
-                    d_no, d_to, d_so, d_lo, d_stw,
-                    d_counts_b, d_steiner_b,
+                    d_gtl,
+                    d_fo,
+                    d_rd,
+                    d_et,
+                    d_ed,
+                    d_sp,
+                    d_lg,
+                    d_no,
+                    d_to,
+                    d_so,
+                    d_lo,
+                    d_stw,
+                    d_counts_b,
+                    d_steiner_b,
                 )
+                logger.info("  💾 computation complete, moving data...")
                 # copy_to_host(ary=...) writes directly into the pre-allocated output
                 # slice — one GPU→CPU transfer, no temporary array, no extra CPU memcpy.
-                d_counts_b.copy_to_host(ary=counts_out[bs:bs + bc])
-                d_steiner_b.copy_to_host(ary=steiner_out[bs:bs + bc])
+                d_counts_b.copy_to_host(ary=counts_out[bs : bs + bc])
+                d_steiner_b.copy_to_host(ary=steiner_out[bs : bs + bc])
                 del d_steiner_b
             else:
+                logger.info("  🖥 launching Steiner kernel...")
+
                 quartet_counts_cuda_unified[blocks, tpb](
-                    proc_seed, proc_n_seed, proc_offset, bc, rng_seed,
+                    proc_seed,
+                    proc_n_seed,
+                    proc_offset,
+                    bc,
+                    rng_seed,
                     self.n_global_taxa,
-                    d_gtl, d_fo, d_rd, d_et, d_ed, d_sp, d_lg,
-                    d_no, d_to, d_so, d_lo, d_stw,
+                    d_gtl,
+                    d_fo,
+                    d_rd,
+                    d_et,
+                    d_ed,
+                    d_sp,
+                    d_lg,
+                    d_no,
+                    d_to,
+                    d_so,
+                    d_lo,
+                    d_stw,
                     d_counts_b,
                 )
-                d_counts_b.copy_to_host(ary=counts_out[bs:bs + bc])
+                logger.info("  💾 computation complete, moving data...")
+                d_counts_b.copy_to_host(ary=counts_out[bs : bs + bc])
 
             if batch_needs_rng:
                 del d_quartet_batch
             del d_counts_b
 
         total_bytes = counts_out.nbytes + (steiner_out.nbytes if steiner else 0)
-        logger.info("  D→H total: %.2f MB", total_bytes / (1024 ** 2))
+        logger.info("  D→H total: %.2f MB", total_bytes / (1024**2))
 
         if steiner:
             return counts_out, steiner_out
