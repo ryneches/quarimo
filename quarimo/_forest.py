@@ -990,13 +990,6 @@ class Forest:
         n_seed = len(quartets.seed)
         rng_seed = quartets.rng_seed
 
-        # Pre-allocate a reusable host zeros buffer for steiner GPU init.
-        # Shared across all batches so we avoid one large allocation per batch.
-        if steiner:
-            _steiner_init_buf = np.zeros(
-                (batch_size, self.n_trees, 3), dtype=np.float64
-            )
-
         for batch_idx in range(n_batches):
             bs = batch_idx * batch_size
             bc = min(batch_size, n_quartets - bs)
@@ -1045,9 +1038,12 @@ class Forest:
             d_counts_b = cuda.to_device(np.zeros((bc, 3), dtype=np.int32))
 
             if steiner:
-                # Use pre-allocated zeros buffer — no per-batch large CPU allocation.
-                # _steiner_init_buf[:bc] is a contiguous view, no copy made on CPU.
-                d_steiner_b = cuda.to_device(_steiner_init_buf[:bc])
+                # Allocate device array directly — no H2D init transfer needed.
+                # The kernel writes all 3 topology slots explicitly (zeros for
+                # non-winners and absent-taxa), so no pre-initialisation required.
+                d_steiner_b = cuda.device_array(
+                    (bc, self.n_trees, 3), dtype=np.float64
+                )
                 logger.info("  🖥 launching Steiner kernel...")
                 quartet_steiner_cuda_unified[blocks, tpb](
                     proc_seed,
@@ -1071,6 +1067,7 @@ class Forest:
                     d_counts_b,
                     d_steiner_b,
                 )
+                cuda.synchronize()
                 logger.info("  💾 computation complete, moving data...")
                 # copy_to_host(ary=...) writes directly into the pre-allocated output
                 # slice — one GPU→CPU transfer, no temporary array, no extra CPU memcpy.
@@ -1101,6 +1098,7 @@ class Forest:
                     d_stw,
                     d_counts_b,
                 )
+                cuda.synchronize()
                 logger.info("  💾 computation complete, moving data...")
                 d_counts_b.copy_to_host(ary=counts_out[bs : bs + bc])
 
