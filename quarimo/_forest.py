@@ -1070,7 +1070,7 @@ class Forest:
                 cuda.synchronize()
                 time1 = time()
                 logger.info(
-                    "  💾 computation completed in {time1-time0} seconds, moving data..."
+                    f"  💾 computation completed in {time1 - time0} seconds, moving data..."
                 )
                 # copy_to_host(ary=...) writes directly into the pre-allocated output
                 # slice — one GPU→CPU transfer, no temporary array, no extra CPU memcpy.
@@ -1104,7 +1104,7 @@ class Forest:
                 cuda.synchronize()
                 time1 = time()
                 logger.info(
-                    "  💾 computation completed in {time1-time0} seconds, moving data..."
+                    f"  💾 computation completed in {time1 - time0} seconds, moving data..."
                 )
                 d_counts_b.copy_to_host(ary=counts_out[bs : bs + bc])
 
