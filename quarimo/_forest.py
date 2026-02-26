@@ -128,6 +128,7 @@ arrays.
 
 import hashlib
 import logging
+from time import time
 from itertools import combinations
 from typing import Union, List, Tuple, Optional, Dict, Any
 import numpy as np
@@ -1041,10 +1042,9 @@ class Forest:
                 # Allocate device array directly — no H2D init transfer needed.
                 # The kernel writes all 3 topology slots explicitly (zeros for
                 # non-winners and absent-taxa), so no pre-initialisation required.
-                d_steiner_b = cuda.device_array(
-                    (bc, self.n_trees, 3), dtype=np.float64
-                )
-                logger.info("  🖥 launching Steiner kernel...")
+                d_steiner_b = cuda.device_array((bc, self.n_trees, 3), dtype=np.float64)
+                logger.info("  🖥  launching Steiner kernel...")
+                time0 = time()
                 quartet_steiner_cuda_unified[blocks, tpb](
                     proc_seed,
                     proc_n_seed,
@@ -1068,15 +1068,18 @@ class Forest:
                     d_steiner_b,
                 )
                 cuda.synchronize()
-                logger.info("  💾 computation complete, moving data...")
+                time1 = time()
+                logger.info(
+                    "  💾 computation completed in {time1-time0} seconds, moving data..."
+                )
                 # copy_to_host(ary=...) writes directly into the pre-allocated output
                 # slice — one GPU→CPU transfer, no temporary array, no extra CPU memcpy.
                 d_counts_b.copy_to_host(ary=counts_out[bs : bs + bc])
                 d_steiner_b.copy_to_host(ary=steiner_out[bs : bs + bc])
                 del d_steiner_b
             else:
-                logger.info("  🖥 launching Steiner kernel...")
-
+                logger.info("  🖥  launching Steiner kernel...")
+                time0 = time()
                 quartet_counts_cuda_unified[blocks, tpb](
                     proc_seed,
                     proc_n_seed,
@@ -1099,7 +1102,10 @@ class Forest:
                     d_counts_b,
                 )
                 cuda.synchronize()
-                logger.info("  💾 computation complete, moving data...")
+                time1 = time()
+                logger.info(
+                    "  💾 computation completed in {time1-time0} seconds, moving data..."
+                )
                 d_counts_b.copy_to_host(ary=counts_out[bs : bs + bc])
 
             if batch_needs_rng:
