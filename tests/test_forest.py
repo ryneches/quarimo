@@ -862,7 +862,7 @@ class TestQuartetTopology:
             Quartets.from_list(basic_collection, [("A", "B", "C", "D")])
         )
         assert isinstance(counts, np.ndarray)
-        assert counts.shape == (1, 3)
+        assert counts.shape == (1, 1, 3)
         assert counts.dtype == np.int32
 
     def test_bulk_counts_shape_and_dtype(self, mixed_collection):
@@ -870,7 +870,7 @@ class TestQuartetTopology:
             Quartets.from_list(mixed_collection, self.BULK_QUARTETS)
         )
         assert isinstance(counts, np.ndarray)
-        assert counts.shape == (3, 3)
+        assert counts.shape == (3, 1, 3)
         assert counts.dtype == np.int32
 
     def test_steiner_returns_tuple(self, mixed_collection):
@@ -883,14 +883,14 @@ class TestQuartetTopology:
         counts, _ = mixed_collection.quartet_topology(
             Quartets.from_list(mixed_collection, self.BULK_QUARTETS), steiner=True
         )
-        assert counts.shape == (3, 3)
+        assert counts.shape == (3, 1, 3)
         assert counts.dtype == np.int32
 
     def test_steiner_distances_shape_and_dtype(self, mixed_collection):
         _, dists = mixed_collection.quartet_topology(
             Quartets.from_list(mixed_collection, self.BULK_QUARTETS), steiner=True
         )
-        assert dists.shape == (3, mixed_collection.n_trees, 3)
+        assert dists.shape == (3, 1, 3)
         assert dists.dtype == np.float64
 
     def test_single_quartet_steiner_shapes(self, basic_collection):
@@ -898,8 +898,8 @@ class TestQuartetTopology:
             Quartets.from_list(basic_collection, [("A", "B", "C", "D")]),
             steiner=True,
         )
-        assert counts.shape == (1, 3)
-        assert dists.shape == (1, basic_collection.n_trees, 3)
+        assert counts.shape == (1, 1, 3)
+        assert dists.shape == (1, 1, 3)
 
     # ── steiner=False correctness ────────────────────────────────────────── #
 
@@ -922,9 +922,9 @@ class TestQuartetTopology:
             ]
         )
         counts = c.quartet_topology(Quartets.from_list(c, [("A", "B", "C", "D")]))
-        assert counts[0, 0] == 2
-        assert counts[0, 1] == 2
-        assert counts[0, 2] == 1
+        assert counts[0, 0, 0] == 2
+        assert counts[0, 0, 1] == 2
+        assert counts[0, 0, 2] == 1
 
     def test_absent_taxon_excluded(self):
         c = Forest(
@@ -954,9 +954,9 @@ class TestQuartetTopology:
                 newicks.append("((A:1,D:1):1,(B:1,C:1):1);")
         c = Forest(newicks)
         counts = c.quartet_topology(Quartets.from_list(c, [("A", "B", "C", "D")]))
-        assert counts[0, 0] == 34
-        assert counts[0, 1] == 33
-        assert counts[0, 2] == 33
+        assert counts[0, 0, 0] == 34
+        assert counts[0, 0, 1] == 33
+        assert counts[0, 0, 2] == 33
         assert int(counts[0].sum()) == 100
 
     def test_counts_match_individual_phylotree_calls(self, basic_collection):
@@ -978,7 +978,7 @@ class TestQuartetTopology:
             if not all(x in tree._name_index for x in quartet):
                 continue
             individual[topo_map[tree.quartet_topology(*quartet)]] += 1
-        np.testing.assert_array_equal(counts[0], individual)
+        np.testing.assert_array_equal(counts[0, 0], individual)
 
     def test_permutation_invariance(self, basic_collection):
         ref = basic_collection.quartet_topology(
@@ -1059,18 +1059,8 @@ class TestQuartetTopology:
         )
         np.testing.assert_array_equal(counts_s, counts_only)
 
-    def test_steiner_at_most_one_nonzero_per_qi_ti_row(self, mixed_collection):
-        """Each (qi, ti) row has at most one non-zero Steiner entry."""
-        _, dists = mixed_collection.quartet_topology(
-            Quartets.from_list(mixed_collection, self.BULK_QUARTETS), steiner=True
-        )
-        for qi in range(len(self.BULK_QUARTETS)):
-            for ti in range(mixed_collection.n_trees):
-                nz = int((dists[qi, ti] > 0).sum())
-                assert nz <= 1, f"qi={qi} ti={ti}: expected ≤1 non-zero, got {nz}"
-
     def test_steiner_nonzero_in_winning_topology_column(self):
-        """Non-zero Steiner sits in the column matching the winning topology."""
+        """Each topology's Steiner sum is non-zero when trees vote for it."""
         c = Forest(
             [
                 "((A:1,B:1):1,(C:1,D:1):1);",  # topo 0
@@ -1078,13 +1068,18 @@ class TestQuartetTopology:
                 "((A:1,D:1):1,(B:1,C:1):1);",  # topo 2
             ]
         )
-        _, dists = c.quartet_topology(
+        counts, dists = c.quartet_topology(
             Quartets.from_list(c, [("A", "B", "C", "D")]), steiner=True
         )
-        # dists shape (1, 3, 3): qi=0, ti=0..2
-        assert dists[0, 0, 0] > 0 and dists[0, 0, 1] == 0 and dists[0, 0, 2] == 0
-        assert dists[0, 1, 0] == 0 and dists[0, 1, 1] > 0 and dists[0, 1, 2] == 0
-        assert dists[0, 2, 0] == 0 and dists[0, 2, 1] == 0 and dists[0, 2, 2] > 0
+        # dists shape (1, 1, 3): 1 quartet, 1 group, 3 topologies
+        # Each topology has exactly one tree voting for it → all slots non-zero
+        assert dists.shape == (1, 1, 3)
+        assert counts[0, 0, 0] == 1
+        assert counts[0, 0, 1] == 1
+        assert counts[0, 0, 2] == 1
+        assert dists[0, 0, 0] > 0
+        assert dists[0, 0, 1] > 0
+        assert dists[0, 0, 2] > 0
 
     def test_steiner_all_values_non_negative(self, mixed_collection):
         _, dists = mixed_collection.quartet_topology(
@@ -1093,7 +1088,7 @@ class TestQuartetTopology:
         assert np.all(dists >= 0.0)
 
     def test_steiner_column_sum_over_count_gives_mean(self):
-        """dists[qi, :, k].sum() / counts[qi, k] == mean Steiner for topo k."""
+        """dists[qi, gi, k] / counts[qi, gi, k] == mean Steiner for topo k."""
         c = Forest(
             [
                 "((A:1,B:1):1,(C:1,D:1):1);",  # topo 0, S=6
@@ -1104,8 +1099,10 @@ class TestQuartetTopology:
         counts, dists = c.quartet_topology(
             Quartets.from_list(c, [("A", "B", "C", "D")]), steiner=True
         )
-        np.testing.assert_allclose(dists[0, :, 0].sum() / counts[0, 0], 9.0, rtol=1e-10)
-        np.testing.assert_allclose(dists[0, :, 1].sum() / counts[0, 1], 6.0, rtol=1e-10)
+        # dists[0, 0, 0] = sum of Steiner for topo 0 = 6+12=18, counts=2, mean=9
+        # dists[0, 0, 1] = Steiner for topo 1 = 6, counts=1, mean=6
+        np.testing.assert_allclose(dists[0, 0, 0] / counts[0, 0, 0], 9.0, rtol=1e-10)
+        np.testing.assert_allclose(dists[0, 0, 1] / counts[0, 0, 1], 6.0, rtol=1e-10)
 
     def test_steiner_values_match_phylotree_balanced_equal(self):
         nwk = "((A:1,B:1):1,(C:1,D:1):1);"
@@ -1168,23 +1165,29 @@ class TestQuartetTopology:
         np.testing.assert_allclose(got, expected, rtol=1e-10)
 
     def test_steiner_multi_tree_all_match_phylotree(self, mixed_collection):
-        """All trees in a multi-tree collection match per-tree PhyloTree."""
+        """Group Steiner sums match accumulated per-tree Steiner computations."""
         _, dists = mixed_collection.quartet_topology(
             Quartets.from_list(mixed_collection, [("A", "B", "C", "D")]),
             steiner=True,
         )
-        for ti, tree in enumerate(mixed_collection._trees):
+        # dists.shape == (1, 1, 3): 1 quartet, 1 group, 3 topologies
+        n0, n1, n2, n3 = "A", "B", "C", "D"
+        topo_map = {
+            frozenset({frozenset({n0, n1}), frozenset({n2, n3})}): 0,
+            frozenset({frozenset({n0, n2}), frozenset({n1, n3})}): 1,
+            frozenset({frozenset({n0, n3}), frozenset({n1, n2})}): 2,
+        }
+        expected_sums = np.zeros(3, dtype=np.float64)
+        for tree in mixed_collection._trees:
             if tree._name_index is None:
                 tree._build_name_index()
-            if not all(x in tree._name_index for x in "ABCD"):
+            if not all(x in tree._name_index for x in (n0, n1, n2, n3)):
                 continue
-            _, expected_S = tree.quartet_topology(
-                "A", "B", "C", "D", return_steiner=True
+            topo_key, expected_S = tree.quartet_topology(
+                n0, n1, n2, n3, return_steiner=True
             )
-            got_S = float(dists[0, ti, np.argmax(dists[0, ti])])
-            np.testing.assert_allclose(
-                got_S, expected_S, rtol=1e-10, err_msg=f"Steiner mismatch for ti={ti}"
-            )
+            expected_sums[topo_map[topo_key]] += expected_S
+        np.testing.assert_allclose(dists[0, 0], expected_sums, rtol=1e-10)
 
     def test_steiner_permutation_invariance(self, mixed_collection):
         ref_c, ref_d = mixed_collection.quartet_topology(
@@ -1205,26 +1208,27 @@ class TestQuartetTopology:
     # ── absent taxon handling ─────────────────────────────────────────────── #
 
     def test_absent_taxon_steiner_rows_are_zero(self, mixed_collection):
-        """Trees lacking a taxon contribute 0.0 to the Steiner array."""
-        _, dists = mixed_collection.quartet_topology(
+        """Trees lacking a taxon do not contribute to the group Steiner sum."""
+        counts, dists = mixed_collection.quartet_topology(
             Quartets.from_list(mixed_collection, [("A", "B", "C", "E")]),
             steiner=True,
         )
-        # E absent from trees 0-3; tree 4 (caterpillar) has it
-        for ti in range(4):
-            assert np.all(dists[0, ti] == 0.0), f"ti={ti} should be all zero"
-        assert dists[0, 4].sum() > 0
+        # E is absent from trees 0-3; only tree 4 (caterpillar) has all 4 taxa.
+        # → total count == 1, exactly one topology slot is non-zero.
+        assert int(counts[0, 0].sum()) == 1
+        assert int((dists[0, 0] > 0).sum()) == 1
+        assert dists[0, 0].sum() > 0.0
 
     def test_zero_count_topology_steiner_column_all_zero(self):
-        """For a topology with no support, its entire Steiner column is 0.0."""
+        """For a topology with no support, its Steiner sum is 0.0."""
         c = Forest(["((A:1,B:1):1,(C:1,D:1):1);"] * 5)
         counts, dists = c.quartet_topology(
             Quartets.from_list(c, [("A", "B", "C", "D")]), steiner=True
         )
-        assert counts[0, 1] == 0 and counts[0, 2] == 0
-        assert np.all(dists[0, :, 1] == 0.0)
-        assert np.all(dists[0, :, 2] == 0.0)
-        assert np.all(dists[0, :, 0] > 0.0)
+        assert counts[0, 0, 1] == 0 and counts[0, 0, 2] == 0
+        assert dists[0, 0, 1] == 0.0
+        assert dists[0, 0, 2] == 0.0
+        assert dists[0, 0, 0] > 0.0
 
     def test_never_cooccurring_quartet_returns_zero_counts(self):
         """All taxa in namespace but never all four in the same tree → zeros."""
@@ -1247,7 +1251,7 @@ class TestQuartetTopology:
         counts = mixed_collection.quartet_topology(
             Quartets.from_list(mixed_collection, list(gen()))
         )
-        assert counts.shape == (2, 3)
+        assert counts.shape == (2, 1, 3)
 
     def test_empty_list_raises(self, mixed_collection):
         """Quartets.from_list with an empty list raises ValueError (count must be positive)."""

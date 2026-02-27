@@ -466,6 +466,7 @@ class Forest:
             "sp_offsets": self.sp_offsets,
             "lg_offsets": self.lg_offsets,
             "sp_tour_widths": self.sp_tour_widths,
+            "tree_to_group_idx": self.tree_to_group_idx,
         }
         total_bytes = sum(a.nbytes for a in tree_arrays.values())
         logger.info(
@@ -795,9 +796,9 @@ class Forest:
 
         n_quartets = len(quartets)
         if n_quartets == 0:
-            counts_out = np.zeros((0, 3), dtype=np.int32)
+            counts_out = np.zeros((0, self.n_groups, 3), dtype=np.int32)
             if steiner:
-                return counts_out, np.zeros((0, self.n_trees, 3), dtype=np.float64)
+                return counts_out, np.zeros((0, self.n_groups, 3), dtype=np.float64)
             return counts_out
 
         # ── 2. Resolve backend and log execution mode ─────────────────────
@@ -842,9 +843,10 @@ class Forest:
             self.sp_tour_widths,
             n_quartets,
             self.n_trees,
+            self.tree_to_group_idx,
         )
 
-        counts_out = np.zeros((n_quartets, 3), dtype=np.int32)
+        counts_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.int32)
 
         if resolved_backend == "cpu-parallel":
             # Track compilation status
@@ -856,7 +858,7 @@ class Forest:
                 _kernel_first_call[kernel_key] = False
 
             if steiner:
-                steiner_out = np.zeros((n_quartets, self.n_trees, 3), dtype=np.float64)
+                steiner_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.float64)
                 _quartet_steiner_njit(*common_args, counts_out, steiner_out)
                 return counts_out, steiner_out
             else:
@@ -865,7 +867,7 @@ class Forest:
 
         elif resolved_backend == "python":
             steiner_out = (
-                np.zeros((n_quartets, self.n_trees, 3), dtype=np.float64)
+                np.zeros((n_quartets, self.n_groups, 3), dtype=np.float64)
                 if steiner
                 else np.empty(0, dtype=np.float64)
             )
@@ -880,11 +882,11 @@ class Forest:
 
     def _cuda_output_bytes_per_quartet(self, steiner: bool) -> int:
         """Bytes of GPU output array space required per quartet."""
-        # counts: 3 × int32 per quartet
-        bpq = 3 * 4
+        # counts: n_groups × 3 × int32 per quartet
+        bpq = self.n_groups * 3 * 4
         if steiner:
-            # steiner_out: n_trees × 3 × float64 per quartet
-            bpq += self.n_trees * 3 * 8
+            # steiner_out: n_groups × 3 × float64 per quartet
+            bpq += self.n_groups * 3 * 8
         return bpq
 
     def _cuda_batch_size(self, steiner: bool) -> int:
@@ -983,9 +985,9 @@ class Forest:
         )
 
         # ── Host accumulation arrays ───────────────────────────────────────
-        counts_out = np.zeros((n_quartets, 3), dtype=np.int32)
+        counts_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.int32)
         if steiner:
-            steiner_out = np.zeros((n_quartets, self.n_trees, 3), dtype=np.float64)
+            steiner_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.float64)
 
         # ── Batched kernel dispatch ────────────────────────────────────────
         n_seed = len(quartets.seed)
@@ -1035,14 +1037,13 @@ class Forest:
                 proc_n_seed = n_seed
                 proc_offset = batch_offset
 
-            # Zero-initialised counts (atomic.add requires it)
-            d_counts_b = cuda.to_device(np.zeros((bc, 3), dtype=np.int32))
+            # Zero-initialised counts and steiner (atomic.add requires it)
+            d_counts_b = cuda.to_device(np.zeros((bc, self.n_groups, 3), dtype=np.int32))
 
             if steiner:
-                # Allocate device array directly — no H2D init transfer needed.
-                # The kernel writes all 3 topology slots explicitly (zeros for
-                # non-winners and absent-taxa), so no pre-initialisation required.
-                d_steiner_b = cuda.device_array((bc, self.n_trees, 3), dtype=np.float64)
+                # Must use cuda.to_device(np.zeros(...)) — atomic accumulation
+                # requires zero-initialised device arrays.
+                d_steiner_b = cuda.to_device(np.zeros((bc, self.n_groups, 3), dtype=np.float64))
                 logger.info("  🖥  launching Steiner kernel...")
                 time0 = time()
                 quartet_steiner_cuda_unified[blocks, tpb](
@@ -1064,6 +1065,7 @@ class Forest:
                     d_so,
                     d_lo,
                     d_stw,
+                    dt["tree_to_group_idx"],
                     d_counts_b,
                     d_steiner_b,
                 )
@@ -1100,6 +1102,7 @@ class Forest:
                     d_so,
                     d_lo,
                     d_stw,
+                    dt["tree_to_group_idx"],
                     d_counts_b,
                 )
                 cuda.synchronize()
@@ -1120,82 +1123,6 @@ class Forest:
         if steiner:
             return counts_out, steiner_out
         return counts_out
-
-    def split_quartet_results_by_group(
-        self, counts: np.ndarray, steiner_distances: Optional[np.ndarray]
-    ) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
-        """
-        Split quartet topology results by tree group.
-
-        This method requires per-tree data to determine which group contributed
-        which topology decisions. Since counts-only mode aggregates across all
-        trees, you must call quartet_topology(..., steiner=True) to get the
-        necessary per-tree information.
-
-        Parameters
-        ----------
-        counts : np.ndarray[int32, shape=(n_quartets, 3)]
-            Total topology counts from quartet_topology().
-        steiner_distances : np.ndarray[float64, shape=(n_quartets, n_trees, 3)]
-            Per-tree Steiner distances from quartet_topology(..., steiner=True).
-            Cannot be None.
-
-        Returns
-        -------
-        dict[str, tuple[np.ndarray, np.ndarray]]
-            Maps each group label to (group_counts, group_steiner_distances).
-
-            group_counts : np.ndarray[int32, shape=(n_quartets, 3)]
-                Topology counts recomputed for this group only.
-
-            group_steiner_distances : np.ndarray[float64, shape=(n_quartets, n_trees_in_group, 3)]
-                Steiner distances for trees in this group only.
-
-        Raises
-        ------
-        ValueError
-            If steiner_distances is None (counts-only mode).
-
-        Examples
-        --------
-        >>> groups = {
-        ...     'species_A': [...],
-        ...     'species_B': [...],
-        ... }
-        >>> c = Forest(groups)
-        >>>
-        >>> # Must use steiner=True to get per-tree data
-        >>> counts, dists = c.quartet_topology(quartets, steiner=True)
-        >>>
-        >>> # Split by group
-        >>> by_group = c.split_quartet_results_by_group(counts, dists)
-        >>>
-        >>> # Analyze each group
-        >>> for group_name, (group_counts, group_dists) in by_group.items():
-        ...     print(f"{group_name}: {group_counts[0]}")
-        """
-        if steiner_distances is None:
-            raise ValueError(
-                "Cannot split counts without per-tree data. "
-                "Re-run: counts, dists = collection.quartet_topology(..., steiner=True)"
-            )
-
-        results = {}
-
-        for group_name in self.unique_groups:
-            # Get tree indices for this group
-            tree_indices = self.group_to_tree_indices[group_name]
-
-            # Extract steiner distances for this group's trees
-            group_dists = steiner_distances[:, tree_indices, :]
-
-            # Recompute counts from distances
-            # A tree contributes to topology k if dists[qi, ti, k] > 0
-            group_counts = (group_dists > 0).sum(axis=1).astype(np.int32)
-
-            results[group_name] = (group_counts, group_dists)
-
-        return results
 
     # ================================================================== #
     # Private instance methods                                             #
@@ -1410,6 +1337,7 @@ class Forest:
         sp_tour_widths: np.ndarray,
         n_quartets: int,
         n_trees: int,
+        tree_to_group_idx: np.ndarray,
         counts_out: np.ndarray,
         steiner_out: np.ndarray,
     ) -> None:
@@ -1427,15 +1355,17 @@ class Forest:
         global_to_local : int32 (n_trees, G)
         all_first_occ … sp_tour_widths : CSR-packed arrays (see class docs)
         n_quartets, n_trees : int
-        counts_out : int32 (n_quartets, 3), pre-filled with zeros
-            Filled in-place.  counts_out[qi, k] = number of trees where
-            quartet qi has topology k.
+        tree_to_group_idx : int32 (n_trees,)
+            Maps each tree index to its group index.
+        counts_out : int32 (n_quartets, n_groups, 3), pre-filled with zeros
+            Filled in-place.  counts_out[qi, gi, k] = number of trees in
+            group gi where quartet qi has topology k.
         steiner_out : float64 array, pre-filled with zeros
             If steiner_out.size == 0 (sentinel: pass np.empty(0)):
                 Steiner calculation is skipped entirely.
-            Otherwise, must have shape (n_quartets, n_trees, 3).
-                steiner_out[qi, ti, k] = Steiner length if topology k won for
-                quartet qi in tree ti; 0.0 otherwise.
+            Otherwise, must have shape (n_quartets, n_groups, 3).
+                steiner_out[qi, gi, k] = summed Steiner lengths for group gi,
+                topology k, quartet qi.
 
         Steiner bypass
         --------------
@@ -1626,7 +1556,8 @@ class Forest:
                         topo = 2
                         r_winner = r2
 
-                counts_out[qi, topo] += 1
+                gi = int(tree_to_group_idx[ti])
+                counts_out[qi, gi, topo] += 1
 
                 if compute_steiner:
                     leaf_rd_sum = (
@@ -1638,8 +1569,7 @@ class Forest:
 
                     S = leaf_rd_sum - (r_winner + r0 + r1 + r2) * 0.5
 
-                    # Plain store — no atomic needed: (qi, ti) is unique per thread.
-                    steiner_out[qi, ti, topo] = S
+                    steiner_out[qi, gi, topo] += S
 
                     # MOMENT B: replace the store above with Welford accumulation
                     # into mean_k[qi, topo] and M2_k[qi, topo], reducing the

@@ -590,8 +590,9 @@ if _CUDA_AVAILABLE:
         sp_offsets,         # [n_trees + 1] int64
         lg_offsets,         # [n_trees + 1] int64
         sp_tour_widths,     # [n_trees] int32
+        tree_to_group_idx,  # [n_trees] int32 - maps tree to group index
         # Output
-        counts              # [count, 3] int32 - topology counts
+        counts              # [count, n_groups, 3] int32 - topology counts per group
     ):
         """
         Unified kernel: process quartets from deterministic sequence.
@@ -676,7 +677,8 @@ if _CUDA_AVAILABLE:
         else:
             topology = 2
 
-        cuda.atomic.add(counts, (qi, topology), 1)
+        gi = tree_to_group_idx[ti]
+        cuda.atomic.add(counts, (qi, gi, topology), 1)
 
     @cuda.jit
     def quartet_steiner_cuda_unified(
@@ -700,9 +702,10 @@ if _CUDA_AVAILABLE:
         sp_offsets,         # [n_trees + 1] int64
         lg_offsets,         # [n_trees + 1] int64
         sp_tour_widths,     # [n_trees] int32
+        tree_to_group_idx,  # [n_trees] int32 - maps tree to group index
         # Outputs
-        counts,             # [count, 3] int32
-        steiner_out         # [count, n_trees, 3] float64
+        counts,             # [count, n_groups, 3] int32
+        steiner_out         # [count, n_groups, 3] float64
     ):
         """
         Unified kernel with Steiner distances.
@@ -733,12 +736,8 @@ if _CUDA_AVAILABLE:
         local_c = global_to_local[ti, c]
         local_d = global_to_local[ti, d]
 
-        # Skip if any taxon absent — write explicit zeros so callers don't
-        # need to pre-initialise steiner_out before the kernel launch.
+        # Skip if any taxon absent — steiner_out is pre-initialised to 0 by host.
         if local_a == -1 or local_b == -1 or local_c == -1 or local_d == -1:
-            steiner_out[qi, ti, 0] = 0.0
-            steiner_out[qi, ti, 1] = 0.0
-            steiner_out[qi, ti, 2] = 0.0
             return
 
         # Get offsets
@@ -822,14 +821,11 @@ if _CUDA_AVAILABLE:
 
         steiner = leaf_sum - (r_winner + r0 + r1 + r2) / 2.0
 
-        # Store results — counts needs atomic (multiple ti threads per qi row).
-        # Write all 3 topology slots explicitly so callers need not pre-zero
-        # steiner_out: winning slot gets the computed value, others get 0.0.
-        cuda.atomic.add(counts, (qi, topology), 1)
-        steiner_out[qi, ti, 0] = 0.0
-        steiner_out[qi, ti, 1] = 0.0
-        steiner_out[qi, ti, 2] = 0.0
-        steiner_out[qi, ti, topology] = steiner
+        # Store results — both counts and steiner need atomics (multiple ti
+        # threads share the same group row). steiner_out is pre-zeroed by host.
+        gi = tree_to_group_idx[ti]
+        cuda.atomic.add(counts, (qi, gi, topology), 1)
+        cuda.atomic.add(steiner_out, (qi, gi, topology), steiner)
 
 
 def _compute_cuda_grid(n_quartets, n_trees, threads_per_block=(16, 16)):

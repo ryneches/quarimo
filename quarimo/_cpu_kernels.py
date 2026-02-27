@@ -119,13 +119,14 @@ def _quartet_counts_njit(
         sp_tour_widths,
         n_quartets,
         n_trees,
+        tree_to_group_idx,
         counts_out):
     """
     Numba-compiled counts-only quartet kernel.
 
     The outer loop over qi runs in parallel via prange; the inner loop over
     ti is sequential. No atomics are needed: each parallel thread owns its
-    entire counts_out[qi, :] row.
+    entire counts_out[qi, :, :] slice.
 
     Parameters
     ----------
@@ -159,8 +160,10 @@ def _quartet_counts_njit(
         Number of quartets to process.
     n_trees : int
         Number of trees in collection.
-    counts_out : int32[n_quartets, 3]
-        Output array for topology counts.
+    tree_to_group_idx : int32[n_trees]
+        Maps each tree index to its group index.
+    counts_out : int32[n_quartets, n_groups, 3]
+        Output array for topology counts per group.
     """
     for qi in prange(n_quartets):
         n0 = sorted_quartet_ids[qi, 0]
@@ -230,7 +233,7 @@ def _quartet_counts_njit(
             else:
                 topo = 1 if r1 > r2 else 2
 
-            counts_out[qi, topo] += 1
+            counts_out[qi, tree_to_group_idx[ti], topo] += 1
 
 
 @njit(parallel=True, cache=True)
@@ -250,6 +253,7 @@ def _quartet_steiner_njit(
         sp_tour_widths,
         n_quartets,
         n_trees,
+        tree_to_group_idx,
         counts_out,
         steiner_out):
     """
@@ -259,15 +263,15 @@ def _quartet_steiner_njit(
     Kept as a separate function to avoid rank mismatch issues with sentinel
     arrays.
 
-    steiner_out[qi, ti, topo] is a conflict-free write — each parallel thread
-    owns its entire (qi, :, :) slice.
+    counts_out[qi, gi, topo] and steiner_out[qi, gi, topo] accumulate
+    per-group — conflict-free by qi (each prange thread owns its row).
 
     Parameters
     ----------
     Same as _quartet_counts_njit, plus:
-    
-    steiner_out : float64[n_quartets, n_trees, 3]
-        Output array for Steiner distances.
+
+    steiner_out : float64[n_quartets, n_groups, 3]
+        Output array for summed Steiner distances per group per topology.
     """
     for qi in prange(n_quartets):
         n0 = sorted_quartet_ids[qi, 0]
@@ -343,7 +347,8 @@ def _quartet_steiner_njit(
                 else:
                     topo = 2; r_winner = r2
 
-            counts_out[qi, topo] += 1
+            gi = tree_to_group_idx[ti]
+            counts_out[qi, gi, topo] += 1
 
             # Compute Steiner distance
             leaf_rd_sum = (all_root_distance[nb + ln0]
@@ -351,4 +356,4 @@ def _quartet_steiner_njit(
                          + all_root_distance[nb + ln2]
                          + all_root_distance[nb + ln3])
             S = leaf_rd_sum - (r_winner + r0 + r1 + r2) * 0.5
-            steiner_out[qi, ti, topo] = S
+            steiner_out[qi, gi, topo] += S
