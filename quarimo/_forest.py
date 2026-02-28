@@ -1541,20 +1541,15 @@ class Forest:
                 r1 = rd02 + rd13  # (n0,n2)|(n1,n3)
                 r2 = rd03 + rd12  # (n0,n3)|(n1,n2)
 
-                if r0 > r1:
-                    if r0 > r2:
-                        topo = 0
-                        r_winner = r0
-                    else:
-                        topo = 2
-                        r_winner = r2
+                if r0 >= r1 and r0 >= r2:
+                    topo = 0
+                    r_winner = r0
+                elif r1 >= r0 and r1 >= r2:
+                    topo = 1
+                    r_winner = r1
                 else:
-                    if r1 > r2:
-                        topo = 1
-                        r_winner = r1
-                    else:
-                        topo = 2
-                        r_winner = r2
+                    topo = 2
+                    r_winner = r2
 
                 gi = int(tree_to_group_idx[ti])
                 counts_out[qi, gi, topo] += 1
