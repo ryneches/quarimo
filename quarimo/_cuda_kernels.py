@@ -648,31 +648,45 @@ if _CUDA_AVAILABLE:
         occ_c = all_first_occ[node_start + local_c]
         occ_d = all_first_occ[node_start + local_d]
 
-        # Compute 3 LCAs anchored to taxon a — sufficient for topology
-        # Topology 0: (AB|CD) — LCA(a,b) deepest
-        # Topology 1: (AC|BD) — LCA(a,c) deepest
-        # Topology 2: (AD|BC) — LCA(a,d) deepest
-        l = min(occ_a, occ_b); r = max(occ_a, occ_b)
-        lca_ab = _rmq_csr_cuda(l, r, sp_start, sp_stride, all_sparse_table,
-                               all_euler_depth, all_log2_table, lg_start,
-                               tour_start, all_euler_tour)
-        rd_ab = all_root_distance[node_start + lca_ab]
+        # Compute all 6 pairwise LCAs for the four-point condition
+        lca_ab = _rmq_csr_cuda(
+            min(occ_a, occ_b), max(occ_a, occ_b),
+            sp_start, sp_stride, all_sparse_table, all_euler_depth,
+            all_log2_table, lg_start, tour_start, all_euler_tour
+        )
+        lca_cd = _rmq_csr_cuda(
+            min(occ_c, occ_d), max(occ_c, occ_d),
+            sp_start, sp_stride, all_sparse_table, all_euler_depth,
+            all_log2_table, lg_start, tour_start, all_euler_tour
+        )
+        lca_ac = _rmq_csr_cuda(
+            min(occ_a, occ_c), max(occ_a, occ_c),
+            sp_start, sp_stride, all_sparse_table, all_euler_depth,
+            all_log2_table, lg_start, tour_start, all_euler_tour
+        )
+        lca_bd = _rmq_csr_cuda(
+            min(occ_b, occ_d), max(occ_b, occ_d),
+            sp_start, sp_stride, all_sparse_table, all_euler_depth,
+            all_log2_table, lg_start, tour_start, all_euler_tour
+        )
+        lca_ad = _rmq_csr_cuda(
+            min(occ_a, occ_d), max(occ_a, occ_d),
+            sp_start, sp_stride, all_sparse_table, all_euler_depth,
+            all_log2_table, lg_start, tour_start, all_euler_tour
+        )
+        lca_bc = _rmq_csr_cuda(
+            min(occ_b, occ_c), max(occ_b, occ_c),
+            sp_start, sp_stride, all_sparse_table, all_euler_depth,
+            all_log2_table, lg_start, tour_start, all_euler_tour
+        )
 
-        l = min(occ_a, occ_c); r = max(occ_a, occ_c)
-        lca_ac = _rmq_csr_cuda(l, r, sp_start, sp_stride, all_sparse_table,
-                               all_euler_depth, all_log2_table, lg_start,
-                               tour_start, all_euler_tour)
-        rd_ac = all_root_distance[node_start + lca_ac]
-
-        l = min(occ_a, occ_d); r = max(occ_a, occ_d)
-        lca_ad = _rmq_csr_cuda(l, r, sp_start, sp_stride, all_sparse_table,
-                               all_euler_depth, all_log2_table, lg_start,
-                               tour_start, all_euler_tour)
-        rd_ad = all_root_distance[node_start + lca_ad]
-
-        if rd_ab >= rd_ac and rd_ab >= rd_ad:
+        # Determine topology using pair-sum comparison (matches Python/CPU kernels)
+        r0 = all_root_distance[node_start + lca_ab] + all_root_distance[node_start + lca_cd]
+        r1 = all_root_distance[node_start + lca_ac] + all_root_distance[node_start + lca_bd]
+        r2 = all_root_distance[node_start + lca_ad] + all_root_distance[node_start + lca_bc]
+        if r0 >= r1 and r0 >= r2:
             topology = 0
-        elif rd_ac >= rd_ab and rd_ac >= rd_ad:
+        elif r1 >= r0 and r1 >= r2:
             topology = 1
         else:
             topology = 2
