@@ -37,6 +37,11 @@ def pytest_configure(config):
         "large_scale: benchmark at large n_trees/n_quartets scales "
         "(slow — opt in with -m large_scale)",
     )
+    config.addinivalue_line(
+        "markers",
+        "polytomy: topology tests for polytomous/tied quartet-tree pairs "
+        "(skip with -m 'not polytomy', run only with -m polytomy)",
+    )
     
     # Suppress NumbaPerformanceWarning during tests
     # This must happen early, before any kernels are compiled

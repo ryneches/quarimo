@@ -3,10 +3,10 @@ tests/test_kernel_agreement.py
 ==============================
 
 Cross-validation between quarimo backends and against independent pairwise
-branch-distance computations.
+branch-distance computations, plus cross-validation against SuchTree.
 
-Three layers of validation
---------------------------
+Validation layers
+-----------------
 1. Backend agreement  (TestBackendAgreement)
    Run quartet_topology() with every available backend pair (python vs
    cpu-parallel, python vs cuda) and assert bit-identical counts and
@@ -35,6 +35,24 @@ Three layers of validation
    derived independently from branch_distance).  This formula holds for both
    binary trees and polytomies, and is derived from the quarimo closed-form
    Steiner expression.
+
+4. SuchTree cross-validation  (TestSuchTreeAgreement)
+   For every (quartet, tree) pair where the winning topology is unambiguous
+   (pair-sums are not tied), quarimo and SuchTree must report the same
+   topology.  Tied pairs are handled separately.
+
+   SuchTree represents topologies as frozensets of frozensets:
+       frozenset({frozenset({name_i, name_j}), frozenset({name_k, name_l})})
+   quarimo uses k ∈ {0, 1, 2} for sorted taxa (n0,n1,n2,n3):
+       k=0 → (n0n1)|(n2n3),  k=1 → (n0n2)|(n1n3),  k=2 → (n0n3)|(n1n2)
+   _st_topo_to_k() performs the bijection between the two representations.
+
+5. SuchTree polytomy cross-validation  (TestSuchTreePolytomyAgreement)
+   [pytest.mark.polytomy — skip with -m 'not polytomy']
+   For tied (quartet, tree) pairs, both quarimo and SuchTree must choose a
+   topology whose pair-sum equals the minimum.  Exact agreement between the
+   two implementations is NOT required: tie-breaking is implementation-defined
+   and will be re-examined when quarimo's polytomy handling changes.
 
 Test forest
 -----------
@@ -132,6 +150,18 @@ cuda_skip = pytest.mark.skipif(
     reason="cuda backend not available",
 )
 
+try:
+    from SuchTree import SuchTree as _SuchTree  # noqa: F401
+
+    _SUCHTREE_AVAILABLE = True
+except ImportError:
+    _SUCHTREE_AVAILABLE = False
+
+suchtree_skip = pytest.mark.skipif(
+    not _SUCHTREE_AVAILABLE,
+    reason="SuchTree not installed",
+)
+
 # ---------------------------------------------------------------------------
 # Module-scoped fixtures
 # ---------------------------------------------------------------------------
@@ -149,6 +179,16 @@ def all_quartets(grouped_forest):
     """All C(8,4) = 70 quartets over the 8-taxon global namespace."""
     taxa = sorted(grouped_forest.global_names)
     return Quartets.from_list(grouped_forest, list(itertools.combinations(taxa, 4)))
+
+
+@pytest.fixture(scope="module")
+def suchforest():
+    """List of SuchTree objects, one per NEWICK string in TREES."""
+    if not _SUCHTREE_AVAILABLE:
+        pytest.skip("SuchTree not installed")
+    from SuchTree import SuchTree
+
+    return [SuchTree(newick) for newick in TREES]
 
 
 @pytest.fixture(scope="module")
@@ -429,6 +469,225 @@ class TestPairwiseDistances:
         assert not violations, (
             f"{len(violations)} triangle-inequality violations:\n"
             + "\n".join(violations[:5])
+        )
+
+
+# ---------------------------------------------------------------------------
+# SuchTree topology translation
+# ---------------------------------------------------------------------------
+
+# The three unrooted topologies for sorted taxa (n0, n1, n2, n3), expressed
+# as frozensets of frozensets — SuchTree's native representation.
+_TOPO_BUILDERS = [
+    lambda ns: frozenset({frozenset({ns[0], ns[1]}), frozenset({ns[2], ns[3]})}),
+    lambda ns: frozenset({frozenset({ns[0], ns[2]}), frozenset({ns[1], ns[3]})}),
+    lambda ns: frozenset({frozenset({ns[0], ns[3]}), frozenset({ns[1], ns[2]})}),
+]
+
+
+def _st_topo_to_k(st_topo, names):
+    """
+    Convert a SuchTree frozenset topology to quarimo's k index (0, 1, or 2).
+
+    Parameters
+    ----------
+    st_topo : frozenset
+        SuchTree topology: frozenset of two frozensets of two taxon names.
+    names : list[str]
+        The four taxon names in sorted global-ID order [name0, name1, name2, name3].
+
+    Returns
+    -------
+    int
+        quarimo topology index: 0, 1, or 2.
+
+    Raises
+    ------
+    ValueError
+        If st_topo does not match any of the three expected topologies.
+    """
+    for k, build in enumerate(_TOPO_BUILDERS):
+        if st_topo == build(names):
+            return k
+    raise ValueError(f"Unrecognized SuchTree topology {st_topo} for names {names}")
+
+
+# ===========================================================================
+# SuchTree cross-validation
+# ===========================================================================
+
+
+class TestSuchTreeAgreement:
+    """
+    Exact topology agreement between quarimo and SuchTree for all (quartet, tree)
+    pairs where the winning topology is unambiguous (pair-sums are not tied).
+
+    Tied pairs are covered by TestSuchTreePolytomyAgreement.  Tests use the
+    Python backend; add cpu_parallel_skip / cuda_skip decorators to extend to
+    other backends without changing the _check() logic.
+    """
+
+    @suchtree_skip
+    def test_topology_python(self, grouped_forest, all_quartets, pairwise, suchforest):
+        self._check("python", grouped_forest, all_quartets, pairwise, suchforest)
+
+    @suchtree_skip
+    @cpu_parallel_skip
+    def test_topology_cpu(self, grouped_forest, all_quartets, pairwise, suchforest):
+        self._check("cpu-parallel", grouped_forest, all_quartets, pairwise, suchforest)
+
+    @suchtree_skip
+    @cuda_skip
+    def test_topology_cuda(self, grouped_forest, all_quartets, pairwise, suchforest):
+        self._check("cuda", grouped_forest, all_quartets, pairwise, suchforest)
+
+    def _check(self, backend, grouped_forest, all_quartets, pairwise, suchforest):
+        with silent_benchmark(backend):
+            counts = grouped_forest.quartet_topology(all_quartets)
+
+        global_names = grouped_forest.global_names
+        n_groups = grouped_forest.n_groups
+        quartet_list = list(all_quartets)
+        tol = 1e-9
+        mismatches = []
+
+        for gi in range(n_groups):
+            st = suchforest[gi]
+            st_taxa = set(st.leaves.keys())
+
+            # Partition quartets: present (all 4 taxa in tree) vs absent.
+            present = []  # list of (qi, names)
+            for qi, (n0, n1, n2, n3) in enumerate(quartet_list):
+                names = [global_names[n] for n in (n0, n1, n2, n3)]
+                if all(name in st_taxa for name in names):
+                    present.append((qi, names))
+                else:
+                    assert counts[qi, gi].sum() == 0, (
+                        f"Expected 0 count for qi={qi} gi={gi} (absent taxa), "
+                        f"got {counts[qi, gi]}"
+                    )
+
+            if not present:
+                continue
+
+            # Batch all present quartets in a single SuchTree call.
+            st_topos = st.quartet_topologies_by_name([nm for _, nm in present])
+
+            for (qi, names), st_topo in zip(present, st_topos):
+                n0, n1, n2, n3 = quartet_list[qi]
+                _, s0, s1, s2 = _steiner_and_sums(pairwise, n0, n1, n2, n3, gi)
+                s_vals = (s0, s1, s2)
+                s_min = min(s_vals)
+
+                # Skip tied pairs — they belong to TestSuchTreePolytomyAgreement.
+                n_tied = sum(1 for s in s_vals if abs(s - s_min) < tol)
+                if n_tied > 1:
+                    continue
+
+                quarimo_k = int(counts[qi, gi].argmax())
+                st_k = _st_topo_to_k(st_topo, names)
+
+                if quarimo_k != st_k:
+                    mismatches.append(
+                        f"qi={qi} gi={gi} quarimo_k={quarimo_k} st_k={st_k} "
+                        f"names={names} s=({s0:.6f},{s1:.6f},{s2:.6f})"
+                    )
+
+        assert not mismatches, (
+            f"{len(mismatches)} topology mismatches [{backend}]:\n"
+            + "\n".join(mismatches[:10])
+        )
+
+
+@pytest.mark.polytomy
+class TestSuchTreePolytomyAgreement:
+    """
+    For polytomous (tied) quartet-tree pairs, both quarimo and SuchTree must
+    select a topology whose pair-sum equals the minimum.  Exact agreement
+    between the two implementations is NOT required: tie-breaking is
+    implementation-defined and will be re-examined when quarimo's polytomy
+    handling changes.
+
+    Skip this class with ``-m 'not polytomy'``; run only with ``-m polytomy``.
+    """
+
+    @suchtree_skip
+    def test_polytomy_topology_python(
+        self, grouped_forest, all_quartets, pairwise, suchforest
+    ):
+        self._check("python", grouped_forest, all_quartets, pairwise, suchforest)
+
+    @suchtree_skip
+    @cpu_parallel_skip
+    def test_polytomy_topology_cpu(
+        self, grouped_forest, all_quartets, pairwise, suchforest
+    ):
+        self._check("cpu-parallel", grouped_forest, all_quartets, pairwise, suchforest)
+
+    @suchtree_skip
+    @cuda_skip
+    def test_polytomy_topology_cuda(
+        self, grouped_forest, all_quartets, pairwise, suchforest
+    ):
+        self._check("cuda", grouped_forest, all_quartets, pairwise, suchforest)
+
+    def _check(self, backend, grouped_forest, all_quartets, pairwise, suchforest):
+        with silent_benchmark(backend):
+            counts = grouped_forest.quartet_topology(all_quartets)
+
+        global_names = grouped_forest.global_names
+        n_groups = grouped_forest.n_groups
+        quartet_list = list(all_quartets)
+        tol = 1e-9
+        quarimo_invalid = []
+        suchtree_invalid = []
+
+        for gi in range(n_groups):
+            st = suchforest[gi]
+            st_taxa = set(st.leaves.keys())
+
+            # Collect only tied quartet-tree pairs.
+            tied = []  # list of (qi, names, valid_ks)
+            for qi, (n0, n1, n2, n3) in enumerate(quartet_list):
+                names = [global_names[n] for n in (n0, n1, n2, n3)]
+                if not all(name in st_taxa for name in names):
+                    continue
+                _, s0, s1, s2 = _steiner_and_sums(pairwise, n0, n1, n2, n3, gi)
+                s_vals = (s0, s1, s2)
+                s_min = min(s_vals)
+                valid_ks = frozenset(k for k, s in enumerate(s_vals) if abs(s - s_min) < tol)
+                if len(valid_ks) > 1:
+                    tied.append((qi, names, valid_ks))
+
+            if not tied:
+                continue
+
+            # Batch SuchTree call for this tree.
+            st_topos = st.quartet_topologies_by_name([nm for _, nm, _ in tied])
+
+            for (qi, names, valid_ks), st_topo in zip(tied, st_topos):
+                quarimo_k = int(counts[qi, gi].argmax())
+                if quarimo_k not in valid_ks:
+                    quarimo_invalid.append(
+                        f"qi={qi} gi={gi} quarimo_k={quarimo_k} "
+                        f"valid={set(valid_ks)} names={names}"
+                    )
+
+                st_k = _st_topo_to_k(st_topo, names)
+                if st_k not in valid_ks:
+                    suchtree_invalid.append(
+                        f"qi={qi} gi={gi} st_k={st_k} "
+                        f"valid={set(valid_ks)} names={names}"
+                    )
+
+        # Separate asserts so both failure sets are visible independently.
+        assert not quarimo_invalid, (
+            f"quarimo chose invalid topology for {len(quarimo_invalid)} tied "
+            f"pairs [{backend}]:\n" + "\n".join(quarimo_invalid[:10])
+        )
+        assert not suchtree_invalid, (
+            f"SuchTree chose invalid topology for {len(suchtree_invalid)} tied pairs:\n"
+            + "\n".join(suchtree_invalid[:10])
         )
 
 
