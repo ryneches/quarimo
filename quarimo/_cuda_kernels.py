@@ -12,6 +12,9 @@ Exported Functions
 _rmq_csr_cuda : cuda.jit device function
     O(1) range minimum query helper for CUDA kernels (device-only).
 
+_resolve_quartet_cuda : cuda.jit device function
+    Map four global taxon IDs to tree-local positions (device-only helper).
+
 _quartet_counts_cuda : cuda.jit kernel
     GPU-parallel quartet topology counts (no Steiner distances).
 
@@ -254,6 +257,51 @@ if _CUDA_AVAILABLE:
             init_xorshift128(rng_seed, absolute_idx - n_seed, rng_state)
             return sample_4_unique_cuda(rng_state, n_taxa)
 
+    @cuda.jit(device=True)
+    def _resolve_quartet_cuda(n0, n1, n2, n3, ti,
+                              global_to_local,
+                              node_offsets, tour_offsets, sp_offsets, lg_offsets,
+                              sp_tour_widths):
+        """
+        Map four global taxon IDs to tree-local positions for tree *ti*.
+
+        Returns a 9-tuple ``(ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw)`` where:
+
+        ln0..ln3 : int32
+            Local leaf IDs in tree *ti* (-1 if the taxon is absent).
+        nb : int64
+            Node-array CSR offset for tree *ti*.
+        tb : int64
+            Euler-tour CSR offset for tree *ti*.
+        sb : int64
+            Sparse-table CSR offset for tree *ti*.
+        lb : int64
+            Log2-table CSR offset for tree *ti*.
+        tw : int32
+            Sparse-table column stride (= tour length) for tree *ti*.
+
+        The CSR offsets ``nb..tw`` are always valid regardless of taxon
+        presence.  The caller is responsible for checking::
+
+            if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
+                return  # skip this (qi, ti) thread
+
+        before accessing ``all_first_occ[nb + ln0]`` etc.
+
+        This device function is inlined by the PTX compiler into every kernel
+        that calls it; there is no function-call overhead at runtime.
+        """
+        ln0 = global_to_local[ti, n0]
+        ln1 = global_to_local[ti, n1]
+        ln2 = global_to_local[ti, n2]
+        ln3 = global_to_local[ti, n3]
+        nb  = node_offsets[ti]
+        tb  = tour_offsets[ti]
+        sb  = sp_offsets[ti]
+        lb  = lg_offsets[ti]
+        tw  = sp_tour_widths[ti]
+        return ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw
+
     @cuda.jit
     def _quartet_counts_cuda(
             sorted_quartet_ids,
@@ -324,28 +372,18 @@ if _CUDA_AVAILABLE:
         if qi >= n_quartets or ti >= n_trees:
             return
 
-        # Get quartet taxa
+        # Get quartet taxa and resolve to tree-local positions
         n0 = sorted_quartet_ids[qi, 0]
         n1 = sorted_quartet_ids[qi, 1]
         n2 = sorted_quartet_ids[qi, 2]
         n3 = sorted_quartet_ids[qi, 3]
-
-        # Map to local leaf IDs
-        ln0 = global_to_local[ti, n0]
-        ln1 = global_to_local[ti, n1]
-        ln2 = global_to_local[ti, n2]
-        ln3 = global_to_local[ti, n3]
-
-        # Skip if any taxon is absent
+        ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = _resolve_quartet_cuda(
+            n0, n1, n2, n3, ti,
+            global_to_local, node_offsets, tour_offsets, sp_offsets,
+            lg_offsets, sp_tour_widths,
+        )
         if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             return
-
-        # Get CSR offsets for this tree
-        nb = node_offsets[ti]
-        tb = tour_offsets[ti]
-        sb = sp_offsets[ti]
-        lb = lg_offsets[ti]
-        tw = sp_tour_widths[ti]
 
         # Compute 6 pairwise LCAs
         l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln1]
@@ -440,28 +478,18 @@ if _CUDA_AVAILABLE:
         if qi >= n_quartets or ti >= n_trees:
             return
 
-        # Get quartet taxa
+        # Get quartet taxa and resolve to tree-local positions
         n0 = sorted_quartet_ids[qi, 0]
         n1 = sorted_quartet_ids[qi, 1]
         n2 = sorted_quartet_ids[qi, 2]
         n3 = sorted_quartet_ids[qi, 3]
-
-        # Map to local leaf IDs
-        ln0 = global_to_local[ti, n0]
-        ln1 = global_to_local[ti, n1]
-        ln2 = global_to_local[ti, n2]
-        ln3 = global_to_local[ti, n3]
-
-        # Skip if any taxon is absent
+        ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = _resolve_quartet_cuda(
+            n0, n1, n2, n3, ti,
+            global_to_local, node_offsets, tour_offsets, sp_offsets,
+            lg_offsets, sp_tour_widths,
+        )
         if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             return
-
-        # Get CSR offsets for this tree
-        nb = node_offsets[ti]
-        tb = tour_offsets[ti]
-        sb = sp_offsets[ti]
-        lb = lg_offsets[ti]
-        tw = sp_tour_widths[ti]
 
         # Compute 6 pairwise LCAs (identical to counts kernel)
         l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln1]
@@ -618,72 +646,60 @@ if _CUDA_AVAILABLE:
 
         # Get quartet for this index (re-run RNG per thread; fast for seed case)
         a, b, c, d = get_quartet_at_index(
-            absolute_idx,
-            seed_quartets,
-            n_seed,
-            rng_seed,
-            n_global_taxa
+            absolute_idx, seed_quartets, n_seed, rng_seed, n_global_taxa
         )
 
-        # Get local IDs for this tree
-        local_a = global_to_local[ti, a]
-        local_b = global_to_local[ti, b]
-        local_c = global_to_local[ti, c]
-        local_d = global_to_local[ti, d]
-
-        # Skip if any taxon absent
-        if local_a == -1 or local_b == -1 or local_c == -1 or local_d == -1:
+        # Resolve global IDs to tree-local positions
+        ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = _resolve_quartet_cuda(
+            a, b, c, d, ti,
+            global_to_local, node_offsets, tour_offsets, sp_offsets,
+            lg_offsets, sp_tour_widths,
+        )
+        if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             return
 
-        # Get offsets for this tree's data
-        node_start = node_offsets[ti]
-        tour_start = tour_offsets[ti]
-        sp_start = sp_offsets[ti]
-        lg_start = lg_offsets[ti]
-        sp_stride = sp_tour_widths[ti]
-
         # Get first occurrences in Euler tour
-        occ_a = all_first_occ[node_start + local_a]
-        occ_b = all_first_occ[node_start + local_b]
-        occ_c = all_first_occ[node_start + local_c]
-        occ_d = all_first_occ[node_start + local_d]
+        occ_a = all_first_occ[nb + ln0]
+        occ_b = all_first_occ[nb + ln1]
+        occ_c = all_first_occ[nb + ln2]
+        occ_d = all_first_occ[nb + ln3]
 
         # Compute all 6 pairwise LCAs for the four-point condition
         lca_ab = _rmq_csr_cuda(
             min(occ_a, occ_b), max(occ_a, occ_b),
-            sp_start, sp_stride, all_sparse_table, all_euler_depth,
-            all_log2_table, lg_start, tour_start, all_euler_tour
+            sb, tw, all_sparse_table, all_euler_depth,
+            all_log2_table, lb, tb, all_euler_tour
         )
         lca_cd = _rmq_csr_cuda(
             min(occ_c, occ_d), max(occ_c, occ_d),
-            sp_start, sp_stride, all_sparse_table, all_euler_depth,
-            all_log2_table, lg_start, tour_start, all_euler_tour
+            sb, tw, all_sparse_table, all_euler_depth,
+            all_log2_table, lb, tb, all_euler_tour
         )
         lca_ac = _rmq_csr_cuda(
             min(occ_a, occ_c), max(occ_a, occ_c),
-            sp_start, sp_stride, all_sparse_table, all_euler_depth,
-            all_log2_table, lg_start, tour_start, all_euler_tour
+            sb, tw, all_sparse_table, all_euler_depth,
+            all_log2_table, lb, tb, all_euler_tour
         )
         lca_bd = _rmq_csr_cuda(
             min(occ_b, occ_d), max(occ_b, occ_d),
-            sp_start, sp_stride, all_sparse_table, all_euler_depth,
-            all_log2_table, lg_start, tour_start, all_euler_tour
+            sb, tw, all_sparse_table, all_euler_depth,
+            all_log2_table, lb, tb, all_euler_tour
         )
         lca_ad = _rmq_csr_cuda(
             min(occ_a, occ_d), max(occ_a, occ_d),
-            sp_start, sp_stride, all_sparse_table, all_euler_depth,
-            all_log2_table, lg_start, tour_start, all_euler_tour
+            sb, tw, all_sparse_table, all_euler_depth,
+            all_log2_table, lb, tb, all_euler_tour
         )
         lca_bc = _rmq_csr_cuda(
             min(occ_b, occ_c), max(occ_b, occ_c),
-            sp_start, sp_stride, all_sparse_table, all_euler_depth,
-            all_log2_table, lg_start, tour_start, all_euler_tour
+            sb, tw, all_sparse_table, all_euler_depth,
+            all_log2_table, lb, tb, all_euler_tour
         )
 
         # Determine topology using pair-sum comparison (matches Python/CPU kernels)
-        r0 = all_root_distance[node_start + lca_ab] + all_root_distance[node_start + lca_cd]
-        r1 = all_root_distance[node_start + lca_ac] + all_root_distance[node_start + lca_bd]
-        r2 = all_root_distance[node_start + lca_ad] + all_root_distance[node_start + lca_bc]
+        r0 = all_root_distance[nb + lca_ab] + all_root_distance[nb + lca_cd]
+        r1 = all_root_distance[nb + lca_ac] + all_root_distance[nb + lca_bd]
+        r2 = all_root_distance[nb + lca_ad] + all_root_distance[nb + lca_bc]
         if r0 >= r1 and r0 >= r2:
             topology = 0
         elif r1 >= r0 and r1 >= r2:
@@ -744,68 +760,61 @@ if _CUDA_AVAILABLE:
             absolute_idx, seed_quartets, n_seed, rng_seed, n_global_taxa
         )
 
-        # Get local IDs
-        local_a = global_to_local[ti, a]
-        local_b = global_to_local[ti, b]
-        local_c = global_to_local[ti, c]
-        local_d = global_to_local[ti, d]
-
+        # Resolve global IDs to tree-local positions
+        ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = _resolve_quartet_cuda(
+            a, b, c, d, ti,
+            global_to_local, node_offsets, tour_offsets, sp_offsets,
+            lg_offsets, sp_tour_widths,
+        )
         # Skip if any taxon absent — steiner_out is pre-initialised to 0 by host.
-        if local_a == -1 or local_b == -1 or local_c == -1 or local_d == -1:
+        if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             return
 
-        # Get offsets
-        node_start = node_offsets[ti]
-        tour_start = tour_offsets[ti]
-        sp_start = sp_offsets[ti]
-        lg_start = lg_offsets[ti]
-        sp_stride = sp_tour_widths[ti]
-
         # Get occurrences
-        occ_a = all_first_occ[node_start + local_a]
-        occ_b = all_first_occ[node_start + local_b]
-        occ_c = all_first_occ[node_start + local_c]
-        occ_d = all_first_occ[node_start + local_d]
+        occ_a = all_first_occ[nb + ln0]
+        occ_b = all_first_occ[nb + ln1]
+        occ_c = all_first_occ[nb + ln2]
+        occ_d = all_first_occ[nb + ln3]
 
         # Find all 6 LCAs for Steiner computation
         lca_ab = _rmq_csr_cuda(
             min(occ_a, occ_b), max(occ_a, occ_b),
-            sp_start, sp_stride, all_sparse_table, all_euler_depth,
-            all_log2_table, lg_start, tour_start, all_euler_tour
+            sb, tw, all_sparse_table, all_euler_depth,
+            all_log2_table, lb, tb, all_euler_tour
         )
         lca_cd = _rmq_csr_cuda(
             min(occ_c, occ_d), max(occ_c, occ_d),
-            sp_start, sp_stride, all_sparse_table, all_euler_depth,
-            all_log2_table, lg_start, tour_start, all_euler_tour
+            sb, tw, all_sparse_table, all_euler_depth,
+            all_log2_table, lb, tb, all_euler_tour
         )
         lca_ac = _rmq_csr_cuda(
             min(occ_a, occ_c), max(occ_a, occ_c),
-            sp_start, sp_stride, all_sparse_table, all_euler_depth,
-            all_log2_table, lg_start, tour_start, all_euler_tour
+            sb, tw, all_sparse_table, all_euler_depth,
+            all_log2_table, lb, tb, all_euler_tour
         )
         lca_bd = _rmq_csr_cuda(
             min(occ_b, occ_d), max(occ_b, occ_d),
-            sp_start, sp_stride, all_sparse_table, all_euler_depth,
-            all_log2_table, lg_start, tour_start, all_euler_tour
+            sb, tw, all_sparse_table, all_euler_depth,
+            all_log2_table, lb, tb, all_euler_tour
         )
         lca_ad = _rmq_csr_cuda(
             min(occ_a, occ_d), max(occ_a, occ_d),
-            sp_start, sp_stride, all_sparse_table, all_euler_depth,
-            all_log2_table, lg_start, tour_start, all_euler_tour
+            sb, tw, all_sparse_table, all_euler_depth,
+            all_log2_table, lb, tb, all_euler_tour
         )
         lca_bc = _rmq_csr_cuda(
             min(occ_b, occ_c), max(occ_b, occ_c),
-            sp_start, sp_stride, all_sparse_table, all_euler_depth,
-            all_log2_table, lg_start, tour_start, all_euler_tour
+            sb, tw, all_sparse_table, all_euler_depth,
+            all_log2_table, lb, tb, all_euler_tour
         )
 
         # Get root distances
-        rd_ab = all_root_distance[node_start + lca_ab]
-        rd_cd = all_root_distance[node_start + lca_cd]
-        rd_ac = all_root_distance[node_start + lca_ac]
-        rd_bd = all_root_distance[node_start + lca_bd]
-        rd_ad = all_root_distance[node_start + lca_ad]
-        rd_bc = all_root_distance[node_start + lca_bc]
+        rd_ab = all_root_distance[nb + lca_ab]
+        rd_cd = all_root_distance[nb + lca_cd]
+        rd_ac = all_root_distance[nb + lca_ac]
+        rd_bd = all_root_distance[nb + lca_bd]
+        rd_ad = all_root_distance[nb + lca_ad]
+        rd_bc = all_root_distance[nb + lca_bc]
 
         # Determine topology using correct 3-way score comparison
         # Topology 0: (AB|CD), Topology 1: (AC|BD), Topology 2: (AD|BC)
@@ -820,10 +829,10 @@ if _CUDA_AVAILABLE:
             topology = 2
 
         # Compute Steiner distance for winning topology
-        rd_a = all_root_distance[node_start + local_a]
-        rd_b = all_root_distance[node_start + local_b]
-        rd_c = all_root_distance[node_start + local_c]
-        rd_d = all_root_distance[node_start + local_d]
+        rd_a = all_root_distance[nb + ln0]
+        rd_b = all_root_distance[nb + ln1]
+        rd_c = all_root_distance[nb + ln2]
+        rd_d = all_root_distance[nb + ln3]
 
         leaf_sum = rd_a + rd_b + rd_c + rd_d
         if topology == 0:

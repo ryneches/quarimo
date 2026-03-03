@@ -880,6 +880,109 @@ class Forest:
                 f"Internal error: unhandled backend {resolved_backend!r}"
             )
 
+    def quartet_qmetric(
+        self,
+        counts: np.ndarray,
+        group_pairs: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """
+        Compute the quartet qmetric for all quartet × group-pair combinations.
+
+        The qmetric is an entropy-like similarity score in [-1, +1] that
+        measures how consistently two groups of trees agree on the dominant
+        quartet topology.  It is computed from the per-group topology counts
+        returned by :meth:`quartet_topology`.
+
+        Score interpretation
+        --------------------
+        +1.0  Perfect agreement — both groups show identical topology
+              distributions.
+        0.0   No information — one or both groups has no trees with all
+              four taxa present.
+        -1.0  Perfect disagreement — groups favour opposite topologies.
+
+        Topology encoding
+        -----------------
+        Uses the same k=0,1,2 indices as :meth:`quartet_topology`.
+
+        Parameters
+        ----------
+        counts : np.ndarray, int32, shape (n_quartets, n_groups, 3)
+            Per-group topology count array.  Typically the return value of
+            ``forest.quartet_topology(quartets)``.  Must have exactly 3
+            topology slots (last axis size 3) and exactly ``self.n_groups``
+            groups (middle axis).
+        group_pairs : np.ndarray or None, optional
+            int32 array of shape (n_pairs, 2).  Each row ``[g1, g2]`` is an
+            ordered pair of group indices to compare.  Indices must satisfy
+            ``0 <= g1, g2 < self.n_groups``.  Defaults to all unordered pairs
+            ``{g1, g2}`` with ``g1 < g2``, enumerated in lexicographic order.
+            For a forest with a single group the default is an empty array and
+            the return value has shape ``(n_quartets, 0)``.
+
+        Returns
+        -------
+        qmetric : np.ndarray, float64, shape (n_quartets, n_pairs)
+            ``qmetric[qi, pi]`` is the qmetric score comparing groups
+            ``group_pairs[pi, 0]`` and ``group_pairs[pi, 1]`` for quartet
+            ``qi``.
+
+        Raises
+        ------
+        ValueError
+            If ``counts`` has the wrong shape or ``group_pairs`` contains
+            out-of-range indices.
+
+        Examples
+        --------
+        >>> q = Quartets.from_list(forest, [('A', 'B', 'C', 'D')])
+        >>> counts = forest.quartet_topology(q)          # (1, n_groups, 3)
+        >>> scores = forest.quartet_qmetric(counts)      # (1, n_pairs)
+        """
+        counts = np.asarray(counts, dtype=np.int32)
+        if counts.ndim != 3 or counts.shape[1] != self.n_groups or counts.shape[2] != 3:
+            raise ValueError(
+                f"counts must have shape (n_quartets, {self.n_groups}, 3), "
+                f"got {counts.shape}"
+            )
+        n_quartets = counts.shape[0]
+
+        # Build default group pairs: all (g1, g2) with g1 < g2
+        if group_pairs is None:
+            pairs = [
+                (g1, g2)
+                for g1 in range(self.n_groups)
+                for g2 in range(g1 + 1, self.n_groups)
+            ]
+            group_pairs = np.array(pairs, dtype=np.int32).reshape(-1, 2)
+        else:
+            group_pairs = np.asarray(group_pairs, dtype=np.int32)
+            if group_pairs.ndim != 2 or group_pairs.shape[1] != 2:
+                raise ValueError(
+                    "group_pairs must have shape (n_pairs, 2), "
+                    f"got {group_pairs.shape}"
+                )
+            if group_pairs.size > 0:
+                if group_pairs.min() < 0 or group_pairs.max() >= self.n_groups:
+                    raise ValueError(
+                        f"group_pairs indices must be in [0, {self.n_groups}), "
+                        f"got range [{group_pairs.min()}, {group_pairs.max()}]"
+                    )
+
+        n_pairs = len(group_pairs)
+        out = np.zeros((n_quartets, n_pairs), dtype=np.float64)
+
+        if n_quartets == 0 or n_pairs == 0:
+            return out
+
+        if _cpu_import_ok:
+            from quarimo._cpu_kernels import _qmetric_njit
+            _qmetric_njit(counts, group_pairs, n_quartets, n_pairs, out)
+        else:
+            Forest._qmetric_kernel(counts, group_pairs, n_quartets, n_pairs, out)
+
+        return out
+
     def _cuda_output_bytes_per_quartet(self, steiner: bool) -> int:
         """Bytes of GPU output array space required per quartet."""
         # counts: n_groups × 3 × int32 per quartet
@@ -1415,19 +1518,13 @@ class Forest:
             n3 = int(sorted_quartet_ids[qi, 3])
 
             for ti in range(n_trees):
-                ln0 = int(global_to_local[ti, n0])
-                ln1 = int(global_to_local[ti, n1])
-                ln2 = int(global_to_local[ti, n2])
-                ln3 = int(global_to_local[ti, n3])
-
+                ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = Forest._resolve_quartet(
+                    n0, n1, n2, n3, ti,
+                    global_to_local, node_offsets, tour_offsets, sp_offsets,
+                    lg_offsets, sp_tour_widths,
+                )
                 if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
                     continue
-
-                nb = int(node_offsets[ti])
-                tb = int(tour_offsets[ti])
-                sb = int(sp_offsets[ti])
-                lb = int(lg_offsets[ti])
-                tw = int(sp_tour_widths[ti])
 
                 l = int(all_first_occ[nb + ln0])
                 r = int(all_first_occ[nb + ln1])
@@ -1577,6 +1674,110 @@ class Forest:
                     # MOMENT D: replace the store above with:
                     #   hist[qi, topo, int(S / bin_width)] += 1
                     # Output is (n_quartets, 3, n_bins).
+
+    @staticmethod
+    def _qmetric_kernel(
+        counts: np.ndarray,
+        pair_indices: np.ndarray,
+        n_quartets: int,
+        n_pairs: int,
+        out: np.ndarray,
+    ) -> None:
+        """
+        **Private static.**  Pure-Python fallback for the qmetric kernel.
+
+        Mirrors ``_qmetric_njit`` exactly; used when Numba is unavailable.
+        """
+        import math as _math
+
+        LOG3_INV = 0.9102392266268374
+        for qi in range(n_quartets):
+            for pi in range(n_pairs):
+                g1 = int(pair_indices[pi, 0])
+                g2 = int(pair_indices[pi, 1])
+
+                ca0 = int(counts[qi, g1, 0])
+                ca1 = int(counts[qi, g1, 1])
+                ca2 = int(counts[qi, g1, 2])
+                cb0 = int(counts[qi, g2, 0])
+                cb1 = int(counts[qi, g2, 1])
+                cb2 = int(counts[qi, g2, 2])
+
+                Na = ca0 + ca1 + ca2
+                Nb = cb0 + cb1 + cb2
+
+                if Na == 0 or Nb == 0:
+                    out[qi, pi] = 0.0
+                    continue
+
+                pa0, pa1, pa2 = ca0 / Na, ca1 / Na, ca2 / Na
+                pb0, pb1, pb2 = cb0 / Nb, cb1 / Nb, cb2 / Nb
+
+                if pa0 >= pa1 and pa0 >= pa2:
+                    argmax_a = 0
+                elif pa1 >= pa2:
+                    argmax_a = 1
+                else:
+                    argmax_a = 2
+
+                if pb0 >= pb1 and pb0 >= pb2:
+                    argmax_b = 0
+                elif pb1 >= pb2:
+                    argmax_b = 1
+                else:
+                    argmax_b = 2
+
+                J = 1.0 if argmax_a == argmax_b else -1.0
+
+                q0, q1, q2 = pa0 * pb0, pa1 * pb1, pa2 * pb2
+                s = 0.0
+                if q0 > 0.0:
+                    s += q0 * _math.log(q0) * LOG3_INV
+                if q1 > 0.0:
+                    s += q1 * _math.log(q1) * LOG3_INV
+                if q2 > 0.0:
+                    s += q2 * _math.log(q2) * LOG3_INV
+
+                out[qi, pi] = J * (1.0 + s)
+
+    @staticmethod
+    def _resolve_quartet(n0, n1, n2, n3, ti,
+                         global_to_local,
+                         node_offsets, tour_offsets, sp_offsets, lg_offsets,
+                         sp_tour_widths):
+        """
+        **Private static.**  Map four global taxon IDs to tree-local positions
+        for tree *ti*.
+
+        Returns a 9-tuple ``(ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw)`` where:
+
+        ln0..ln3 : int
+            Local leaf IDs in tree *ti* (-1 if the taxon is absent).
+        nb, tb, sb, lb : int
+            Node / tour / sparse-table / log2-table CSR offsets for tree *ti*.
+        tw : int
+            Sparse-table column stride for tree *ti*.
+
+        The caller is responsible for checking::
+
+            if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
+                continue  # skip this (qi, ti) pair
+
+        before accessing ``all_first_occ[nb + ln0]`` etc.
+
+        Pure-Python counterpart of ``_resolve_quartet_nb`` and
+        ``_resolve_quartet_cuda``.
+        """
+        ln0 = int(global_to_local[ti, n0])
+        ln1 = int(global_to_local[ti, n1])
+        ln2 = int(global_to_local[ti, n2])
+        ln3 = int(global_to_local[ti, n3])
+        nb  = int(node_offsets[ti])
+        tb  = int(tour_offsets[ti])
+        sb  = int(sp_offsets[ti])
+        lb  = int(lg_offsets[ti])
+        tw  = int(sp_tour_widths[ti])
+        return ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw
 
     @staticmethod
     def _rmq_csr(

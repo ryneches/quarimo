@@ -366,6 +366,195 @@ class TestBackwardCompatibility:
         assert dists.shape == (1, 1, 3)
 
 
+class TestQuartetQmetric:
+    """Tests for Forest.quartet_qmetric."""
+
+    # ── Shared fixtures ─────────────────────────────────────────────────── #
+
+    @pytest.fixture
+    def two_group_forest(self):
+        """2-group forest with a single quartet (a,b,c,d).
+
+        Group A (idx 0): 2 trees both voting topology 0 — (ab)|(cd).
+        Group B (idx 1): 2 trees both voting topology 1 — (ac)|(bd).
+        """
+        groups = {
+            "A": [
+                "((a:1,b:1):1,(c:1,d:1):1);",
+                "((a:1,b:1):1,(c:1,d:1):1);",
+            ],
+            "B": [
+                "((a:1,c:1):1,(b:1,d:1):1);",
+                "((a:1,c:1):1,(b:1,d:1):1);",
+            ],
+        }
+        forest = Forest(groups)
+        q = Quartets.from_list(forest, [("a", "b", "c", "d")])
+        counts = forest.quartet_topology(q)
+        return forest, counts
+
+    @pytest.fixture
+    def single_group_forest(self):
+        """1-group forest; default group_pairs is empty."""
+        trees = ["((a:1,b:1):1,(c:1,d:1):1);"] * 3
+        forest = Forest(trees)
+        q = Quartets.from_list(forest, [("a", "b", "c", "d")])
+        counts = forest.quartet_topology(q)
+        return forest, counts
+
+    # ── Shape and dtype ──────────────────────────────────────────────────── #
+
+    def test_output_shape_two_groups(self, two_group_forest):
+        """Shape is (n_quartets, n_pairs) = (1, 1) for 2 groups, 1 quartet."""
+        forest, counts = two_group_forest
+        scores = forest.quartet_qmetric(counts)
+        assert scores.shape == (1, 1)
+        assert scores.dtype == np.float64
+
+    def test_output_shape_single_group(self, single_group_forest):
+        """Single group → 0 pairs → shape (n_quartets, 0)."""
+        forest, counts = single_group_forest
+        scores = forest.quartet_qmetric(counts)
+        assert scores.shape == (1, 0)
+
+    def test_output_shape_bulk_quartets(self):
+        """Shape is (n_quartets, n_pairs) for multiple quartets."""
+        groups = {
+            "A": ["((a:1,b:1):1,(c:1,d:1):1);", "((a:1,b:1):1,(c:1,d:1):1);"],
+            "B": ["((a:1,c:1):1,(b:1,d:1):1);", "((a:1,d:1):1,(b:1,c:1):1);"],
+        }
+        forest = Forest(groups)
+        quartets = [("a", "b", "c", "d"), ("a", "b", "c", "d")]  # 2 quartets
+        q = Quartets.from_list(forest, quartets)
+        counts = forest.quartet_topology(q)
+        scores = forest.quartet_qmetric(counts)
+        assert scores.shape == (2, 1)
+
+    # ── Correctness ──────────────────────────────────────────────────────── #
+
+    def test_perfect_agreement_is_plus_one(self, two_group_forest):
+        """Both groups identical → score == +1.0."""
+        groups = {
+            "A": ["((a:1,b:1):1,(c:1,d:1):1);"] * 4,
+            "B": ["((a:1,b:1):1,(c:1,d:1):1);"] * 4,
+        }
+        forest = Forest(groups)
+        q = Quartets.from_list(forest, [("a", "b", "c", "d")])
+        counts = forest.quartet_topology(q)
+        scores = forest.quartet_qmetric(counts)
+        assert abs(scores[0, 0] - 1.0) < 1e-12
+
+    def test_perfect_disagreement_is_minus_one(self, two_group_forest):
+        """Groups favour completely different topologies → score == -1.0."""
+        forest, counts = two_group_forest
+        scores = forest.quartet_qmetric(counts)
+        assert abs(scores[0, 0] - (-1.0)) < 1e-12
+
+    def test_missing_taxa_gives_zero(self):
+        """Quartet absent in one group → score == 0.0."""
+        groups = {
+            "A": ["((a:1,b:1):1,(c:1,d:1):1);"],
+            "B": ["((e:1,f:1):1,(g:1,h:1):1);"],  # disjoint taxa
+        }
+        forest = Forest(groups)
+        q = Quartets.from_list(forest, [("a", "b", "c", "d")])
+        counts = forest.quartet_topology(q)
+        # Group B has count 0 for this quartet
+        assert counts[0, 1].sum() == 0
+        scores = forest.quartet_qmetric(counts)
+        assert scores[0, 0] == 0.0
+
+    def test_score_in_range(self):
+        """All scores must lie in [-1, +1]."""
+        groups = {
+            "A": [
+                "((a:1,b:1):1,(c:1,d:1):1);",
+                "((a:1,c:1):1,(b:1,d:1):1);",
+                "((a:1,d:1):1,(b:1,c:1):1);",
+            ],
+            "B": [
+                "((a:1,b:1):1,(c:1,d:1):1);",
+                "((a:1,b:1):1,(c:1,d:1):1);",
+                "((a:1,c:1):1,(b:1,d:1):1);",
+            ],
+        }
+        forest = Forest(groups)
+        q = Quartets.from_list(forest, [("a", "b", "c", "d")])
+        counts = forest.quartet_topology(q)
+        scores = forest.quartet_qmetric(counts)
+        assert np.all(scores >= -1.0 - 1e-12)
+        assert np.all(scores <= 1.0 + 1e-12)
+
+    def test_same_dominant_topology_gives_positive_score(self):
+        """Agreeing dominant topology → positive score even if distributions differ."""
+        groups = {
+            "A": ["((a:1,b:1):1,(c:1,d:1):1);"] * 4,   # all topo 0
+            "B": [
+                "((a:1,b:1):1,(c:1,d:1):1);",           # topo 0
+                "((a:1,c:1):1,(b:1,d:1):1);",           # topo 1
+            ],
+        }
+        forest = Forest(groups)
+        q = Quartets.from_list(forest, [("a", "b", "c", "d")])
+        counts = forest.quartet_topology(q)
+        scores = forest.quartet_qmetric(counts)
+        assert scores[0, 0] > 0.0
+
+    # ── Three-group forest — all pairs ─────────────────────────────────────
+
+    def test_three_groups_default_pairs(self):
+        """3 groups → 3 pairs (0,1), (0,2), (1,2) by default."""
+        groups = {
+            "A": ["((a:1,b:1):1,(c:1,d:1):1);"],
+            "B": ["((a:1,b:1):1,(c:1,d:1):1);"],
+            "C": ["((a:1,c:1):1,(b:1,d:1):1);"],
+        }
+        forest = Forest(groups)
+        q = Quartets.from_list(forest, [("a", "b", "c", "d")])
+        counts = forest.quartet_topology(q)
+        scores = forest.quartet_qmetric(counts)
+        assert scores.shape == (1, 3)
+        # Groups A and B are identical → pair (0,1) should be +1
+        assert abs(scores[0, 0] - 1.0) < 1e-12
+        # Groups A/B vs C disagree → pairs (0,2) and (1,2) should be -1
+        assert abs(scores[0, 1] - (-1.0)) < 1e-12
+        assert abs(scores[0, 2] - (-1.0)) < 1e-12
+
+    # ── Custom group_pairs ───────────────────────────────────────────────── #
+
+    def test_custom_group_pairs(self, two_group_forest):
+        """Custom group_pairs selects specific comparisons."""
+        forest, counts = two_group_forest
+        gp = np.array([[1, 0]], dtype=np.int32)  # reversed order
+        scores = forest.quartet_qmetric(counts, group_pairs=gp)
+        assert scores.shape == (1, 1)
+        # Reversed pair is the same comparison — score should be the same
+        scores_default = forest.quartet_qmetric(counts)
+        assert abs(scores[0, 0] - scores_default[0, 0]) < 1e-12
+
+    def test_custom_group_pairs_same_group(self, two_group_forest):
+        """Comparing a group to itself gives +1."""
+        forest, counts = two_group_forest
+        gp = np.array([[0, 0]], dtype=np.int32)
+        scores = forest.quartet_qmetric(counts, group_pairs=gp)
+        assert abs(scores[0, 0] - 1.0) < 1e-12
+
+    # ── Validation errors ────────────────────────────────────────────────── #
+
+    def test_wrong_shape_raises(self, two_group_forest):
+        """Wrong counts shape raises ValueError."""
+        forest, counts = two_group_forest
+        bad_counts = np.zeros((1, 3), dtype=np.int32)  # missing n_groups axis
+        with pytest.raises(ValueError, match="shape"):
+            forest.quartet_qmetric(bad_counts)
+
+    def test_out_of_range_group_pair_raises(self, two_group_forest):
+        """Out-of-range group index raises ValueError."""
+        forest, counts = two_group_forest
+        gp = np.array([[0, 99]], dtype=np.int32)
+        with pytest.raises(ValueError, match="indices"):
+            forest.quartet_qmetric(counts, group_pairs=gp)
+
 class TestGroupOffsets:
     """Tests for group_offsets CSR array."""
 
