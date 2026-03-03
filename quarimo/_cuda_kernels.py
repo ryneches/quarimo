@@ -1,5 +1,5 @@
 """
-_kernels_cuda.py
+_cuda_kernels.py
 ================
 CUDA-accelerated quartet topology kernels using Numba CUDA.
 
@@ -7,36 +7,42 @@ This module contains ONLY numba.cuda code and should not import other project
 modules to avoid import-time complications. The module exposes GPU-accelerated
 kernels for quartet topology queries when a compatible CUDA GPU is available.
 
-Exported Functions
-------------------
-_rmq_csr_cuda : cuda.jit device function
-    O(1) range minimum query helper for CUDA kernels (device-only).
+Device helpers (inlined by PTX compiler, no call overhead)
+----------------------------------------------------------
+_rmq_csr_cuda
+    O(1) range minimum query over CSR-packed sparse table.
 
-_resolve_quartet_cuda : cuda.jit device function
-    Map four global taxon IDs to tree-local positions (device-only helper).
+_resolve_quartet_cuda
+    Map four global taxon IDs to tree-local positions.
 
-_quartet_topology_and_rd_cuda : cuda.jit device function
-    Six RMQ calls + four-point condition → topology and pair-sums (device-only helper).
+_quartet_topology_and_rd_cuda
+    Six RMQ calls + four-point condition → topology and pair-sums.
 
-_steiner_length_cuda : cuda.jit device function
-    Steiner spanning length of the winning quartet topology (device-only helper).
+_steiner_length_cuda
+    Steiner spanning length of the winning quartet topology.
 
-_quartet_counts_cuda : cuda.jit kernel
-    GPU-parallel quartet topology counts (no Steiner distances).
+Kernels (called from _forest.py via the cuda backend)
+------------------------------------------------------
+generate_quartets_cuda
+    1D kernel: materialise quartets from the deterministic sequence.
 
-_quartet_steiner_cuda : cuda.jit kernel
-    GPU-parallel quartet topology counts with Steiner distances.
+quartet_counts_cuda_unified
+    2D kernel: topology counts, on-GPU quartet generation, per-group output.
 
-_compute_cuda_grid : function
+quartet_steiner_cuda_unified
+    2D kernel: topology counts + Steiner distances, per-group output.
+
+_quartet_counts_cuda, _quartet_steiner_cuda
+    Pre-materialized variants (legacy; not used by the main dispatch path).
+
+_compute_cuda_grid
     Helper to compute CUDA grid dimensions.
 
 Notes
 -----
-- All kernel functions use @cuda.jit decoration
-- Device functions use @cuda.jit(device=True)
-- 2D thread grid (qi, ti) - each thread processes one (quartet, tree) pair
-- Atomic operations used for counts_out (multiple threads may write same cell)
-- steiner_out writes are conflict-free (one thread per (qi, ti) pair)
+- Kernel grid is 2D: x over quartets (qi), y over trees (ti).
+- counts and steiner_out accumulate with cuda.atomic.add (multiple threads
+  write to the same group row).
 """
 
 import numpy as np
@@ -60,36 +66,10 @@ if _CUDA_AVAILABLE:
     def _rmq_csr_cuda(l, r, sp_base, sp_stride, sparse_table, euler_depth,
                       log2_table, lg_base, tour_base, euler_tour):
         """
-        Device function for RMQ — inlined into CUDA kernels.
-        
-        This is a GPU device function that performs O(1) range minimum query
-        over CSR-packed sparse table. It cannot be called from CPU code.
-        
-        Parameters
-        ----------
-        l, r         : int  
-            Inclusive local tour range (l <= r).
-        sp_base      : int  
-            Offset of this tree's sparse table.
-        sp_stride    : int  
-            Column stride for sparse table.
-        sparse_table : device array
-            all_sparse_table on GPU.
-        euler_depth  : device array
-            all_euler_depth on GPU.
-        log2_table   : device array
-            all_log2_table on GPU.
-        lg_base      : int  
-            Offset of this tree's log2_table.
-        tour_base    : int  
-            Offset of this tree's tour.
-        euler_tour   : device array
-            all_euler_tour on GPU.
-        
-        Returns
-        -------
-        int  
-            Local node ID of the LCA.
+        O(1) RMQ over CSR-packed sparse table for a single tree (device-only).
+
+        Parameters and return value mirror ``_rmq_csr_nb``; all arrays are
+        device-resident.  See that function's docstring for details.
         """
         length = r - l + 1
         k = log2_table[lg_base + length]
@@ -271,31 +251,9 @@ if _CUDA_AVAILABLE:
         """
         Map four global taxon IDs to tree-local positions for tree *ti*.
 
-        Returns a 9-tuple ``(ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw)`` where:
-
-        ln0..ln3 : int32
-            Local leaf IDs in tree *ti* (-1 if the taxon is absent).
-        nb : int64
-            Node-array CSR offset for tree *ti*.
-        tb : int64
-            Euler-tour CSR offset for tree *ti*.
-        sb : int64
-            Sparse-table CSR offset for tree *ti*.
-        lb : int64
-            Log2-table CSR offset for tree *ti*.
-        tw : int32
-            Sparse-table column stride (= tour length) for tree *ti*.
-
-        The CSR offsets ``nb..tw`` are always valid regardless of taxon
-        presence.  The caller is responsible for checking::
-
-            if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
-                return  # skip this (qi, ti) thread
-
-        before accessing ``all_first_occ[nb + ln0]`` etc.
-
-        This device function is inlined by the PTX compiler into every kernel
-        that calls it; there is no function-call overhead at runtime.
+        CUDA device counterpart of ``_resolve_quartet_nb``; see that function's
+        docstring for the full return-value description and caller contract.
+        All arrays are device-resident.
         """
         ln0 = global_to_local[ti, n0]
         ln1 = global_to_local[ti, n1]
@@ -317,40 +275,9 @@ if _CUDA_AVAILABLE:
         """
         Six RMQ calls + four-point condition → topology and pair-sums.
 
-        Computes all six pairwise LCA root-distances for four taxa (whose first
-        Euler-tour occurrences are ``occ0..occ3``), applies the four-point
-        condition to determine the winning unrooted split, and returns the
-        topology index alongside all three pair-sums and the winning pair-sum.
-
-        Parameters
-        ----------
-        occ0..occ3 : int
-            First Euler-tour occurrences for the four taxa in tree *ti*.
-            All must be valid — the caller has already checked ``ln0..ln3 >= 0``
-            before computing these.
-        nb, tb, sb, lb, tw : int
-            CSR offsets and sparse-table stride for tree *ti*
-            (from ``_resolve_quartet_cuda``).
-        all_root_distance, all_sparse_table, all_euler_depth,
-        all_log2_table, all_euler_tour : device arrays
-            CSR-packed tree data on the GPU.
-
-        Returns
-        -------
-        topo : int
-            Winning topology index: 0 = (n0,n1)|(n2,n3),
-                                    1 = (n0,n2)|(n1,n3),
-                                    2 = (n0,n3)|(n1,n2).
-        r0, r1, r2 : float64
-            Pair-sums for each of the three topologies.
-        r_winner : float64
-            Score of the winning topology (max of r0, r1, r2).
-
-        Notes
-        -----
-        Uses ``>=`` comparisons so polytomies (tied scores) are handled
-        consistently.  This device function is inlined by the PTX compiler into
-        every kernel that calls it; there is no function-call overhead.
+        CUDA device counterpart of ``_quartet_topology_and_rd_nb``; see that
+        function's docstring for parameter and return-value descriptions.
+        All arrays are device-resident.
         """
         l = occ0; r = occ1
         if l > r: l, r = r, l
@@ -401,35 +328,9 @@ if _CUDA_AVAILABLE:
         """
         Steiner spanning length of the winning quartet topology.
 
-        Given the four local leaf IDs and the three pair-sums already computed
-        by ``_quartet_topology_and_rd_cuda``, returns the Steiner spanning
-        length of the minimal subtree connecting the four taxa.
-
-        Parameters
-        ----------
-        ln0..ln3 : int
-            Local leaf IDs in tree *ti* (all must be >= 0).
-        nb : int
-            Node-array CSR offset for tree *ti*.
-        r0, r1, r2 : float64
-            Pair-sums for the three topologies (from
-            ``_quartet_topology_and_rd_cuda``).
-        r_winner : float64
-            Score of the winning topology (max of r0, r1, r2).
-        all_root_distance : device array
-            CSR-packed root distances on the GPU.
-
-        Returns
-        -------
-        float64
-            Steiner spanning length S >= 0.
-
-        Notes
-        -----
-        Formula: S = Σ rd(leaf_i) − 0.5 * (r_winner + r0 + r1 + r2)
-
-        This device function is inlined by the PTX compiler into every kernel
-        that calls it; there is no function-call overhead at runtime.
+        CUDA device counterpart of ``_steiner_length_nb``; see that function's
+        docstring for parameter and return-value descriptions.
+        ``all_root_distance`` is device-resident.
         """
         leaf_sum = (all_root_distance[nb + ln0]
                   + all_root_distance[nb + ln1]
@@ -456,48 +357,11 @@ if _CUDA_AVAILABLE:
             n_trees,
             counts_out):
         """
-        CUDA counts-only quartet kernel.
-        
-        Each thread processes one (quartet, tree) pair. The 2D thread grid
-        has qi (quartet index) on the x-axis and ti (tree index) on the y-axis.
-        
-        Atomic operations are used for counts_out since multiple threads
-        may increment the same (qi, topology) cell.
-        
-        Parameters
-        ----------
-        sorted_quartet_ids : int32[n_quartets, 4] on device
-            Quartet taxa as sorted global IDs.
-        global_to_local : int32[n_trees, n_global_taxa] on device
-            Global ID → local leaf ID mapping (-1 if absent).
-        all_first_occ : int32[total_nodes] on device
-            CSR-packed first Euler tour occurrence.
-        all_root_distance : float64[total_nodes] on device
-            CSR-packed root distances.
-        all_euler_tour : int32[total_tour_length] on device
-            CSR-packed Euler tour.
-        all_euler_depth : int32[total_tour_length] on device
-            CSR-packed Euler tour depths.
-        all_sparse_table : int32[total_sparse_entries] on device
-            CSR-packed sparse tables for RMQ.
-        all_log2_table : int32[total_log2_entries] on device
-            CSR-packed log2 lookup tables.
-        node_offsets : int64[n_trees+1] on device
-            CSR offsets into node arrays.
-        tour_offsets : int64[n_trees+1] on device
-            CSR offsets into tour arrays.
-        sp_offsets : int64[n_trees+1] on device
-            CSR offsets into sparse table.
-        lg_offsets : int64[n_trees+1] on device
-            CSR offsets into log2 table.
-        sp_tour_widths : int32[n_trees] on device
-            Sparse table column strides.
-        n_quartets : int
-            Number of quartets to process.
-        n_trees : int
-            Number of trees in collection.
-        counts_out : int32[n_quartets, 3] on device
-            Output array for topology counts.
+        Pre-materialized counts-only quartet kernel (legacy).
+
+        Not used by the main dispatch path in ``_forest.py``; superseded by
+        ``quartet_counts_cuda_unified``.  Output shape is ``(n_quartets, 3)``
+        — no per-group axis.
         """
         # 2D thread grid: (qi, ti)
         qi = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
@@ -553,20 +417,11 @@ if _CUDA_AVAILABLE:
             counts_out,
             steiner_out):
         """
-        CUDA quartet kernel with Steiner distances.
-        
-        Identical to _quartet_counts_cuda plus Steiner distance calculation.
-        Each thread computes one (quartet, tree) pair.
-        
-        The steiner_out write is conflict-free since each thread writes to
-        its unique (qi, ti, topo) location.
-        
-        Parameters
-        ----------
-        Same as _quartet_counts_cuda, plus:
-        
-        steiner_out : float64[n_quartets, n_trees, 3] on device
-            Output array for Steiner distances.
+        Pre-materialized Steiner quartet kernel (legacy).
+
+        Not used by the main dispatch path in ``_forest.py``; superseded by
+        ``quartet_steiner_cuda_unified``.  Output shapes are ``(n_quartets, 3)``
+        — no per-group axis.
         """
         # 2D thread grid: (qi, ti)
         qi = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
@@ -753,14 +608,9 @@ if _CUDA_AVAILABLE:
         """
         Unified kernel with Steiner distances.
 
-        Same as quartet_counts_cuda_unified but also computes Steiner
-        spanning lengths for winning topologies.
-
-        Grid/Block Configuration
-        -------------------------
-        - Grid: 2D grid — x over quartets, y over trees
-        - threads_per_block: typically (16, 16) = 256 threads per block
-        - Each thread processes one (quartet, tree) pair
+        Same as ``quartet_counts_cuda_unified`` plus Steiner spanning-length
+        accumulation per group.  Both ``counts`` and ``steiner_out`` are
+        updated with ``cuda.atomic.add``; both must be pre-zeroed by the host.
         """
         qi, ti = cuda.grid(2)
         n_trees = node_offsets.shape[0] - 1
@@ -805,9 +655,6 @@ if _CUDA_AVAILABLE:
 def _compute_cuda_grid(n_quartets, n_trees, threads_per_block=(16, 16)):
     """
     Compute CUDA grid dimensions for the 2D (qi, ti) thread space.
-    
-    This helper function calculates the number of blocks needed in each
-    dimension to cover all quartets and trees.
 
     Parameters
     ----------

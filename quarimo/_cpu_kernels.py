@@ -1,5 +1,5 @@
 """
-_kernels_cpu.py
+_cpu_kernels.py
 ===============
 CPU-accelerated quartet topology kernels using Numba.
 
@@ -13,9 +13,6 @@ Exported Functions
 _rmq_csr_nb : njit function
     O(1) range minimum query helper for CSR-packed arrays.
 
-_quartet_counts_njit : njit function  
-    Parallel quartet topology counts (no Steiner distances).
-
 _resolve_quartet_nb : njit function
     Map four global taxon IDs to per-tree local positions (helper).
 
@@ -25,6 +22,9 @@ _quartet_topology_and_rd_nb : njit function
 _steiner_length_nb : njit function
     Steiner spanning length of the winning quartet topology (helper).
 
+_quartet_counts_njit : njit function
+    Parallel quartet topology counts (no Steiner distances).
+
 _quartet_steiner_njit : njit function
     Parallel quartet topology counts with Steiner distances.
 
@@ -33,10 +33,10 @@ _qmetric_njit : njit function
 
 Notes
 -----
-- All functions are decorated with @njit for numba compilation
-- Functions use prange for parallel execution when numba is available
-- When numba is unavailable, functions run as pure Python (slower but functional)
-- cache=True persists compiled binary to disk for faster subsequent runs
+- Helper functions (_rmq_csr_nb, _resolve_quartet_nb, etc.) are inlined by the
+  Numba JIT compiler; there is no function-call overhead at runtime.
+- Parallel kernels use prange; when numba is unavailable prange falls back to range.
+- cache=True persists compiled binaries to disk for faster subsequent runs.
 """
 
 import math
@@ -73,35 +73,32 @@ def _rmq_csr_nb(l, r,
                 lg_base, tour_base,
                 euler_tour):
     """
-    O(1) RMQ over CSR-packed arrays for a single tree.
-
-    This is a helper function inlined into the quartet kernels. All index
-    arguments are absolute positions in the flat buffers.
+    O(1) RMQ over CSR-packed sparse table for a single tree.
 
     Parameters
     ----------
-    l, r         : int  
+    l, r : int
         Inclusive local tour range (l <= r).
-    sp_base      : int  
+    sp_base : int
         Offset of this tree's sparse table in all_sparse_table.
-    sp_stride    : int  
-        sp_tour_widths[ti] — column stride.
-    sparse_table : int32[:]  
-        all_sparse_table.
-    euler_depth  : int32[:]  
-        all_euler_depth.
-    log2_table   : int32[:]  
-        all_log2_table.
-    lg_base      : int  
-        Offset of this tree's log2_table.
-    tour_base    : int  
-        Offset of this tree's tour in all_euler_tour/depth.
-    euler_tour   : int32[:]  
-        all_euler_tour.
+    sp_stride : int
+        Column stride (= tour length for this tree).
+    sparse_table : int32[:]
+        CSR-packed sparse table (min-position per range/level).
+    euler_depth : int32[:]
+        CSR-packed Euler-tour depths.
+    log2_table : int32[:]
+        CSR-packed floor-log2 lookup (indexed by range length).
+    lg_base : int
+        Offset of this tree's log2_table slice.
+    tour_base : int
+        Offset of this tree's Euler-tour slice.
+    euler_tour : int32[:]
+        CSR-packed Euler tour (local node IDs).
 
     Returns
     -------
-    int  
+    int
         Local node ID of the LCA.
     """
     length = r - l + 1
@@ -146,9 +143,6 @@ def _resolve_quartet_nb(n0, n1, n2, n3, ti,
             continue  # skip this (qi, ti) pair
 
     before accessing ``all_first_occ[nb + ln0]`` etc.
-
-    This function is inlined by the Numba JIT compiler into every kernel that
-    calls it, so there is no function-call overhead at runtime.
     """
     ln0 = global_to_local[ti, n0]
     ln1 = global_to_local[ti, n1]
@@ -204,8 +198,7 @@ def _quartet_topology_and_rd_nb(occ0, occ1, occ2, occ3,
     Notes
     -----
     Uses ``>=`` comparisons so polytomies (tied scores) are handled
-    consistently.  This function is inlined by the Numba JIT compiler into
-    every kernel that calls it; there is no function-call overhead at runtime.
+    consistently.
     """
     l = occ0; r = occ1
     if l > r: l, r = r, l
@@ -283,9 +276,6 @@ def _steiner_length_nb(ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_di
     Notes
     -----
     Formula: S = Σ rd(leaf_i) − 0.5 * (r_winner + r0 + r1 + r2)
-
-    This function is inlined by the Numba JIT compiler into every kernel that
-    calls it; there is no function-call overhead at runtime.
     """
     leaf_sum = (all_root_distance[nb + ln0]
               + all_root_distance[nb + ln1]
@@ -316,46 +306,28 @@ def _quartet_counts_njit(
     """
     Numba-compiled counts-only quartet kernel.
 
-    The outer loop over qi runs in parallel via prange; the inner loop over
-    ti is sequential. No atomics are needed: each parallel thread owns its
-    entire counts_out[qi, :, :] slice.
+    Outer loop over qi runs in parallel via prange; inner loop over ti is
+    sequential.  No atomics needed: each prange thread owns its entire
+    counts_out[qi, :, :] slice.
 
     Parameters
     ----------
     sorted_quartet_ids : int32[n_quartets, 4]
         Quartet taxa as sorted global IDs.
     global_to_local : int32[n_trees, n_global_taxa]
-        Global ID → local leaf ID mapping (-1 if absent).
-    all_first_occ : int32[total_nodes]
-        CSR-packed first Euler tour occurrence for each node.
-    all_root_distance : float64[total_nodes]
-        CSR-packed root distances.
-    all_euler_tour : int32[total_tour_length]
-        CSR-packed Euler tour.
-    all_euler_depth : int32[total_tour_length]
-        CSR-packed Euler tour depths.
-    all_sparse_table : int32[total_sparse_entries]
-        CSR-packed sparse tables for RMQ.
-    all_log2_table : int32[total_log2_entries]
-        CSR-packed log2 lookup tables.
-    node_offsets : int64[n_trees+1]
-        CSR offsets into node arrays.
-    tour_offsets : int64[n_trees+1]
-        CSR offsets into tour arrays.
-    sp_offsets : int64[n_trees+1]
-        CSR offsets into sparse table.
-    lg_offsets : int64[n_trees+1]
-        CSR offsets into log2 table.
+        Global taxon ID → local leaf ID (-1 if absent).
+    all_first_occ, all_root_distance, all_euler_tour, all_euler_depth,
+    all_sparse_table, all_log2_table : CSR-packed tree arrays
+        See Forest class docs for layout details.
+    node_offsets, tour_offsets, sp_offsets, lg_offsets : int64[n_trees+1]
+        CSR offset vectors into the corresponding flat arrays.
     sp_tour_widths : int32[n_trees]
-        Sparse table column strides.
-    n_quartets : int
-        Number of quartets to process.
-    n_trees : int
-        Number of trees in collection.
+        Sparse-table column stride for each tree.
+    n_quartets, n_trees : int
     tree_to_group_idx : int32[n_trees]
         Maps each tree index to its group index.
     counts_out : int32[n_quartets, n_groups, 3]
-        Output array for topology counts per group.
+        Accumulated in-place; pre-filled with zeros by caller.
     """
     for qi in prange(n_quartets):
         n0 = sorted_quartet_ids[qi, 0]

@@ -1472,42 +1472,10 @@ class Forest:
 
         Steiner bypass
         --------------
-        The sentinel value ``steiner_out = np.empty(0, dtype=np.float64)``
-        signals counts-only mode.  Inside the per-(qi,ti) body, the Steiner
-        block (4 float reads + 9 float ops + 1 array write) is skipped with a
-        single ``if steiner_out.size > 0`` guard.  No branching overhead is
-        incurred in the 6-RMQ topology core.
-
-        On GPU (numba.cuda.jit), ``steiner_out.size`` resolves at kernel-launch
-        time to a compile-time constant when the array is device-resident, so
-        the branch is eliminated entirely by the JIT compiler.
-
-        GPU conversion
-        --------------
-        Replace the two Python for-loops with:
-
-          qi = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
-          ti = cuda.blockIdx.y * cuda.blockDim.y + cuda.threadIdx.y
-          if qi >= n_quartets or ti >= n_trees: return
-
-        steiner_out[qi, ti, topo] = S  is a plain global-memory store (no
-        atomic needed — each thread owns a unique (qi, ti) row).
-        counts_out[qi, topo] += 1  requires cuda.atomic.add.
-
-        Eligible for @numba.njit (CPU) or @numba.cuda.jit (GPU) decoration
-        without modification.
-
-        Statistical moment notes
-        ------------------------
-        MOMENT B — replace steiner_out[qi, ti, topo] = S with Welford
-          accumulation into mean_k[qi, topo] and M2_k[qi, topo], reducing
-          output from (n_quartets, n_trees, 3) to (n_quartets, 3, 3).
-
-        MOMENT C — replace with: weighted_counts[qi, topo] += 1.0 / S
-          Output shrinks to (n_quartets, 3) float64.
-
-        MOMENT D — replace with: hist[qi, topo, int(S / bin_width)] += 1
-          Output is (n_quartets, 3, n_bins).
+        The sentinel ``steiner_out = np.empty(0, dtype=np.float64)`` signals
+        counts-only mode.  The Steiner block is skipped with a single
+        ``if steiner_out.size > 0`` guard; no branching overhead in the
+        topology core.
         """
         compute_steiner = steiner_out.size > 0
 
@@ -1544,18 +1512,6 @@ class Forest:
                         ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner,
                         all_root_distance,
                     )
-
-                    # MOMENT B: replace the store above with Welford accumulation
-                    # into mean_k[qi, topo] and M2_k[qi, topo], reducing the
-                    # output from (n_quartets, n_trees, 3) to (n_quartets, 3, 3).
-
-                    # MOMENT C: replace the store above with:
-                    #   weighted_counts[qi, topo] += 1.0 / S
-                    # Output shrinks to (n_quartets, 3) float64.
-
-                    # MOMENT D: replace the store above with:
-                    #   hist[qi, topo, int(S / bin_width)] += 1
-                    # Output is (n_quartets, 3, n_bins).
 
     @staticmethod
     def _qmetric_kernel(
