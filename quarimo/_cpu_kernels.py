@@ -22,6 +22,9 @@ _resolve_quartet_nb : njit function
 _quartet_topology_and_rd_nb : njit function
     Six LCA calls + four-point condition → topology and pair-sums (helper).
 
+_steiner_length_nb : njit function
+    Steiner spanning length of the winning quartet topology (helper).
+
 _quartet_steiner_njit : njit function
     Parallel quartet topology counts with Steiner distances.
 
@@ -249,6 +252,48 @@ def _quartet_topology_and_rd_nb(occ0, occ1, occ2, occ3,
     return topo, r0, r1, r2, r_winner
 
 
+@njit(cache=True)
+def _steiner_length_nb(ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance):
+    """
+    Steiner spanning length of the winning quartet topology.
+
+    Given the four local leaf IDs and the three pair-sums already computed by
+    ``_quartet_topology_and_rd_nb``, returns the Steiner spanning length of the
+    minimal subtree connecting the four taxa.
+
+    Parameters
+    ----------
+    ln0..ln3 : int
+        Local leaf IDs in tree *ti* (all must be >= 0; caller has checked).
+    nb : int
+        Node-array CSR offset for tree *ti*.
+    r0, r1, r2 : float64
+        Pair-sums for each of the three topologies (from
+        ``_quartet_topology_and_rd_nb``).
+    r_winner : float64
+        Score of the winning topology (max of r0, r1, r2).
+    all_root_distance : float64[:]
+        CSR-packed root distances.
+
+    Returns
+    -------
+    float64
+        Steiner spanning length S >= 0.
+
+    Notes
+    -----
+    Formula: S = Σ rd(leaf_i) − 0.5 * (r_winner + r0 + r1 + r2)
+
+    This function is inlined by the Numba JIT compiler into every kernel that
+    calls it; there is no function-call overhead at runtime.
+    """
+    leaf_sum = (all_root_distance[nb + ln0]
+              + all_root_distance[nb + ln1]
+              + all_root_distance[nb + ln2]
+              + all_root_distance[nb + ln3])
+    return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
+
+
 @njit(parallel=True, cache=True)
 def _quartet_counts_njit(
         sorted_quartet_ids,
@@ -402,14 +447,9 @@ def _quartet_steiner_njit(
             )
             gi = tree_to_group_idx[ti]
             counts_out[qi, gi, topo] += 1
-
-            # Compute Steiner distance
-            leaf_rd_sum = (all_root_distance[nb + ln0]
-                         + all_root_distance[nb + ln1]
-                         + all_root_distance[nb + ln2]
-                         + all_root_distance[nb + ln3])
-            S = leaf_rd_sum - (r_winner + r0 + r1 + r2) * 0.5
-            steiner_out[qi, gi, topo] += S
+            steiner_out[qi, gi, topo] += _steiner_length_nb(
+                ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance,
+            )
 
 
 # ======================================================================== #

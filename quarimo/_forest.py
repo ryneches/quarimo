@@ -1540,14 +1540,10 @@ class Forest:
                 counts_out[qi, gi, topo] += 1
 
                 if compute_steiner:
-                    leaf_rd_sum = (
-                        float(all_root_distance[nb + ln0])
-                        + float(all_root_distance[nb + ln1])
-                        + float(all_root_distance[nb + ln2])
-                        + float(all_root_distance[nb + ln3])
+                    steiner_out[qi, gi, topo] += Forest._steiner_length(
+                        ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner,
+                        all_root_distance,
                     )
-                    S = leaf_rd_sum - (r_winner + r0 + r1 + r2) * 0.5
-                    steiner_out[qi, gi, topo] += S
 
                     # MOMENT B: replace the store above with Welford accumulation
                     # into mean_k[qi, topo] and M2_k[qi, topo], reducing the
@@ -1733,6 +1729,47 @@ class Forest:
             topo = 2; r_winner = r2
 
         return topo, r0, r1, r2, r_winner
+
+    @staticmethod
+    def _steiner_length(ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance):
+        """
+        **Private static.**  Steiner spanning length of the winning quartet
+        topology.
+
+        Given the four local leaf IDs and the three pair-sums already computed
+        by ``Forest._quartet_topology_and_rd``, returns the Steiner spanning
+        length of the minimal subtree connecting the four taxa.
+
+        Parameters
+        ----------
+        ln0..ln3 : int
+            Local leaf IDs in tree *ti* (all must be >= 0).
+        nb : int
+            Node-array CSR offset for tree *ti*.
+        r0, r1, r2 : float
+            Pair-sums for the three topologies.
+        r_winner : float
+            Score of the winning topology (max of r0, r1, r2).
+        all_root_distance : np.ndarray
+            CSR-packed root distances.
+
+        Returns
+        -------
+        float
+            Steiner spanning length S >= 0.
+
+        Notes
+        -----
+        Formula: S = Σ rd(leaf_i) − 0.5 * (r_winner + r0 + r1 + r2)
+
+        Pure-Python counterpart of ``_steiner_length_nb`` and
+        ``_steiner_length_cuda``.
+        """
+        leaf_sum = (float(all_root_distance[nb + ln0])
+                  + float(all_root_distance[nb + ln1])
+                  + float(all_root_distance[nb + ln2])
+                  + float(all_root_distance[nb + ln3]))
+        return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
 
     @staticmethod
     def _rmq_csr(

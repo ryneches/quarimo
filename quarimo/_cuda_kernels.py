@@ -18,6 +18,9 @@ _resolve_quartet_cuda : cuda.jit device function
 _quartet_topology_and_rd_cuda : cuda.jit device function
     Six RMQ calls + four-point condition → topology and pair-sums (device-only helper).
 
+_steiner_length_cuda : cuda.jit device function
+    Steiner spanning length of the winning quartet topology (device-only helper).
+
 _quartet_counts_cuda : cuda.jit kernel
     GPU-parallel quartet topology counts (no Steiner distances).
 
@@ -393,6 +396,47 @@ if _CUDA_AVAILABLE:
 
         return topo, r0, r1, r2, r_winner
 
+    @cuda.jit(device=True)
+    def _steiner_length_cuda(ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance):
+        """
+        Steiner spanning length of the winning quartet topology.
+
+        Given the four local leaf IDs and the three pair-sums already computed
+        by ``_quartet_topology_and_rd_cuda``, returns the Steiner spanning
+        length of the minimal subtree connecting the four taxa.
+
+        Parameters
+        ----------
+        ln0..ln3 : int
+            Local leaf IDs in tree *ti* (all must be >= 0).
+        nb : int
+            Node-array CSR offset for tree *ti*.
+        r0, r1, r2 : float64
+            Pair-sums for the three topologies (from
+            ``_quartet_topology_and_rd_cuda``).
+        r_winner : float64
+            Score of the winning topology (max of r0, r1, r2).
+        all_root_distance : device array
+            CSR-packed root distances on the GPU.
+
+        Returns
+        -------
+        float64
+            Steiner spanning length S >= 0.
+
+        Notes
+        -----
+        Formula: S = Σ rd(leaf_i) − 0.5 * (r_winner + r0 + r1 + r2)
+
+        This device function is inlined by the PTX compiler into every kernel
+        that calls it; there is no function-call overhead at runtime.
+        """
+        leaf_sum = (all_root_distance[nb + ln0]
+                  + all_root_distance[nb + ln1]
+                  + all_root_distance[nb + ln2]
+                  + all_root_distance[nb + ln3])
+        return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
+
     @cuda.jit
     def _quartet_counts_cuda(
             sorted_quartet_ids,
@@ -559,12 +603,9 @@ if _CUDA_AVAILABLE:
         cuda.atomic.add(counts_out, (qi, topo), 1)
 
         # Compute and store Steiner distance (conflict-free write)
-        leaf_rd_sum = (all_root_distance[nb + ln0]
-                     + all_root_distance[nb + ln1]
-                     + all_root_distance[nb + ln2]
-                     + all_root_distance[nb + ln3])
-        S = leaf_rd_sum - (r_winner + r0 + r1 + r2) * 0.5
-        steiner_out[qi, ti, topo] = S
+        steiner_out[qi, ti, topo] = _steiner_length_cuda(
+            ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance,
+        )
 
 
     # ======================================================================== #
@@ -752,18 +793,13 @@ if _CUDA_AVAILABLE:
             all_log2_table, all_euler_tour,
         )
 
-        # Compute Steiner distance
-        leaf_sum = (all_root_distance[nb + ln0]
-                  + all_root_distance[nb + ln1]
-                  + all_root_distance[nb + ln2]
-                  + all_root_distance[nb + ln3])
-        steiner = leaf_sum - (r_winner + r0 + r1 + r2) / 2.0
-
         # Store results — both counts and steiner need atomics (multiple ti
         # threads share the same group row). steiner_out is pre-zeroed by host.
         gi = tree_to_group_idx[ti]
         cuda.atomic.add(counts, (qi, gi, topo), 1)
-        cuda.atomic.add(steiner_out, (qi, gi, topo), steiner)
+        cuda.atomic.add(steiner_out, (qi, gi, topo), _steiner_length_cuda(
+            ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance,
+        ))
 
 
 def _compute_cuda_grid(n_quartets, n_trees, threads_per_block=(16, 16)):
