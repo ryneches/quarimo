@@ -19,6 +19,9 @@ _quartet_counts_njit : njit function
 _resolve_quartet_nb : njit function
     Map four global taxon IDs to per-tree local positions (helper).
 
+_quartet_topology_and_rd_nb : njit function
+    Six LCA calls + four-point condition → topology and pair-sums (helper).
+
 _quartet_steiner_njit : njit function
     Parallel quartet topology counts with Steiner distances.
 
@@ -156,6 +159,96 @@ def _resolve_quartet_nb(n0, n1, n2, n3, ti,
     return ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw
 
 
+@njit(cache=True)
+def _quartet_topology_and_rd_nb(occ0, occ1, occ2, occ3,
+                                 nb, tb, sb, lb, tw,
+                                 all_root_distance,
+                                 all_sparse_table, all_euler_depth,
+                                 all_log2_table, all_euler_tour):
+    """
+    Six RMQ calls + four-point condition → topology and pair-sums.
+
+    Computes all six pairwise LCA root-distances for four taxa (whose first
+    Euler-tour occurrences are ``occ0..occ3``), applies the four-point
+    condition to determine the winning unrooted split, and returns the topology
+    index alongside all three pair-sums and the winning pair-sum.
+
+    Parameters
+    ----------
+    occ0..occ3 : int
+        First Euler-tour occurrences for the four taxa in tree *ti*.
+        All must be valid — the caller has already checked ``ln0..ln3 >= 0``
+        before computing these.
+    nb, tb, sb, lb, tw : int
+        CSR offsets and sparse-table stride for tree *ti*
+        (from ``_resolve_quartet_nb``).
+    all_root_distance : float64[:]
+        CSR-packed root distances.
+    all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour
+        CSR-packed RMQ arrays.
+
+    Returns
+    -------
+    topo : int
+        Winning topology index: 0 = (n0,n1)|(n2,n3),
+                                1 = (n0,n2)|(n1,n3),
+                                2 = (n0,n3)|(n1,n2).
+    r0, r1, r2 : float64
+        Pair-sums for each of the three topologies.
+    r_winner : float64
+        Score of the winning topology (max of r0, r1, r2).
+
+    Notes
+    -----
+    Uses ``>=`` comparisons so polytomies (tied scores) are handled
+    consistently.  This function is inlined by the Numba JIT compiler into
+    every kernel that calls it; there is no function-call overhead at runtime.
+    """
+    l = occ0; r = occ1
+    if l > r: l, r = r, l
+    rd01 = all_root_distance[nb + _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
+                                               all_euler_depth, all_log2_table,
+                                               lb, tb, all_euler_tour)]
+    l = occ0; r = occ2
+    if l > r: l, r = r, l
+    rd02 = all_root_distance[nb + _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
+                                               all_euler_depth, all_log2_table,
+                                               lb, tb, all_euler_tour)]
+    l = occ0; r = occ3
+    if l > r: l, r = r, l
+    rd03 = all_root_distance[nb + _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
+                                               all_euler_depth, all_log2_table,
+                                               lb, tb, all_euler_tour)]
+    l = occ1; r = occ2
+    if l > r: l, r = r, l
+    rd12 = all_root_distance[nb + _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
+                                               all_euler_depth, all_log2_table,
+                                               lb, tb, all_euler_tour)]
+    l = occ1; r = occ3
+    if l > r: l, r = r, l
+    rd13 = all_root_distance[nb + _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
+                                               all_euler_depth, all_log2_table,
+                                               lb, tb, all_euler_tour)]
+    l = occ2; r = occ3
+    if l > r: l, r = r, l
+    rd23 = all_root_distance[nb + _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
+                                               all_euler_depth, all_log2_table,
+                                               lb, tb, all_euler_tour)]
+
+    r0 = rd01 + rd23  # topology 0: (n0,n1)|(n2,n3)
+    r1 = rd02 + rd13  # topology 1: (n0,n2)|(n1,n3)
+    r2 = rd03 + rd12  # topology 2: (n0,n3)|(n1,n2)
+
+    if r0 >= r1 and r0 >= r2:
+        topo = 0; r_winner = r0
+    elif r1 >= r0 and r1 >= r2:
+        topo = 1; r_winner = r1
+    else:
+        topo = 2; r_winner = r2
+
+    return topo, r0, r1, r2, r_winner
+
+
 @njit(parallel=True, cache=True)
 def _quartet_counts_njit(
         sorted_quartet_ids,
@@ -234,55 +327,15 @@ def _quartet_counts_njit(
             if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
                 continue
 
-            # Compute 6 pairwise LCAs
-            l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln1]
-            if l > r: l, r = r, l
-            lca = _rmq_csr_nb(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                              all_log2_table, lb, tb, all_euler_tour)
-            rd01 = all_root_distance[nb + lca]
-
-            l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln2]
-            if l > r: l, r = r, l
-            lca = _rmq_csr_nb(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                              all_log2_table, lb, tb, all_euler_tour)
-            rd02 = all_root_distance[nb + lca]
-
-            l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln3]
-            if l > r: l, r = r, l
-            lca = _rmq_csr_nb(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                              all_log2_table, lb, tb, all_euler_tour)
-            rd03 = all_root_distance[nb + lca]
-
-            l = all_first_occ[nb + ln1]; r = all_first_occ[nb + ln2]
-            if l > r: l, r = r, l
-            lca = _rmq_csr_nb(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                              all_log2_table, lb, tb, all_euler_tour)
-            rd12 = all_root_distance[nb + lca]
-
-            l = all_first_occ[nb + ln1]; r = all_first_occ[nb + ln3]
-            if l > r: l, r = r, l
-            lca = _rmq_csr_nb(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                              all_log2_table, lb, tb, all_euler_tour)
-            rd13 = all_root_distance[nb + lca]
-
-            l = all_first_occ[nb + ln2]; r = all_first_occ[nb + ln3]
-            if l > r: l, r = r, l
-            lca = _rmq_csr_nb(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                              all_log2_table, lb, tb, all_euler_tour)
-            rd23 = all_root_distance[nb + lca]
-
-            # Determine winning topology
-            r0 = rd01 + rd23  # (n0,n1)|(n2,n3)
-            r1 = rd02 + rd13  # (n0,n2)|(n1,n3)
-            r2 = rd03 + rd12  # (n0,n3)|(n1,n2)
-
-            if r0 >= r1 and r0 >= r2:
-                topo = 0
-            elif r1 >= r0 and r1 >= r2:
-                topo = 1
-            else:
-                topo = 2
-
+            occ0 = all_first_occ[nb + ln0]
+            occ1 = all_first_occ[nb + ln1]
+            occ2 = all_first_occ[nb + ln2]
+            occ3 = all_first_occ[nb + ln3]
+            topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_nb(
+                occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+                all_root_distance, all_sparse_table, all_euler_depth,
+                all_log2_table, all_euler_tour,
+            )
             counts_out[qi, tree_to_group_idx[ti], topo] += 1
 
 
@@ -338,55 +391,15 @@ def _quartet_steiner_njit(
             if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
                 continue
 
-            # Compute 6 pairwise LCAs (identical to counts kernel)
-            l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln1]
-            if l > r: l, r = r, l
-            lca = _rmq_csr_nb(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                              all_log2_table, lb, tb, all_euler_tour)
-            rd01 = all_root_distance[nb + lca]
-
-            l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln2]
-            if l > r: l, r = r, l
-            lca = _rmq_csr_nb(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                              all_log2_table, lb, tb, all_euler_tour)
-            rd02 = all_root_distance[nb + lca]
-
-            l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln3]
-            if l > r: l, r = r, l
-            lca = _rmq_csr_nb(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                              all_log2_table, lb, tb, all_euler_tour)
-            rd03 = all_root_distance[nb + lca]
-
-            l = all_first_occ[nb + ln1]; r = all_first_occ[nb + ln2]
-            if l > r: l, r = r, l
-            lca = _rmq_csr_nb(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                              all_log2_table, lb, tb, all_euler_tour)
-            rd12 = all_root_distance[nb + lca]
-
-            l = all_first_occ[nb + ln1]; r = all_first_occ[nb + ln3]
-            if l > r: l, r = r, l
-            lca = _rmq_csr_nb(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                              all_log2_table, lb, tb, all_euler_tour)
-            rd13 = all_root_distance[nb + lca]
-
-            l = all_first_occ[nb + ln2]; r = all_first_occ[nb + ln3]
-            if l > r: l, r = r, l
-            lca = _rmq_csr_nb(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                              all_log2_table, lb, tb, all_euler_tour)
-            rd23 = all_root_distance[nb + lca]
-
-            # Determine winning topology (track r_winner for Steiner)
-            r0 = rd01 + rd23  # (n0,n1)|(n2,n3)
-            r1 = rd02 + rd13  # (n0,n2)|(n1,n3)
-            r2 = rd03 + rd12  # (n0,n3)|(n1,n2)
-
-            if r0 >= r1 and r0 >= r2:
-                topo = 0; r_winner = r0
-            elif r1 >= r0 and r1 >= r2:
-                topo = 1; r_winner = r1
-            else:
-                topo = 2; r_winner = r2
-
+            occ0 = all_first_occ[nb + ln0]
+            occ1 = all_first_occ[nb + ln1]
+            occ2 = all_first_occ[nb + ln2]
+            occ3 = all_first_occ[nb + ln3]
+            topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_nb(
+                occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+                all_root_distance, all_sparse_table, all_euler_depth,
+                all_log2_table, all_euler_tour,
+            )
             gi = tree_to_group_idx[ti]
             counts_out[qi, gi, topo] += 1
 

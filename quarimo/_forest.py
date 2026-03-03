@@ -1526,127 +1526,15 @@ class Forest:
                 if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
                     continue
 
-                l = int(all_first_occ[nb + ln0])
-                r = int(all_first_occ[nb + ln1])
-                if l > r:
-                    l, r = r, l
-                lca = Forest._rmq_csr(
-                    l,
-                    r,
-                    sb,
-                    tw,
-                    all_sparse_table,
-                    all_euler_depth,
-                    all_log2_table,
-                    lb,
-                    tb,
-                    all_euler_tour,
+                occ0 = int(all_first_occ[nb + ln0])
+                occ1 = int(all_first_occ[nb + ln1])
+                occ2 = int(all_first_occ[nb + ln2])
+                occ3 = int(all_first_occ[nb + ln3])
+                topo, r0, r1, r2, r_winner = Forest._quartet_topology_and_rd(
+                    occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+                    all_root_distance, all_sparse_table, all_euler_depth,
+                    all_log2_table, all_euler_tour,
                 )
-                rd01 = float(all_root_distance[nb + lca])
-
-                l = int(all_first_occ[nb + ln0])
-                r = int(all_first_occ[nb + ln2])
-                if l > r:
-                    l, r = r, l
-                lca = Forest._rmq_csr(
-                    l,
-                    r,
-                    sb,
-                    tw,
-                    all_sparse_table,
-                    all_euler_depth,
-                    all_log2_table,
-                    lb,
-                    tb,
-                    all_euler_tour,
-                )
-                rd02 = float(all_root_distance[nb + lca])
-
-                l = int(all_first_occ[nb + ln0])
-                r = int(all_first_occ[nb + ln3])
-                if l > r:
-                    l, r = r, l
-                lca = Forest._rmq_csr(
-                    l,
-                    r,
-                    sb,
-                    tw,
-                    all_sparse_table,
-                    all_euler_depth,
-                    all_log2_table,
-                    lb,
-                    tb,
-                    all_euler_tour,
-                )
-                rd03 = float(all_root_distance[nb + lca])
-
-                l = int(all_first_occ[nb + ln1])
-                r = int(all_first_occ[nb + ln2])
-                if l > r:
-                    l, r = r, l
-                lca = Forest._rmq_csr(
-                    l,
-                    r,
-                    sb,
-                    tw,
-                    all_sparse_table,
-                    all_euler_depth,
-                    all_log2_table,
-                    lb,
-                    tb,
-                    all_euler_tour,
-                )
-                rd12 = float(all_root_distance[nb + lca])
-
-                l = int(all_first_occ[nb + ln1])
-                r = int(all_first_occ[nb + ln3])
-                if l > r:
-                    l, r = r, l
-                lca = Forest._rmq_csr(
-                    l,
-                    r,
-                    sb,
-                    tw,
-                    all_sparse_table,
-                    all_euler_depth,
-                    all_log2_table,
-                    lb,
-                    tb,
-                    all_euler_tour,
-                )
-                rd13 = float(all_root_distance[nb + lca])
-
-                l = int(all_first_occ[nb + ln2])
-                r = int(all_first_occ[nb + ln3])
-                if l > r:
-                    l, r = r, l
-                lca = Forest._rmq_csr(
-                    l,
-                    r,
-                    sb,
-                    tw,
-                    all_sparse_table,
-                    all_euler_depth,
-                    all_log2_table,
-                    lb,
-                    tb,
-                    all_euler_tour,
-                )
-                rd23 = float(all_root_distance[nb + lca])
-
-                r0 = rd01 + rd23  # (n0,n1)|(n2,n3)
-                r1 = rd02 + rd13  # (n0,n2)|(n1,n3)
-                r2 = rd03 + rd12  # (n0,n3)|(n1,n2)
-
-                if r0 >= r1 and r0 >= r2:
-                    topo = 0
-                    r_winner = r0
-                elif r1 >= r0 and r1 >= r2:
-                    topo = 1
-                    r_winner = r1
-                else:
-                    topo = 2
-                    r_winner = r2
 
                 gi = int(tree_to_group_idx[ti])
                 counts_out[qi, gi, topo] += 1
@@ -1658,9 +1546,7 @@ class Forest:
                         + float(all_root_distance[nb + ln2])
                         + float(all_root_distance[nb + ln3])
                     )
-
                     S = leaf_rd_sum - (r_winner + r0 + r1 + r2) * 0.5
-
                     steiner_out[qi, gi, topo] += S
 
                     # MOMENT B: replace the store above with Welford accumulation
@@ -1778,6 +1664,75 @@ class Forest:
         lb  = int(lg_offsets[ti])
         tw  = int(sp_tour_widths[ti])
         return ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw
+
+    @staticmethod
+    def _quartet_topology_and_rd(occ0, occ1, occ2, occ3,
+                                  nb, tb, sb, lb, tw,
+                                  all_root_distance,
+                                  all_sparse_table, all_euler_depth,
+                                  all_log2_table, all_euler_tour):
+        """
+        **Private static.**  Six RMQ calls + four-point condition → topology
+        and pair-sums.
+
+        Computes all six pairwise LCA root-distances for four taxa (whose first
+        Euler-tour occurrences are ``occ0..occ3``), applies the four-point
+        condition to determine the winning unrooted split, and returns the
+        topology index alongside all three pair-sums and the winning pair-sum.
+
+        Parameters
+        ----------
+        occ0..occ3 : int
+            First Euler-tour occurrences for the four taxa in tree *ti*.
+            All must be valid — the caller has already checked ``ln0..ln3 >= 0``
+            before computing these.
+        nb, tb, sb, lb, tw : int
+            CSR offsets and sparse-table stride for tree *ti*
+            (from ``Forest._resolve_quartet``).
+        all_root_distance, all_sparse_table, all_euler_depth,
+        all_log2_table, all_euler_tour : np.ndarray
+            CSR-packed tree arrays.
+
+        Returns
+        -------
+        topo : int
+            Winning topology index: 0 = (n0,n1)|(n2,n3),
+                                    1 = (n0,n2)|(n1,n3),
+                                    2 = (n0,n3)|(n1,n2).
+        r0, r1, r2 : float
+            Pair-sums for each of the three topologies.
+        r_winner : float
+            Score of the winning topology (max of r0, r1, r2).
+
+        Pure-Python counterpart of ``_quartet_topology_and_rd_nb`` and
+        ``_quartet_topology_and_rd_cuda``.
+        """
+        def lca_rd(oa, ob):
+            l, r = (oa, ob) if oa <= ob else (ob, oa)
+            return float(all_root_distance[nb + Forest._rmq_csr(
+                l, r, sb, tw, all_sparse_table, all_euler_depth,
+                all_log2_table, lb, tb, all_euler_tour,
+            )])
+
+        rd01 = lca_rd(occ0, occ1)
+        rd02 = lca_rd(occ0, occ2)
+        rd03 = lca_rd(occ0, occ3)
+        rd12 = lca_rd(occ1, occ2)
+        rd13 = lca_rd(occ1, occ3)
+        rd23 = lca_rd(occ2, occ3)
+
+        r0 = rd01 + rd23  # topology 0: (n0,n1)|(n2,n3)
+        r1 = rd02 + rd13  # topology 1: (n0,n2)|(n1,n3)
+        r2 = rd03 + rd12  # topology 2: (n0,n3)|(n1,n2)
+
+        if r0 >= r1 and r0 >= r2:
+            topo = 0; r_winner = r0
+        elif r1 >= r0 and r1 >= r2:
+            topo = 1; r_winner = r1
+        else:
+            topo = 2; r_winner = r2
+
+        return topo, r0, r1, r2, r_winner
 
     @staticmethod
     def _rmq_csr(

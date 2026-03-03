@@ -15,6 +15,9 @@ _rmq_csr_cuda : cuda.jit device function
 _resolve_quartet_cuda : cuda.jit device function
     Map four global taxon IDs to tree-local positions (device-only helper).
 
+_quartet_topology_and_rd_cuda : cuda.jit device function
+    Six RMQ calls + four-point condition → topology and pair-sums (device-only helper).
+
 _quartet_counts_cuda : cuda.jit kernel
     GPU-parallel quartet topology counts (no Steiner distances).
 
@@ -302,6 +305,94 @@ if _CUDA_AVAILABLE:
         tw  = sp_tour_widths[ti]
         return ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw
 
+    @cuda.jit(device=True)
+    def _quartet_topology_and_rd_cuda(occ0, occ1, occ2, occ3,
+                                       nb, tb, sb, lb, tw,
+                                       all_root_distance,
+                                       all_sparse_table, all_euler_depth,
+                                       all_log2_table, all_euler_tour):
+        """
+        Six RMQ calls + four-point condition → topology and pair-sums.
+
+        Computes all six pairwise LCA root-distances for four taxa (whose first
+        Euler-tour occurrences are ``occ0..occ3``), applies the four-point
+        condition to determine the winning unrooted split, and returns the
+        topology index alongside all three pair-sums and the winning pair-sum.
+
+        Parameters
+        ----------
+        occ0..occ3 : int
+            First Euler-tour occurrences for the four taxa in tree *ti*.
+            All must be valid — the caller has already checked ``ln0..ln3 >= 0``
+            before computing these.
+        nb, tb, sb, lb, tw : int
+            CSR offsets and sparse-table stride for tree *ti*
+            (from ``_resolve_quartet_cuda``).
+        all_root_distance, all_sparse_table, all_euler_depth,
+        all_log2_table, all_euler_tour : device arrays
+            CSR-packed tree data on the GPU.
+
+        Returns
+        -------
+        topo : int
+            Winning topology index: 0 = (n0,n1)|(n2,n3),
+                                    1 = (n0,n2)|(n1,n3),
+                                    2 = (n0,n3)|(n1,n2).
+        r0, r1, r2 : float64
+            Pair-sums for each of the three topologies.
+        r_winner : float64
+            Score of the winning topology (max of r0, r1, r2).
+
+        Notes
+        -----
+        Uses ``>=`` comparisons so polytomies (tied scores) are handled
+        consistently.  This device function is inlined by the PTX compiler into
+        every kernel that calls it; there is no function-call overhead.
+        """
+        l = occ0; r = occ1
+        if l > r: l, r = r, l
+        rd01 = all_root_distance[nb + _rmq_csr_cuda(l, r, sb, tw, all_sparse_table,
+                                                      all_euler_depth, all_log2_table,
+                                                      lb, tb, all_euler_tour)]
+        l = occ0; r = occ2
+        if l > r: l, r = r, l
+        rd02 = all_root_distance[nb + _rmq_csr_cuda(l, r, sb, tw, all_sparse_table,
+                                                      all_euler_depth, all_log2_table,
+                                                      lb, tb, all_euler_tour)]
+        l = occ0; r = occ3
+        if l > r: l, r = r, l
+        rd03 = all_root_distance[nb + _rmq_csr_cuda(l, r, sb, tw, all_sparse_table,
+                                                      all_euler_depth, all_log2_table,
+                                                      lb, tb, all_euler_tour)]
+        l = occ1; r = occ2
+        if l > r: l, r = r, l
+        rd12 = all_root_distance[nb + _rmq_csr_cuda(l, r, sb, tw, all_sparse_table,
+                                                      all_euler_depth, all_log2_table,
+                                                      lb, tb, all_euler_tour)]
+        l = occ1; r = occ3
+        if l > r: l, r = r, l
+        rd13 = all_root_distance[nb + _rmq_csr_cuda(l, r, sb, tw, all_sparse_table,
+                                                      all_euler_depth, all_log2_table,
+                                                      lb, tb, all_euler_tour)]
+        l = occ2; r = occ3
+        if l > r: l, r = r, l
+        rd23 = all_root_distance[nb + _rmq_csr_cuda(l, r, sb, tw, all_sparse_table,
+                                                      all_euler_depth, all_log2_table,
+                                                      lb, tb, all_euler_tour)]
+
+        r0 = rd01 + rd23  # topology 0: (n0,n1)|(n2,n3)
+        r1 = rd02 + rd13  # topology 1: (n0,n2)|(n1,n3)
+        r2 = rd03 + rd12  # topology 2: (n0,n3)|(n1,n2)
+
+        if r0 >= r1 and r0 >= r2:
+            topo = 0; r_winner = r0
+        elif r1 >= r0 and r1 >= r2:
+            topo = 1; r_winner = r1
+        else:
+            topo = 2; r_winner = r2
+
+        return topo, r0, r1, r2, r_winner
+
     @cuda.jit
     def _quartet_counts_cuda(
             sorted_quartet_ids,
@@ -385,52 +476,15 @@ if _CUDA_AVAILABLE:
         if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             return
 
-        # Compute 6 pairwise LCAs
-        l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln1]
-        if l > r: l, r = r, l
-        lca = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                            all_log2_table, lb, tb, all_euler_tour)
-        rd01 = all_root_distance[nb + lca]
-
-        l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln2]
-        if l > r: l, r = r, l
-        lca = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                            all_log2_table, lb, tb, all_euler_tour)
-        rd02 = all_root_distance[nb + lca]
-
-        l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln3]
-        if l > r: l, r = r, l
-        lca = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                            all_log2_table, lb, tb, all_euler_tour)
-        rd03 = all_root_distance[nb + lca]
-
-        l = all_first_occ[nb + ln1]; r = all_first_occ[nb + ln2]
-        if l > r: l, r = r, l
-        lca = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                            all_log2_table, lb, tb, all_euler_tour)
-        rd12 = all_root_distance[nb + lca]
-
-        l = all_first_occ[nb + ln1]; r = all_first_occ[nb + ln3]
-        if l > r: l, r = r, l
-        lca = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                            all_log2_table, lb, tb, all_euler_tour)
-        rd13 = all_root_distance[nb + lca]
-
-        l = all_first_occ[nb + ln2]; r = all_first_occ[nb + ln3]
-        if l > r: l, r = r, l
-        lca = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                            all_log2_table, lb, tb, all_euler_tour)
-        rd23 = all_root_distance[nb + lca]
-
-        # Determine winning topology
-        r0 = rd01 + rd23  # (n0,n1)|(n2,n3)
-        r1 = rd02 + rd13  # (n0,n2)|(n1,n3)
-        r2 = rd03 + rd12  # (n0,n3)|(n1,n2)
-
-        if r0 > r1:
-            topo = 0 if r0 > r2 else 2
-        else:
-            topo = 1 if r1 > r2 else 2
+        occ0 = all_first_occ[nb + ln0]
+        occ1 = all_first_occ[nb + ln1]
+        occ2 = all_first_occ[nb + ln2]
+        occ3 = all_first_occ[nb + ln3]
+        topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
+            occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+            all_root_distance, all_sparse_table, all_euler_depth,
+            all_log2_table, all_euler_tour,
+        )
 
         # Atomic increment (multiple threads may write to same (qi, topo))
         cuda.atomic.add(counts_out, (qi, topo), 1)
@@ -491,58 +545,15 @@ if _CUDA_AVAILABLE:
         if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             return
 
-        # Compute 6 pairwise LCAs (identical to counts kernel)
-        l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln1]
-        if l > r: l, r = r, l
-        lca = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                            all_log2_table, lb, tb, all_euler_tour)
-        rd01 = all_root_distance[nb + lca]
-
-        l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln2]
-        if l > r: l, r = r, l
-        lca = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                            all_log2_table, lb, tb, all_euler_tour)
-        rd02 = all_root_distance[nb + lca]
-
-        l = all_first_occ[nb + ln0]; r = all_first_occ[nb + ln3]
-        if l > r: l, r = r, l
-        lca = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                            all_log2_table, lb, tb, all_euler_tour)
-        rd03 = all_root_distance[nb + lca]
-
-        l = all_first_occ[nb + ln1]; r = all_first_occ[nb + ln2]
-        if l > r: l, r = r, l
-        lca = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                            all_log2_table, lb, tb, all_euler_tour)
-        rd12 = all_root_distance[nb + lca]
-
-        l = all_first_occ[nb + ln1]; r = all_first_occ[nb + ln3]
-        if l > r: l, r = r, l
-        lca = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                            all_log2_table, lb, tb, all_euler_tour)
-        rd13 = all_root_distance[nb + lca]
-
-        l = all_first_occ[nb + ln2]; r = all_first_occ[nb + ln3]
-        if l > r: l, r = r, l
-        lca = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                            all_log2_table, lb, tb, all_euler_tour)
-        rd23 = all_root_distance[nb + lca]
-
-        # Determine winning topology (track r_winner for Steiner)
-        r0 = rd01 + rd23  # (n0,n1)|(n2,n3)
-        r1 = rd02 + rd13  # (n0,n2)|(n1,n3)
-        r2 = rd03 + rd12  # (n0,n3)|(n1,n2)
-
-        if r0 > r1:
-            if r0 > r2:
-                topo = 0; r_winner = r0
-            else:
-                topo = 2; r_winner = r2
-        else:
-            if r1 > r2:
-                topo = 1; r_winner = r1
-            else:
-                topo = 2; r_winner = r2
+        occ0 = all_first_occ[nb + ln0]
+        occ1 = all_first_occ[nb + ln1]
+        occ2 = all_first_occ[nb + ln2]
+        occ3 = all_first_occ[nb + ln3]
+        topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
+            occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+            all_root_distance, all_sparse_table, all_euler_depth,
+            all_log2_table, all_euler_tour,
+        )
 
         # Atomic increment for counts
         cuda.atomic.add(counts_out, (qi, topo), 1)
@@ -658,57 +669,18 @@ if _CUDA_AVAILABLE:
         if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             return
 
-        # Get first occurrences in Euler tour
-        occ_a = all_first_occ[nb + ln0]
-        occ_b = all_first_occ[nb + ln1]
-        occ_c = all_first_occ[nb + ln2]
-        occ_d = all_first_occ[nb + ln3]
-
-        # Compute all 6 pairwise LCAs for the four-point condition
-        lca_ab = _rmq_csr_cuda(
-            min(occ_a, occ_b), max(occ_a, occ_b),
-            sb, tw, all_sparse_table, all_euler_depth,
-            all_log2_table, lb, tb, all_euler_tour
+        occ0 = all_first_occ[nb + ln0]
+        occ1 = all_first_occ[nb + ln1]
+        occ2 = all_first_occ[nb + ln2]
+        occ3 = all_first_occ[nb + ln3]
+        topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
+            occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+            all_root_distance, all_sparse_table, all_euler_depth,
+            all_log2_table, all_euler_tour,
         )
-        lca_cd = _rmq_csr_cuda(
-            min(occ_c, occ_d), max(occ_c, occ_d),
-            sb, tw, all_sparse_table, all_euler_depth,
-            all_log2_table, lb, tb, all_euler_tour
-        )
-        lca_ac = _rmq_csr_cuda(
-            min(occ_a, occ_c), max(occ_a, occ_c),
-            sb, tw, all_sparse_table, all_euler_depth,
-            all_log2_table, lb, tb, all_euler_tour
-        )
-        lca_bd = _rmq_csr_cuda(
-            min(occ_b, occ_d), max(occ_b, occ_d),
-            sb, tw, all_sparse_table, all_euler_depth,
-            all_log2_table, lb, tb, all_euler_tour
-        )
-        lca_ad = _rmq_csr_cuda(
-            min(occ_a, occ_d), max(occ_a, occ_d),
-            sb, tw, all_sparse_table, all_euler_depth,
-            all_log2_table, lb, tb, all_euler_tour
-        )
-        lca_bc = _rmq_csr_cuda(
-            min(occ_b, occ_c), max(occ_b, occ_c),
-            sb, tw, all_sparse_table, all_euler_depth,
-            all_log2_table, lb, tb, all_euler_tour
-        )
-
-        # Determine topology using pair-sum comparison (matches Python/CPU kernels)
-        r0 = all_root_distance[nb + lca_ab] + all_root_distance[nb + lca_cd]
-        r1 = all_root_distance[nb + lca_ac] + all_root_distance[nb + lca_bd]
-        r2 = all_root_distance[nb + lca_ad] + all_root_distance[nb + lca_bc]
-        if r0 >= r1 and r0 >= r2:
-            topology = 0
-        elif r1 >= r0 and r1 >= r2:
-            topology = 1
-        else:
-            topology = 2
 
         gi = tree_to_group_idx[ti]
-        cuda.atomic.add(counts, (qi, gi, topology), 1)
+        cuda.atomic.add(counts, (qi, gi, topo), 1)
 
     @cuda.jit
     def quartet_steiner_cuda_unified(
@@ -770,85 +742,28 @@ if _CUDA_AVAILABLE:
         if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             return
 
-        # Get occurrences
-        occ_a = all_first_occ[nb + ln0]
-        occ_b = all_first_occ[nb + ln1]
-        occ_c = all_first_occ[nb + ln2]
-        occ_d = all_first_occ[nb + ln3]
-
-        # Find all 6 LCAs for Steiner computation
-        lca_ab = _rmq_csr_cuda(
-            min(occ_a, occ_b), max(occ_a, occ_b),
-            sb, tw, all_sparse_table, all_euler_depth,
-            all_log2_table, lb, tb, all_euler_tour
-        )
-        lca_cd = _rmq_csr_cuda(
-            min(occ_c, occ_d), max(occ_c, occ_d),
-            sb, tw, all_sparse_table, all_euler_depth,
-            all_log2_table, lb, tb, all_euler_tour
-        )
-        lca_ac = _rmq_csr_cuda(
-            min(occ_a, occ_c), max(occ_a, occ_c),
-            sb, tw, all_sparse_table, all_euler_depth,
-            all_log2_table, lb, tb, all_euler_tour
-        )
-        lca_bd = _rmq_csr_cuda(
-            min(occ_b, occ_d), max(occ_b, occ_d),
-            sb, tw, all_sparse_table, all_euler_depth,
-            all_log2_table, lb, tb, all_euler_tour
-        )
-        lca_ad = _rmq_csr_cuda(
-            min(occ_a, occ_d), max(occ_a, occ_d),
-            sb, tw, all_sparse_table, all_euler_depth,
-            all_log2_table, lb, tb, all_euler_tour
-        )
-        lca_bc = _rmq_csr_cuda(
-            min(occ_b, occ_c), max(occ_b, occ_c),
-            sb, tw, all_sparse_table, all_euler_depth,
-            all_log2_table, lb, tb, all_euler_tour
+        occ0 = all_first_occ[nb + ln0]
+        occ1 = all_first_occ[nb + ln1]
+        occ2 = all_first_occ[nb + ln2]
+        occ3 = all_first_occ[nb + ln3]
+        topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
+            occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+            all_root_distance, all_sparse_table, all_euler_depth,
+            all_log2_table, all_euler_tour,
         )
 
-        # Get root distances
-        rd_ab = all_root_distance[nb + lca_ab]
-        rd_cd = all_root_distance[nb + lca_cd]
-        rd_ac = all_root_distance[nb + lca_ac]
-        rd_bd = all_root_distance[nb + lca_bd]
-        rd_ad = all_root_distance[nb + lca_ad]
-        rd_bc = all_root_distance[nb + lca_bc]
-
-        # Determine topology using correct 3-way score comparison
-        # Topology 0: (AB|CD), Topology 1: (AC|BD), Topology 2: (AD|BC)
-        r0 = rd_ab + rd_cd
-        r1 = rd_ac + rd_bd
-        r2 = rd_ad + rd_bc
-        if r0 >= r1 and r0 >= r2:
-            topology = 0
-        elif r1 >= r0 and r1 >= r2:
-            topology = 1
-        else:
-            topology = 2
-
-        # Compute Steiner distance for winning topology
-        rd_a = all_root_distance[nb + ln0]
-        rd_b = all_root_distance[nb + ln1]
-        rd_c = all_root_distance[nb + ln2]
-        rd_d = all_root_distance[nb + ln3]
-
-        leaf_sum = rd_a + rd_b + rd_c + rd_d
-        if topology == 0:
-            r_winner = r0
-        elif topology == 1:
-            r_winner = r1
-        else:
-            r_winner = r2
-
+        # Compute Steiner distance
+        leaf_sum = (all_root_distance[nb + ln0]
+                  + all_root_distance[nb + ln1]
+                  + all_root_distance[nb + ln2]
+                  + all_root_distance[nb + ln3])
         steiner = leaf_sum - (r_winner + r0 + r1 + r2) / 2.0
 
         # Store results — both counts and steiner need atomics (multiple ti
         # threads share the same group row). steiner_out is pre-zeroed by host.
         gi = tree_to_group_idx[ti]
-        cuda.atomic.add(counts, (qi, gi, topology), 1)
-        cuda.atomic.add(steiner_out, (qi, gi, topology), steiner)
+        cuda.atomic.add(counts, (qi, gi, topo), 1)
+        cuda.atomic.add(steiner_out, (qi, gi, topo), steiner)
 
 
 def _compute_cuda_grid(n_quartets, n_trees, threads_per_block=(16, 16)):
