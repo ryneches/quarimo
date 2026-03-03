@@ -8,13 +8,13 @@ Quarimo is a made up word formed by smashing "quartet" and "mori" (森, forest) 
 
 ## Features
 
-- **Fast quartet topology analysis** — Bulk queries across large tree collections
-- **Per-group topology counts** — Results broken out by labeled tree group with shape `(n_quartets, n_groups, 3)`
-- **Deterministic quartet sampling** — The `Quartets` class provides explicit lists, random sampling, and on-GPU generation from a shared infinite sequence
-- **Multiple backends** — Python, CPU-parallel (Numba), and CUDA GPU acceleration
-- **Memory efficient** — CSR-like flat-packed layout for large datasets
-- **Clean API** — Context managers for logging, warnings, and backend selection
-- **Well tested** — Comprehensive test suite with 450+ tests
+- **Fast quartet topology analysis** : Bulk queries across large tree collections
+- **Per-group topology counts** : Results broken out by labeled tree group with shape `(n_quartets, n_groups, 3)`
+- **Deterministic and sampled quartets** : The `Quartets` class provides explicit lists, random sampling, and on-GPU generation from a shared infinite sequence
+- **Multiple backends** : Python, CPU-parallel (Numba), and CUDA GPU acceleration
+- **Memory efficient** : CSR-like flat-packed layout for large datasets
+- **Clean API** : Context managers for logging, warnings, and backend selection
+- **Well tested** : Comprehensive test suite with 450+ tests
 
 ## Installation
 
@@ -60,11 +60,11 @@ forest = Forest(trees)
 # Build a quartet query
 q = Quartets.from_list(forest, [('A', 'B', 'C', 'D')])
 
-# Query quartet topology — returns (n_quartets, n_groups, 3)
+# Query quartet topology - returns (n_quartets, n_groups, 3)
 counts = forest.quartet_topology(q)
 
 print(counts.shape)   # (1, 1, 3)
-print(counts[0, 0])   # [1 1 1]  — one tree supports each topology
+print(counts[0, 0])   # [1 1 1]  - one tree supports each topology
 ```
 
 ## The Quartets Class
@@ -78,14 +78,14 @@ from quarimo import Quartets
 # Explicit quartet list (by taxon name or by global ID)
 q = Quartets.from_list(forest, [('A', 'B', 'C', 'D'), ('A', 'B', 'C', 'E')])
 
-# Random sampling — reproducible with seed
+# Random sampling - reproducible with seed
 q = Quartets.random(forest, count=100_000, seed=42)
 
 # Full constructor: explicit seed + random tail starting at offset
 q = Quartets(forest, seed=[('A', 'B', 'C', 'D')], offset=0, count=50_000)
 ```
 
-**Type rule:** all elements in every quartet must be the same type — either all `str`
+**Type rule:** all elements in every quartet must be the same type - either all `str`
 (taxon names) or all `int` (global IDs).  Mixing types raises `TypeError`.
 
 ## Advanced Usage
@@ -226,7 +226,7 @@ If you use this software in your research, please cite:
 
 ## License
 
-MIT License — see LICENSE file for details.
+MIT License - see LICENSE file for details.
 
 ## Contributing
 
