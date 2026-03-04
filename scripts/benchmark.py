@@ -168,7 +168,12 @@ def _(Forest, N_GROUPS, N_TAXA, make_base_tree, quiet, random):
             for node in base.preorder_node_iter():
                 if node.edge_length is not None:
                     node.edge_length = max(1e-6, rng.expovariate(1.0))
-            return base.as_string(schema="newick").strip()
+            nwk = base.as_string(schema="newick").strip()
+            # DendroPy prepends a [&R] / [&U] rooting annotation that quarimo
+            # cannot parse; strip it before handing the string to Forest.
+            if nwk.startswith("[&"):
+                nwk = nwk[nwk.index("]") + 1:].strip()
+            return nwk
 
         trees_per_group = max(1, n_trees // n_groups)
         groups = {
