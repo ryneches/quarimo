@@ -15,10 +15,7 @@ This separation ensures:
 import logging
 import numpy as np
 from itertools import combinations
-from typing import List, Dict, Set, Any
-
-# Import utility functions
-from quarimo._utils import jaccard_similarity
+from typing import Any, Dict, List
 
 
 logger = logging.getLogger(__name__)
@@ -260,17 +257,24 @@ def log_group_statistics(
         logger.info("  Group '%s': %d trees", group_name, n_trees_in_group)
 
 
-def log_jaccard_similarities(
+def log_namespace_coverage(
     unique_groups: List[str],
     group_to_tree_indices: Dict[str, List[int]],
-    tree_taxa_sets: List[Set[str]],
-    group_taxa_sets: Dict[str, Set[str]],
+    taxa_present: "np.ndarray",
 ) -> None:
     """
-    Log Jaccard similarities within and between groups.
+    Log taxon-namespace coverage statistics within and between groups.
 
-    This function only logs - the caller must compute tree_taxa_sets and
-    group_taxa_sets beforehand.
+    Uses the already-computed ``taxa_present`` bool array (n_trees, n_global_taxa)
+    directly, avoiding O(n_trees²) all-pairs set operations.
+
+    Within each group, reports the mean and minimum **coverage fraction**:
+    the proportion of the group's taxon union that each individual tree covers.
+    A value of 1.0 means every tree in the group has the same complete taxon set.
+    Values below 1.0 indicate trees with missing taxa relative to the group union.
+
+    Between groups, reports pairwise Jaccard similarity of the group-level taxon
+    unions (one value per pair of groups, O(n_groups² × n_taxa) vectorised).
 
     Parameters
     ----------
@@ -278,38 +282,49 @@ def log_jaccard_similarities(
         Ordered list of unique group labels.
     group_to_tree_indices : Dict[str, List[int]]
         Mapping from group label to list of tree indices.
-    tree_taxa_sets : List[Set[str]]
-        Taxa sets for each tree (list of sets).
-    group_taxa_sets : Dict[str, Set[str]]
-        Taxa sets for each group (union of tree taxa).
+    taxa_present : np.ndarray, bool (n_trees, n_global_taxa)
+        Already-computed presence matrix.
     """
-    # Log per-group taxa counts
-    for group_name in unique_groups:
-        n_taxa = len(group_taxa_sets[group_name])
-        logger.info("  Group '%s': %d distinct taxa", group_name, n_taxa)
+    group_masks: Dict[str, np.ndarray] = {}
 
-    # Within-group similarities (mean pairwise Jaccard)
-    logger.info("Within-group taxa Jaccard similarities (avg pairwise):")
+    logger.info("Taxon namespace coverage:")
     for group_name in unique_groups:
-        tree_indices = group_to_tree_indices[group_name]
+        indices = group_to_tree_indices[group_name]
+        mask = taxa_present[indices]  # (n_group_trees, n_global_taxa)
+        group_union = mask.any(axis=0)  # (n_global_taxa,) bool
+        group_masks[group_name] = group_union
 
-        if len(tree_indices) < 2:
-            logger.info("  %s: N/A (only 1 tree)", group_name)
+        n_group_taxa = int(group_union.sum())
+        if len(indices) < 2:
+            logger.info("  '%s': %d taxa (single tree)", group_name, n_group_taxa)
         else:
-            similarities = [
-                jaccard_similarity(tree_taxa_sets[i], tree_taxa_sets[j])
-                for i, j in combinations(tree_indices, 2)
-            ]
-            avg = np.mean(similarities)
-            logger.info("  %s: %.3f", group_name, avg)
+            coverage = mask.sum(axis=1) / n_group_taxa  # per-tree fraction
+            logger.info(
+                "  '%s': %d taxa, per-tree coverage mean=%.3f min=%.3f",
+                group_name,
+                n_group_taxa,
+                float(coverage.mean()),
+                float(coverage.min()),
+            )
+            if float(coverage.min()) < 0.5:
+                logger.warning(
+                    "  '%s': some trees cover < 50%% of the group taxa "
+                    "(min=%.3f) — highly disjoint taxon sets within this group.",
+                    group_name,
+                    float(coverage.min()),
+                )
 
-    # Between-group similarities
+    # Between-group Jaccard at group-union level
     between_pairs = list(combinations(unique_groups, 2))
     if between_pairs:
-        logger.info("Between-group taxa Jaccard similarities:")
+        logger.info("Between-group taxon overlap (Jaccard of group unions):")
         for group_a, group_b in between_pairs:
-            jac = jaccard_similarity(group_taxa_sets[group_a], group_taxa_sets[group_b])
-            logger.info("  %s ↔ %s: %.3f", group_a, group_b, jac)
+            mask_a = group_masks[group_a]
+            mask_b = group_masks[group_b]
+            inter = int((mask_a & mask_b).sum())
+            union = int((mask_a | mask_b).sum())
+            jac = inter / union if union > 0 else 0.0
+            logger.info("  '%s' ↔ '%s': %.3f", group_a, group_b, jac)
 
 
 def log_collection_statistics(
@@ -360,7 +375,7 @@ def log_collection_statistics(
 
     # Namespace overlap statistics
     logger.info(
-        "Namespace overlap: %.1f taxa/tree (avg), %.1f trees/taxon (avg)",
+        "Namespace overlap: %.1f taxa/tree, %.1f trees/taxon",
         taxa_per_tree_mean,
         trees_per_taxon_mean,
     )
@@ -417,47 +432,6 @@ def log_collection_statistics(
 # ============================================================================ #
 # Helper Functions for Computing Data (not logging)
 # ============================================================================ #
-
-
-def compute_tree_taxa_sets(trees: List[Any]) -> List[Set[str]]:
-    """
-    Build taxa sets per tree (filter out None/empty names).
-
-    Parameters
-    ----------
-    trees : List[Any]
-        List of PhyloTree objects.
-
-    Returns
-    -------
-    List[Set[str]]
-        Taxa sets for each tree.
-    """
-    return [{name for name in tree.names if name} for tree in trees]
-
-
-def compute_group_taxa_sets(
-    group_to_tree_indices: Dict[str, List[int]], tree_taxa_sets: List[Set[str]]
-) -> Dict[str, Set[str]]:
-    """
-    Build taxa sets per group (union of tree taxa sets).
-
-    Parameters
-    ----------
-    group_to_tree_indices : Dict[str, List[int]]
-        Mapping from group label to list of tree indices.
-    tree_taxa_sets : List[Set[str]]
-        Taxa sets for each tree.
-
-    Returns
-    -------
-    Dict[str, Set[str]]
-        Taxa sets for each group.
-    """
-    return {
-        group_name: set().union(*(tree_taxa_sets[i] for i in indices))
-        for group_name, indices in group_to_tree_indices.items()
-    }
 
 
 def compute_memory_footprint(collection: Any) -> int:

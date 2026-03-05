@@ -143,10 +143,8 @@ from quarimo._logging import (
     log_backend_availability,
     log_multifurcation_warning,
     log_group_statistics,
-    log_jaccard_similarities,
+    log_namespace_coverage,
     log_collection_statistics,
-    compute_tree_taxa_sets,
-    compute_group_taxa_sets,
     compute_memory_footprint,
 )
 
@@ -427,9 +425,9 @@ class Forest:
         if _CUDA_AVAILABLE:
             self._upload_to_gpu()
 
-        # Log group statistics and Jaccard similarities
+        # Log group statistics and namespace coverage
         self._log_group_statistics_method()
-        self._log_jaccard_similarities_method()
+        self._log_namespace_coverage_method()
 
         # Log overall statistics
         self._log_statistics_method()
@@ -506,20 +504,12 @@ class Forest:
             self.n_groups, self.unique_groups, self.group_to_tree_indices
         )
 
-    def _log_jaccard_similarities_method(self) -> None:
-        """Compute and log Jaccard similarities within and between groups."""
-        # Compute taxa sets (separate computation from logging)
-        tree_taxa_sets = compute_tree_taxa_sets(self._trees)
-        group_taxa_sets = compute_group_taxa_sets(
-            self.group_to_tree_indices, tree_taxa_sets
-        )
-
-        # Log the results
-        log_jaccard_similarities(
+    def _log_namespace_coverage_method(self) -> None:
+        """Log taxon namespace coverage within and between groups."""
+        log_namespace_coverage(
             self.unique_groups,
             self.group_to_tree_indices,
-            tree_taxa_sets,
-            group_taxa_sets,
+            self.taxa_present,
         )
 
     # ================================================================== #
