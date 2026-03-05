@@ -107,7 +107,8 @@ print("\n" + "=" * 70)
 print("Test 2: Steiner mode")
 print("=" * 70)
 
-counts, dists = c.quartet_topology(Quartets.from_list(c, quartets), steiner=True, backend="cuda")
+result = c.quartet_topology(Quartets.from_list(c, quartets), steiner=True, backend="cuda")
+counts, dists = result.counts, result.steiner
 
 logs = log_capture.getvalue()
 print("\nLogging output:")

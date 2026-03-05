@@ -8,6 +8,7 @@ import pytest
 import numpy as np
 from quarimo._forest import Forest, _jaccard
 from quarimo._quartets import Quartets
+from quarimo._results import QuartetTopologyResult
 
 
 class TestGroupLabels:
@@ -234,9 +235,9 @@ class TestGroupedQuartetTopology:
         }
         c = Forest(groups)
         quartets = [("a", "b", "c", "d")]
-        counts = c.quartet_topology(Quartets.from_list(c, quartets))
-        assert counts.shape == (1, 2, 3)
-        assert counts.dtype == np.int32
+        result = c.quartet_topology(Quartets.from_list(c, quartets))
+        assert result.counts.shape == (1, 2, 3)
+        assert result.counts.dtype == np.int32
 
     def test_per_group_counts_correct(self):
         """Each group accumulates its own topology votes."""
@@ -251,13 +252,13 @@ class TestGroupedQuartetTopology:
         }
         c = Forest(groups)
         # unique_groups is sorted: ["A", "B"] → group_A_idx=0, group_B_idx=1
-        counts = c.quartet_topology(Quartets.from_list(c, [("a", "b", "c", "d")]))
-        assert counts[0, 0, 0] == 1  # Group A: 1 vote for topo 0
-        assert counts[0, 0, 1] == 1  # Group A: 1 vote for topo 1
-        assert counts[0, 0, 2] == 0  # Group A: 0 votes for topo 2
-        assert counts[0, 1, 0] == 0  # Group B: 0 votes for topo 0
-        assert counts[0, 1, 1] == 0  # Group B: 0 votes for topo 1
-        assert counts[0, 1, 2] == 1  # Group B: 1 vote for topo 2
+        result = c.quartet_topology(Quartets.from_list(c, [("a", "b", "c", "d")]))
+        assert result.counts[0, 0, 0] == 1  # Group A: 1 vote for topo 0
+        assert result.counts[0, 0, 1] == 1  # Group A: 1 vote for topo 1
+        assert result.counts[0, 0, 2] == 0  # Group A: 0 votes for topo 2
+        assert result.counts[0, 1, 0] == 0  # Group B: 0 votes for topo 0
+        assert result.counts[0, 1, 1] == 0  # Group B: 0 votes for topo 1
+        assert result.counts[0, 1, 2] == 1  # Group B: 1 vote for topo 2
 
     def test_group_counts_sum_to_total_tree_count(self):
         """Sum of counts across all groups == total trees with all 4 taxa present."""
@@ -271,8 +272,8 @@ class TestGroupedQuartetTopology:
             ],
         }
         c = Forest(groups)
-        counts = c.quartet_topology(Quartets.from_list(c, [("a", "b", "c", "d")]))
-        assert int(counts[0].sum()) == 3  # 3 trees total, all have a,b,c,d
+        result = c.quartet_topology(Quartets.from_list(c, [("a", "b", "c", "d")]))
+        assert int(result.counts[0].sum()) == 3  # 3 trees total, all have a,b,c,d
 
     def test_steiner_shape(self):
         """steiner.shape == (n_quartets, n_groups, 3)."""
@@ -281,12 +282,12 @@ class TestGroupedQuartetTopology:
             "B": ["((a:1,c:1):1,(b:1,d:1):1);"],
         }
         c = Forest(groups)
-        counts, steiner = c.quartet_topology(
+        result = c.quartet_topology(
             Quartets.from_list(c, [("a", "b", "c", "d")]), steiner=True
         )
-        assert counts.shape == (1, 2, 3)
-        assert steiner.shape == (1, 2, 3)
-        assert steiner.dtype == np.float64
+        assert result.counts.shape == (1, 2, 3)
+        assert result.steiner.shape == (1, 2, 3)
+        assert result.steiner.dtype == np.float64
 
     def test_steiner_values_correct(self):
         """steiner[qi, gi, topo] == sum of Steiner values for group gi, topo k."""
@@ -300,17 +301,17 @@ class TestGroupedQuartetTopology:
             ],
         }
         c = Forest(groups)
-        counts, steiner = c.quartet_topology(
+        result = c.quartet_topology(
             Quartets.from_list(c, [("a", "b", "c", "d")]), steiner=True
         )
         # Group A (idx 0): 2 trees both topo 0 — steiner[0,0,0] should be non-zero
-        assert steiner[0, 0, 0] > 0.0
-        assert steiner[0, 0, 1] == 0.0
-        assert steiner[0, 0, 2] == 0.0
+        assert result.steiner[0, 0, 0] > 0.0
+        assert result.steiner[0, 0, 1] == 0.0
+        assert result.steiner[0, 0, 2] == 0.0
         # Group B (idx 1): 1 tree topo 1 — steiner[0,1,1] should be non-zero
-        assert steiner[0, 1, 0] == 0.0
-        assert steiner[0, 1, 1] > 0.0
-        assert steiner[0, 1, 2] == 0.0
+        assert result.steiner[0, 1, 0] == 0.0
+        assert result.steiner[0, 1, 1] > 0.0
+        assert result.steiner[0, 1, 2] == 0.0
 
     def test_counts_only_works_without_steiner(self):
         """counts-only mode returns shape (n_quartets, n_groups, 3)."""
@@ -319,11 +320,11 @@ class TestGroupedQuartetTopology:
             "B": ["((a:1,c:1):1,(b:1,d:1):1);"],
         }
         c = Forest(groups)
-        counts = c.quartet_topology(
+        result = c.quartet_topology(
             Quartets.from_list(c, [("a", "b", "c", "d")]), steiner=False
         )
-        assert counts.shape == (1, 2, 3)
-        assert isinstance(counts, np.ndarray)
+        assert result.counts.shape == (1, 2, 3)
+        assert isinstance(result, QuartetTopologyResult)
 
 
 class TestBackwardCompatibility:
@@ -345,8 +346,8 @@ class TestBackwardCompatibility:
         assert hasattr(c, "group_labels")
 
         # Functionality via new Quartets interface
-        counts = c.quartet_topology(Quartets.from_list(c, [("A", "B", "C", "D")]))
-        assert counts.shape == (1, 1, 3)
+        result = c.quartet_topology(Quartets.from_list(c, [("A", "B", "C", "D")]))
+        assert result.counts.shape == (1, 1, 3)
 
     def test_quartet_topology_unchanged(self):
         """Test that quartet_topology works correctly via Quartets.from_list."""
@@ -354,16 +355,16 @@ class TestBackwardCompatibility:
         c = Forest(trees)
 
         # Counts-only mode
-        counts = c.quartet_topology(Quartets.from_list(c, [("A", "B", "C", "D")]))
-        assert counts.shape == (1, 1, 3)
-        assert counts.sum() == 3  # All 3 trees
+        result = c.quartet_topology(Quartets.from_list(c, [("A", "B", "C", "D")]))
+        assert result.counts.shape == (1, 1, 3)
+        assert result.counts.sum() == 3  # All 3 trees
 
         # Steiner mode
-        counts, dists = c.quartet_topology(
+        result_s = c.quartet_topology(
             Quartets.from_list(c, [("A", "B", "C", "D")]), steiner=True
         )
-        assert counts.shape == (1, 1, 3)
-        assert dists.shape == (1, 1, 3)
+        assert result_s.counts.shape == (1, 1, 3)
+        assert result_s.steiner.shape == (1, 1, 3)
 
 
 class TestQuartetQmetric:
@@ -458,10 +459,10 @@ class TestQuartetQmetric:
         }
         forest = Forest(groups)
         q = Quartets.from_list(forest, [("a", "b", "c", "d")])
-        counts = forest.quartet_topology(q)
+        result = forest.quartet_topology(q)
         # Group B has count 0 for this quartet
-        assert counts[0, 1].sum() == 0
-        scores = forest.quartet_qmetric(counts)
+        assert result.counts[0, 1].sum() == 0
+        scores = forest.quartet_qmetric(result)
         assert scores[0, 0] == 0.0
 
     def test_score_in_range(self):

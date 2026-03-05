@@ -253,52 +253,52 @@ class TestBackendAgreement:
     @cpu_parallel_skip
     def test_counts_python_vs_cpu(self, grouped_forest, all_quartets):
         with silent_benchmark("python"):
-            counts_py = grouped_forest.quartet_topology(all_quartets)
+            counts_py = grouped_forest.quartet_topology(all_quartets).counts
         with silent_benchmark("cpu-parallel"):
-            counts_cpu = grouped_forest.quartet_topology(all_quartets)
+            counts_cpu = grouped_forest.quartet_topology(all_quartets).counts
         np.testing.assert_array_equal(counts_py, counts_cpu)
 
     @cpu_parallel_skip
     def test_steiner_python_vs_cpu(self, grouped_forest, all_quartets):
         with silent_benchmark("python"):
-            _, steiner_py = grouped_forest.quartet_topology(all_quartets, steiner=True)
+            steiner_py = grouped_forest.quartet_topology(all_quartets, steiner=True).steiner
         with silent_benchmark("cpu-parallel"):
-            _, steiner_cpu = grouped_forest.quartet_topology(all_quartets, steiner=True)
+            steiner_cpu = grouped_forest.quartet_topology(all_quartets, steiner=True).steiner
         np.testing.assert_allclose(steiner_py, steiner_cpu, rtol=1e-10, atol=1e-12)
 
     @cpu_parallel_skip
     def test_counts_consistent_across_steiner_modes_cpu(self, grouped_forest, all_quartets):
         """Counts from counts-only and steiner=True must be identical (cpu-parallel)."""
         with silent_benchmark("cpu-parallel"):
-            counts_only = grouped_forest.quartet_topology(all_quartets, steiner=False)
-            counts_with_steiner, _ = grouped_forest.quartet_topology(
+            counts_only = grouped_forest.quartet_topology(all_quartets, steiner=False).counts
+            counts_with_steiner = grouped_forest.quartet_topology(
                 all_quartets, steiner=True
-            )
+            ).counts
         np.testing.assert_array_equal(counts_only, counts_with_steiner)
 
     @cuda_skip
     def test_counts_python_vs_cuda(self, grouped_forest, all_quartets):
         with silent_benchmark("python"):
-            counts_py = grouped_forest.quartet_topology(all_quartets)
+            counts_py = grouped_forest.quartet_topology(all_quartets).counts
         with silent_benchmark("cuda"):
-            counts_cuda = grouped_forest.quartet_topology(all_quartets)
+            counts_cuda = grouped_forest.quartet_topology(all_quartets).counts
         np.testing.assert_array_equal(counts_py, counts_cuda)
 
     @cuda_skip
     def test_steiner_python_vs_cuda(self, grouped_forest, all_quartets):
         with silent_benchmark("python"):
-            _, steiner_py = grouped_forest.quartet_topology(all_quartets, steiner=True)
+            steiner_py = grouped_forest.quartet_topology(all_quartets, steiner=True).steiner
         with silent_benchmark("cuda"):
-            _, steiner_cuda = grouped_forest.quartet_topology(all_quartets, steiner=True)
+            steiner_cuda = grouped_forest.quartet_topology(all_quartets, steiner=True).steiner
         np.testing.assert_allclose(steiner_py, steiner_cuda, rtol=1e-8, atol=1e-10)
 
     def test_counts_consistent_across_steiner_modes_python(self, grouped_forest, all_quartets):
         """Counts from counts-only and steiner=True must be identical (python)."""
         with silent_benchmark("python"):
-            counts_only = grouped_forest.quartet_topology(all_quartets, steiner=False)
-            counts_with_steiner, _ = grouped_forest.quartet_topology(
+            counts_only = grouped_forest.quartet_topology(all_quartets, steiner=False).counts
+            counts_with_steiner = grouped_forest.quartet_topology(
                 all_quartets, steiner=True
-            )
+            ).counts
         np.testing.assert_array_equal(counts_only, counts_with_steiner)
 
 
@@ -307,7 +307,7 @@ class TestFourPointCondition:
 
     def _check(self, grouped_forest, all_quartets, pairwise, backend):
         with silent_benchmark(backend):
-            counts = grouped_forest.quartet_topology(all_quartets)
+            counts = grouped_forest.quartet_topology(all_quartets).counts
 
         n_groups = grouped_forest.n_groups
         violations = []
@@ -353,7 +353,8 @@ class TestSteinerVsPairwise:
 
     def _check(self, grouped_forest, all_quartets, pairwise, backend):
         with silent_benchmark(backend):
-            counts, steiner = grouped_forest.quartet_topology(all_quartets, steiner=True)
+            _result = grouped_forest.quartet_topology(all_quartets, steiner=True)
+            counts, steiner = _result.counts, _result.steiner
 
         n_groups = grouped_forest.n_groups
         mismatches = []
@@ -395,13 +396,14 @@ class TestSteinerVsPairwise:
 
     def test_steiner_non_negative(self, grouped_forest, all_quartets):
         with silent_benchmark("python"):
-            _, steiner = grouped_forest.quartet_topology(all_quartets, steiner=True)
+            steiner = grouped_forest.quartet_topology(all_quartets, steiner=True).steiner
         assert (steiner >= 0.0).all(), "Negative Steiner distance found"
 
     def test_steiner_zero_iff_count_zero(self, grouped_forest, all_quartets):
         """steiner[qi, gi, k] > 0 iff counts[qi, gi, k] > 0."""
         with silent_benchmark("python"):
-            counts, steiner = grouped_forest.quartet_topology(all_quartets, steiner=True)
+            _result = grouped_forest.quartet_topology(all_quartets, steiner=True)
+            counts, steiner = _result.counts, _result.steiner
         has_count = counts > 0
         has_steiner = steiner > 0.0
         assert np.array_equal(has_count, has_steiner), (
@@ -543,7 +545,7 @@ class TestSuchTreeAgreement:
 
     def _check(self, backend, grouped_forest, all_quartets, pairwise, suchforest):
         with silent_benchmark(backend):
-            counts = grouped_forest.quartet_topology(all_quartets)
+            counts = grouped_forest.quartet_topology(all_quartets).counts
 
         global_names = grouped_forest.global_names
         n_groups = grouped_forest.n_groups
@@ -633,7 +635,7 @@ class TestSuchTreePolytomyAgreement:
 
     def _check(self, backend, grouped_forest, all_quartets, pairwise, suchforest):
         with silent_benchmark(backend):
-            counts = grouped_forest.quartet_topology(all_quartets)
+            counts = grouped_forest.quartet_topology(all_quartets).counts
 
         global_names = grouped_forest.global_names
         n_groups = grouped_forest.n_groups

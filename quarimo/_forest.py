@@ -165,6 +165,9 @@ from quarimo._utils import jaccard_similarity, validate_quartet, format_newick
 # Import context managers from separate module
 from quarimo._context import suppress_logger, get_backend_override
 
+# Import result dataclasses
+from quarimo._results import BranchDistanceResult, QuartetTopologyResult
+
 # Backward compatibility alias for tests
 _jaccard = jaccard_similarity
 
@@ -516,7 +519,7 @@ class Forest:
     # Public methods                                                       #
     # ================================================================== #
 
-    def branch_distance(self, taxon_a, taxon_b) -> np.ndarray:
+    def branch_distance(self, taxon_a, taxon_b) -> BranchDistanceResult:
         """
         Compute the patristic (sum-of-branch-lengths) distance between
         *taxon_a* and *taxon_b* through every tree in the collection.
@@ -588,11 +591,11 @@ class Forest:
             )
 
         # ── Suture: assemble result ────────────────────────────────────────────
-        return distances_out
+        return BranchDistanceResult(distances=distances_out)
 
     def quartet_topology(
         self, quartets: Quartets, steiner: bool = False, backend: str = "best"
-    ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    ) -> QuartetTopologyResult:
         """
         Count the three possible unrooted quartet topologies for one or more
         quartets across all trees in the collection.
@@ -787,13 +790,13 @@ class Forest:
 
         n_quartets = len(quartets)
         if n_quartets == 0:
-            counts_out = np.zeros((0, self.n_groups, 3), dtype=np.int32)
-            steiner_out: Optional[np.ndarray] = (
-                np.zeros((0, self.n_groups, 3), dtype=np.float64) if steiner else None
+            return QuartetTopologyResult(
+                counts=np.zeros((0, self.n_groups, 3), dtype=np.int32),
+                steiner=np.zeros((0, self.n_groups, 3), dtype=np.float64) if steiner else None,
+                groups=self.unique_groups,
+                quartets=quartets,
+                global_names=self.global_names,
             )
-            if steiner:
-                return counts_out, steiner_out
-            return counts_out
 
         # ── 2. Resolve backend and log execution mode ─────────────────────
         # Check for backend override from context manager
@@ -873,13 +876,17 @@ class Forest:
                 )
 
         # ── Suture: assemble result ────────────────────────────────────────────
-        if steiner:
-            return counts_out, steiner_out
-        return counts_out
+        return QuartetTopologyResult(
+            counts=counts_out,
+            steiner=steiner_out,
+            groups=self.unique_groups,
+            quartets=quartets,
+            global_names=self.global_names,
+        )
 
     def quartet_qmetric(
         self,
-        counts: np.ndarray,
+        counts: Union[np.ndarray, QuartetTopologyResult],
         group_pairs: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
@@ -936,6 +943,8 @@ class Forest:
         >>> counts = forest.quartet_topology(q)          # (1, n_groups, 3)
         >>> scores = forest.quartet_qmetric(counts)      # (1, n_pairs)
         """
+        if isinstance(counts, QuartetTopologyResult):
+            counts = counts.counts
         counts = np.asarray(counts, dtype=np.int32)
         if counts.ndim != 3 or counts.shape[1] != self.n_groups or counts.shape[2] != 3:
             raise ValueError(
