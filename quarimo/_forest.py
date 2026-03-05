@@ -542,7 +542,7 @@ class Forest:
         ga = self._resolve_global(taxon_a)
         gb = self._resolve_global(taxon_b)
 
-        result = np.full(self.n_trees, np.nan, dtype=np.float64)
+        distances_out = np.full(self.n_trees, np.nan, dtype=np.float64)
 
         g2l = self.global_to_local
         fo = self.all_first_occ
@@ -563,7 +563,7 @@ class Forest:
             if la < 0 or lb < 0:
                 continue
             if la == lb:
-                result[ti] = 0.0
+                distances_out[ti] = 0.0
                 continue
 
             node_base = int(no[ti])
@@ -581,13 +581,14 @@ class Forest:
                 l, r, sp_base, tw, sp, ed, lg, lg_base, tour_base, et
             )
 
-            result[ti] = (
+            distances_out[ti] = (
                 float(rd[node_base + la])
                 + float(rd[node_base + lb])
                 - 2.0 * float(rd[node_base + lca_local])
             )
 
-        return result
+        # ── Suture: assemble result ────────────────────────────────────────────
+        return distances_out
 
     def quartet_topology(
         self, quartets: Quartets, steiner: bool = False, backend: str = "best"
@@ -787,8 +788,11 @@ class Forest:
         n_quartets = len(quartets)
         if n_quartets == 0:
             counts_out = np.zeros((0, self.n_groups, 3), dtype=np.int32)
+            steiner_out: Optional[np.ndarray] = (
+                np.zeros((0, self.n_groups, 3), dtype=np.float64) if steiner else None
+            )
             if steiner:
-                return counts_out, np.zeros((0, self.n_groups, 3), dtype=np.float64)
+                return counts_out, steiner_out
             return counts_out
 
         # ── 2. Resolve backend and log execution mode ─────────────────────
@@ -809,66 +813,69 @@ class Forest:
         logger.info(f"quartet_topology({mode_str}, backend={resolved_backend!r})")
 
         # ── 3. Dispatch to backend ────────────────────────────────────────
-        # CUDA backend uses unified kernel with on-GPU generation
+        steiner_out = None
+
         if resolved_backend == "cuda":
-            return self._quartet_topology_cuda_unified(quartets, steiner)
-
-        # CPU/Python backends materialize quartets to array
-        # Quartets iterator yields (a, b, c, d) as global IDs, already sorted
-        sorted_ids = np.array(list(quartets), dtype=np.int32)
-
-        common_args = (
-            sorted_ids,
-            self.global_to_local,
-            self.all_first_occ,
-            self.all_root_distance,
-            self.all_euler_tour,
-            self.all_euler_depth,
-            self.all_sparse_table,
-            self.all_log2_table,
-            self.node_offsets,
-            self.tour_offsets,
-            self.sp_offsets,
-            self.lg_offsets,
-            self.sp_tour_widths,
-            n_quartets,
-            self.n_trees,
-            self.tree_to_group_idx,
-        )
-
-        counts_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.int32)
-
-        if resolved_backend == "cpu-parallel":
-            # Track compilation status
-            kernel_key = f"cpu-parallel-{'steiner' if steiner else 'counts'}"
-            if _kernel_first_call.get(kernel_key, False):
-                logger.info(
-                    f"  Compiling {kernel_key} kernel (cached for future calls)"
-                )
-                _kernel_first_call[kernel_key] = False
-
-            if steiner:
-                steiner_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.float64)
-                _quartet_steiner_njit(*common_args, counts_out, steiner_out)
-                return counts_out, steiner_out
-            else:
-                _quartet_counts_njit(*common_args, counts_out)
-                return counts_out
-
-        elif resolved_backend == "python":
-            steiner_out = (
-                np.zeros((n_quartets, self.n_groups, 3), dtype=np.float64)
-                if steiner
-                else np.empty(0, dtype=np.float64)
-            )
-            Forest._quartet_kernel(*common_args, counts_out, steiner_out)
-            return (counts_out, steiner_out) if steiner else counts_out
+            counts_out, steiner_out = self._quartet_topology_cuda_unified(quartets, steiner)
 
         else:
-            # This should never be reached due to validation above
-            raise RuntimeError(
-                f"Internal error: unhandled backend {resolved_backend!r}"
+            # CPU/Python backends: materialise quartets to array
+            # Quartets iterator yields (a, b, c, d) as global IDs, already sorted
+            sorted_ids = np.array(list(quartets), dtype=np.int32)
+
+            common_args = (
+                sorted_ids,
+                self.global_to_local,
+                self.all_first_occ,
+                self.all_root_distance,
+                self.all_euler_tour,
+                self.all_euler_depth,
+                self.all_sparse_table,
+                self.all_log2_table,
+                self.node_offsets,
+                self.tour_offsets,
+                self.sp_offsets,
+                self.lg_offsets,
+                self.sp_tour_widths,
+                n_quartets,
+                self.n_trees,
+                self.tree_to_group_idx,
             )
+
+            counts_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.int32)
+
+            if resolved_backend == "cpu-parallel":
+                kernel_key = f"cpu-parallel-{'steiner' if steiner else 'counts'}"
+                if _kernel_first_call.get(kernel_key, False):
+                    logger.info(
+                        f"  Compiling {kernel_key} kernel (cached for future calls)"
+                    )
+                    _kernel_first_call[kernel_key] = False
+
+                if steiner:
+                    steiner_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.float64)
+                    _quartet_steiner_njit(*common_args, counts_out, steiner_out)
+                else:
+                    _quartet_counts_njit(*common_args, counts_out)
+
+            elif resolved_backend == "python":
+                if steiner:
+                    steiner_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.float64)
+                    steiner_arg = steiner_out
+                else:
+                    steiner_arg = np.empty(0, dtype=np.float64)  # counts-only sentinel
+                Forest._quartet_kernel(*common_args, counts_out, steiner_arg)
+
+            else:
+                # This should never be reached due to validation above
+                raise RuntimeError(
+                    f"Internal error: unhandled backend {resolved_backend!r}"
+                )
+
+        # ── Suture: assemble result ────────────────────────────────────────────
+        if steiner:
+            return counts_out, steiner_out
+        return counts_out
 
     def quartet_qmetric(
         self,
@@ -1001,7 +1008,7 @@ class Forest:
 
     def _quartet_topology_cuda_unified(
         self, quartets: Quartets, steiner: bool
-    ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
         GPU implementation using unified kernel with on-GPU quartet generation.
 
@@ -1079,6 +1086,7 @@ class Forest:
 
         # ── Host accumulation arrays ───────────────────────────────────────
         counts_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.int32)
+        steiner_out: Optional[np.ndarray] = None
         if steiner:
             steiner_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.float64)
 
@@ -1210,12 +1218,13 @@ class Forest:
                 del d_quartet_batch
             del d_counts_b
 
-        total_bytes = counts_out.nbytes + (steiner_out.nbytes if steiner else 0)
+        if steiner_out is not None:
+            total_bytes = counts_out.nbytes + steiner_out.nbytes
+        else:
+            total_bytes = counts_out.nbytes
         logger.info("  D→H total: %.2f MB", total_bytes / (1024**2))
 
-        if steiner:
-            return counts_out, steiner_out
-        return counts_out
+        return counts_out, steiner_out
 
     # ================================================================== #
     # Private instance methods                                             #
