@@ -128,6 +128,8 @@ arrays.
 
 import hashlib
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from time import time
 from itertools import combinations
 from typing import Union, List, Tuple, Optional, Dict, Any
@@ -185,6 +187,24 @@ else:
     prange = range  # serial fallback
 
 logger = logging.getLogger(__name__)
+
+# ── Global CPU thread cap ─────────────────────────────────────────────────────
+# None means "no cap — use all available CPUs".  A future public setter will
+# expose this for HPC deployments that must cap worker threads across the
+# whole process (e.g. SLURM slots, OMP_NUM_THREADS parity).
+_GLOBAL_THREAD_CAP: Optional[int] = None
+
+
+def _resolve_n_threads(n_threads: Optional[int]) -> int:
+    """Return the effective worker-thread count for parallel tree loading.
+
+    Priority:  explicit *n_threads* argument  >  _GLOBAL_THREAD_CAP  >  os.cpu_count().
+    The result is always ≥ 1.
+    """
+    effective = n_threads if n_threads is not None else (os.cpu_count() or 1)
+    if _GLOBAL_THREAD_CAP is not None:
+        effective = min(effective, _GLOBAL_THREAD_CAP)
+    return max(1, effective)
 
 
 # ── System and optimization info logging ─────────────────────────────────────
@@ -255,6 +275,89 @@ if _CUDA_AVAILABLE:
 # ======================================================================== #
 # Helper functions                                                          #
 # ======================================================================== #
+
+
+def _load_tree_data(
+    newick_input: Dict[str, List[str]],
+    ordered_groups: List[str],
+    n_threads: Optional[int] = None,
+) -> Tuple[List["Tree"], List[str], int, List[int]]:
+    """Parse NEWICK strings into :class:`Tree` instances, in parallel.
+
+    Trees are returned in *ordered_groups* order so that the caller can build
+    deterministic group → tree mappings.
+
+    Parameters
+    ----------
+    newick_input : dict[str, list[str]]
+        Mapping from group label to list of NEWICK strings.  Every group
+        named in *ordered_groups* must be present.
+    ordered_groups : list[str]
+        Group labels in the desired construction order.
+    n_threads : int or None
+        Number of worker threads.  ``None`` (default) → use all available
+        CPUs, subject to the module-level :data:`_GLOBAL_THREAD_CAP`.
+        Pass ``1`` to force sequential parsing (useful for debugging or when
+        the calling environment limits concurrency externally).
+
+    Returns
+    -------
+    trees : list[Tree]
+        Parsed :class:`Tree` objects, in the same order as the flattened
+        (group, newick) sequence.
+    group_labels : list[str]
+        Per-tree group label, parallel to *trees*.
+    n_multifurcating : int
+        Number of trees that required multifurcation resolution.
+    multifurcating_indices : list[int]
+        Global tree indices of multifurcating trees.
+
+    Raises
+    ------
+    ValueError
+        If any group in *ordered_groups* is present in *newick_input* but
+        has an empty list of NEWICK strings.
+    """
+    # ── 1. Flatten into an ordered (group_name, newick) sequence ─────────
+    flat_groups: List[str] = []
+    flat_newicks: List[str] = []
+    n_multifurcating = 0
+    multifurcating_indices: List[int] = []
+
+    for group_name in ordered_groups:
+        newicks = newick_input[group_name]
+        if not newicks:
+            raise ValueError(f"Group '{group_name}' is empty")
+        for newick in newicks:
+            idx = len(flat_newicks)
+            s = newick.strip().rstrip(";")
+            if s.count("(") < s.count(","):
+                n_multifurcating += 1
+                multifurcating_indices.append(idx)
+            flat_groups.append(group_name)
+            flat_newicks.append(newick)
+
+    n_total = len(flat_newicks)
+
+    # ── 2. Resolve thread count ──────────────────────────────────────────
+    effective_threads = min(_resolve_n_threads(n_threads), n_total)
+    logger.debug(
+        "Parsing %d NEWICK strings with %d thread(s)", n_total, effective_threads
+    )
+
+    # ── 3. Parse in parallel (or sequentially for n_threads=1) ───────────
+    trees: List[Optional["Tree"]] = [None] * n_total
+
+    with suppress_logger("quarimo._tree"):
+        if effective_threads <= 1:
+            for idx, newick in enumerate(flat_newicks):
+                trees[idx] = Tree(newick)
+        else:
+            with ThreadPoolExecutor(max_workers=effective_threads) as executor:
+                for idx, tree in enumerate(executor.map(Tree, flat_newicks)):
+                    trees[idx] = tree
+
+    return trees, flat_groups, n_multifurcating, multifurcating_indices  # type: ignore[return-value]
 
 
 class Forest:
@@ -337,10 +440,9 @@ class Forest:
 
     **Group-aware quartet analysis:**
 
-    >>> counts, dists = c.quartet_topology(quartets, steiner=True)
-    >>> by_group = c.split_quartet_results_by_group(counts, dists)
-    >>> for group_name, (group_counts, group_dists) in by_group.items():
-    ...     print(f"{group_name}: {group_counts[0]}")
+    >>> result = c.quartet_topology(quartets, steiner=True)
+    >>> result.counts.shape   # (n_quartets, n_groups, 3)
+    >>> result.to_frame()     # long-form Polars DataFrame
     """
 
     # ================================================================== #
@@ -371,32 +473,10 @@ class Forest:
         self.unique_groups = sorted(newick_input.keys())
         self.n_groups = len(self.unique_groups)
 
-        # Track multifurcation corrections globally
-        n_multifurcating = 0
-        multifurcating_indices = []
-
-        # Flatten into ordered list with group tracking
-        self._trees = []
-        self.group_labels = []
-        tree_idx = 0
-
-        # Suppress phylo_tree logger during tree construction
-        with suppress_logger("quarimo._tree"):
-            for group_name in self.unique_groups:
-                newicks = newick_input[group_name]
-                if not newicks:
-                    raise ValueError(f"Group '{group_name}' is empty")
-
-                for newick in newicks:
-                    # Check for multifurcation
-                    s = newick.strip().rstrip(";")
-                    if s.count("(") < s.count(","):
-                        n_multifurcating += 1
-                        multifurcating_indices.append(tree_idx)
-
-                    self._trees.append(Tree(newick))
-                    self.group_labels.append(group_name)
-                    tree_idx += 1
+        # Parse NEWICK strings into Tree objects (parallel)
+        self._trees, self.group_labels, n_multifurcating, multifurcating_indices = (
+            _load_tree_data(newick_input, self.unique_groups)
+        )
 
         # Set n_trees BEFORE logging multifurcation warning
         self.n_trees = len(self._trees)
