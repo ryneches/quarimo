@@ -128,8 +128,10 @@ arrays.
 
 import hashlib
 import logging
+import multiprocessing
 import os
-from concurrent.futures import ThreadPoolExecutor
+import sys
+from concurrent.futures import ProcessPoolExecutor
 from time import time
 from itertools import combinations
 from typing import Union, List, Tuple, Optional, Dict, Any
@@ -193,6 +195,20 @@ logger = logging.getLogger(__name__)
 # expose this for HPC deployments that must cap worker threads across the
 # whole process (e.g. SLURM slots, OMP_NUM_THREADS parity).
 _GLOBAL_THREAD_CAP: Optional[int] = None
+
+# ── Multiprocessing configuration ────────────────────────────────────────────
+# 'fork' on Unix: workers inherit the parent's already-imported modules at
+# near-zero startup cost.  Safe here because numba's parallel thread pool has
+# not yet been initialised when Forest.__init__ runs.  If you call Forest()
+# after quartet_topology() in the same process, pass n_threads=1 to be safe.
+# 'spawn' on Windows (fork is unavailable).
+_MP_CONTEXT: str = "fork" if sys.platform != "win32" else "spawn"
+
+# Total NEWICK character count below which sequential parsing is used.
+# Subprocess overhead (~tens of ms per worker for fork) outweighs the
+# parallelism gain for small or tiny-tree datasets.
+# ~200 KB ≈ four 1 000-taxon trees or forty 100-taxon trees.
+_MP_CHAR_THRESHOLD: int = 200_000
 
 
 def _resolve_n_threads(n_threads: Optional[int]) -> int:
@@ -277,12 +293,25 @@ if _CUDA_AVAILABLE:
 # ======================================================================== #
 
 
+def _parse_newick_worker(newick: str) -> "Tree":
+    """Subprocess worker: parse one NEWICK string into a Tree.
+
+    Kept at module scope so it is picklable by :mod:`multiprocessing`.
+    Logger suppression is set per-worker rather than inheriting a context
+    manager from the parent process.
+    """
+    import logging
+
+    logging.getLogger("quarimo._tree").setLevel(logging.WARNING)
+    return Tree(newick)
+
+
 def _load_tree_data(
     newick_input: Dict[str, List[str]],
     ordered_groups: List[str],
     n_threads: Optional[int] = None,
 ) -> Tuple[List["Tree"], List[str], int, List[int]]:
-    """Parse NEWICK strings into :class:`Tree` instances, in parallel.
+    """Parse NEWICK strings into :class:`Tree` instances, optionally in parallel.
 
     Trees are returned in *ordered_groups* order so that the caller can build
     deterministic group → tree mappings.
@@ -295,10 +324,14 @@ def _load_tree_data(
     ordered_groups : list[str]
         Group labels in the desired construction order.
     n_threads : int or None
-        Number of worker threads.  ``None`` (default) → use all available
-        CPUs, subject to the module-level :data:`_GLOBAL_THREAD_CAP`.
-        Pass ``1`` to force sequential parsing (useful for debugging or when
-        the calling environment limits concurrency externally).
+        Maximum number of worker *processes* to use.  ``None`` (default) →
+        all available CPUs, subject to :data:`_GLOBAL_THREAD_CAP`.  Pass
+        ``1`` to force sequential parsing.
+
+        Parallel parsing uses :class:`~concurrent.futures.ProcessPoolExecutor`
+        (real OS processes, bypassing the GIL) but only when total NEWICK
+        input exceeds :data:`_MP_CHAR_THRESHOLD`; smaller datasets are always
+        parsed sequentially to avoid subprocess overhead.
 
     Returns
     -------
@@ -318,7 +351,7 @@ def _load_tree_data(
         If any group in *ordered_groups* is present in *newick_input* but
         has an empty list of NEWICK strings.
     """
-    # ── 1. Flatten into an ordered (group_name, newick) sequence ─────────
+    # ── 1. Flatten and pre-screen for multifurcation ──────────────────────
     flat_groups: List[str] = []
     flat_newicks: List[str] = []
     n_multifurcating = 0
@@ -339,25 +372,31 @@ def _load_tree_data(
 
     n_total = len(flat_newicks)
 
-    # ── 2. Resolve thread count ──────────────────────────────────────────
-    effective_threads = min(_resolve_n_threads(n_threads), n_total)
-    logger.debug(
-        "Parsing %d NEWICK strings with %d thread(s)", n_total, effective_threads
-    )
+    # ── 2. Decide whether to use subprocesses ─────────────────────────────
+    effective_workers = min(_resolve_n_threads(n_threads), n_total)
+    total_chars = sum(len(nwk) for nwk in flat_newicks)
+    use_mp = effective_workers > 1 and total_chars >= _MP_CHAR_THRESHOLD
 
-    # ── 3. Parse in parallel (or sequentially for n_threads=1) ───────────
-    trees: List[Optional["Tree"]] = [None] * n_total
+    # ── 3. Parse sequentially or in parallel ─────────────────────────────
+    if use_mp:
+        logger.debug(
+            "Parsing %d NEWICK strings with %d worker process(es) "
+            "(%d chars total, threshold=%d)",
+            n_total, effective_workers, total_chars, _MP_CHAR_THRESHOLD,
+        )
+        ctx = multiprocessing.get_context(_MP_CONTEXT)
+        with ProcessPoolExecutor(max_workers=effective_workers, mp_context=ctx) as pool:
+            trees: List["Tree"] = list(pool.map(_parse_newick_worker, flat_newicks))
+    else:
+        logger.debug(
+            "Parsing %d NEWICK strings sequentially "
+            "(%d chars total, threshold=%d)",
+            n_total, total_chars, _MP_CHAR_THRESHOLD,
+        )
+        with suppress_logger("quarimo._tree"):
+            trees = [Tree(newick) for newick in flat_newicks]
 
-    with suppress_logger("quarimo._tree"):
-        if effective_threads <= 1:
-            for idx, newick in enumerate(flat_newicks):
-                trees[idx] = Tree(newick)
-        else:
-            with ThreadPoolExecutor(max_workers=effective_threads) as executor:
-                for idx, tree in enumerate(executor.map(Tree, flat_newicks)):
-                    trees[idx] = tree
-
-    return trees, flat_groups, n_multifurcating, multifurcating_indices  # type: ignore[return-value]
+    return trees, flat_groups, n_multifurcating, multifurcating_indices
 
 
 class Forest:
@@ -473,7 +512,15 @@ class Forest:
         self.unique_groups = sorted(newick_input.keys())
         self.n_groups = len(self.unique_groups)
 
-        # Parse NEWICK strings into Tree objects (parallel)
+        # Log before parsing so the message appears while work is in progress
+        _n_total = sum(len(v) for v in newick_input.values())
+        logger.info("Loading %d tree(s) from NEWICK strings...", _n_total)
+        if self.n_groups > 1:
+            logger.info("  Organized into %d labeled groups", self.n_groups)
+        else:
+            logger.info("  Single group: %s", self.unique_groups[0])
+
+        # Parse NEWICK strings into Tree objects (parallel when dataset is large)
         self._trees, self.group_labels, n_multifurcating, multifurcating_indices = (
             _load_tree_data(newick_input, self.unique_groups)
         )
@@ -488,13 +535,6 @@ class Forest:
 
         # Build group mappings
         self._build_group_mappings()
-
-        # Log tree count and group organization
-        logger.info("Loading %d tree(s) from NEWICK strings...", self.n_trees)
-        if self.n_groups > 1:
-            logger.info("  Organized into %d labeled groups", self.n_groups)
-        else:
-            logger.info("  Single group: %s", self.unique_groups[0])
 
         # Build namespace and CSR layout
         logger.info("Building global taxon namespace...")
