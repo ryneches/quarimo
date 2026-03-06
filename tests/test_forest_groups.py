@@ -367,8 +367,8 @@ class TestBackwardCompatibility:
         assert result_s.steiner.shape == (1, 1, 3)
 
 
-class TestQuartetQmetric:
-    """Tests for Forest.quartet_qmetric."""
+class TestQuartetQED:
+    """Tests for Forest.qed."""
 
     # ── Shared fixtures ─────────────────────────────────────────────────── #
 
@@ -408,14 +408,14 @@ class TestQuartetQmetric:
     def test_output_shape_two_groups(self, two_group_forest):
         """Shape is (n_quartets, n_pairs) = (1, 1) for 2 groups, 1 quartet."""
         forest, counts = two_group_forest
-        scores = forest.quartet_qmetric(counts)
+        scores = forest.qed(counts)
         assert scores.shape == (1, 1)
         assert scores.dtype == np.float64
 
     def test_output_shape_single_group(self, single_group_forest):
         """Single group → 0 pairs → shape (n_quartets, 0)."""
         forest, counts = single_group_forest
-        scores = forest.quartet_qmetric(counts)
+        scores = forest.qed(counts)
         assert scores.shape == (1, 0)
 
     def test_output_shape_bulk_quartets(self):
@@ -428,7 +428,7 @@ class TestQuartetQmetric:
         quartets = [("a", "b", "c", "d"), ("a", "b", "c", "d")]  # 2 quartets
         q = Quartets.from_list(forest, quartets)
         counts = forest.quartet_topology(q)
-        scores = forest.quartet_qmetric(counts)
+        scores = forest.qed(counts)
         assert scores.shape == (2, 1)
 
     # ── Correctness ──────────────────────────────────────────────────────── #
@@ -442,13 +442,13 @@ class TestQuartetQmetric:
         forest = Forest(groups)
         q = Quartets.from_list(forest, [("a", "b", "c", "d")])
         counts = forest.quartet_topology(q)
-        scores = forest.quartet_qmetric(counts)
+        scores = forest.qed(counts)
         assert abs(scores[0, 0] - 1.0) < 1e-12
 
     def test_perfect_disagreement_is_minus_one(self, two_group_forest):
         """Groups favour completely different topologies → score == -1.0."""
         forest, counts = two_group_forest
-        scores = forest.quartet_qmetric(counts)
+        scores = forest.qed(counts)
         assert abs(scores[0, 0] - (-1.0)) < 1e-12
 
     def test_missing_taxa_gives_zero(self):
@@ -462,7 +462,7 @@ class TestQuartetQmetric:
         result = forest.quartet_topology(q)
         # Group B has count 0 for this quartet
         assert result.counts[0, 1].sum() == 0
-        scores = forest.quartet_qmetric(result)
+        scores = forest.qed(result)
         assert scores[0, 0] == 0.0
 
     def test_score_in_range(self):
@@ -482,7 +482,7 @@ class TestQuartetQmetric:
         forest = Forest(groups)
         q = Quartets.from_list(forest, [("a", "b", "c", "d")])
         counts = forest.quartet_topology(q)
-        scores = forest.quartet_qmetric(counts)
+        scores = forest.qed(counts)
         assert np.all(scores >= -1.0 - 1e-12)
         assert np.all(scores <= 1.0 + 1e-12)
 
@@ -498,7 +498,7 @@ class TestQuartetQmetric:
         forest = Forest(groups)
         q = Quartets.from_list(forest, [("a", "b", "c", "d")])
         counts = forest.quartet_topology(q)
-        scores = forest.quartet_qmetric(counts)
+        scores = forest.qed(counts)
         assert scores[0, 0] > 0.0
 
     # ── Three-group forest — all pairs ─────────────────────────────────────
@@ -513,7 +513,7 @@ class TestQuartetQmetric:
         forest = Forest(groups)
         q = Quartets.from_list(forest, [("a", "b", "c", "d")])
         counts = forest.quartet_topology(q)
-        scores = forest.quartet_qmetric(counts)
+        scores = forest.qed(counts)
         assert scores.shape == (1, 3)
         # Groups A and B are identical → pair (0,1) should be +1
         assert abs(scores[0, 0] - 1.0) < 1e-12
@@ -527,17 +527,17 @@ class TestQuartetQmetric:
         """Custom group_pairs selects specific comparisons."""
         forest, counts = two_group_forest
         gp = np.array([[1, 0]], dtype=np.int32)  # reversed order
-        scores = forest.quartet_qmetric(counts, group_pairs=gp)
+        scores = forest.qed(counts, group_pairs=gp)
         assert scores.shape == (1, 1)
         # Reversed pair is the same comparison — score should be the same
-        scores_default = forest.quartet_qmetric(counts)
+        scores_default = forest.qed(counts)
         assert abs(scores[0, 0] - scores_default[0, 0]) < 1e-12
 
     def test_custom_group_pairs_same_group(self, two_group_forest):
         """Comparing a group to itself gives +1."""
         forest, counts = two_group_forest
         gp = np.array([[0, 0]], dtype=np.int32)
-        scores = forest.quartet_qmetric(counts, group_pairs=gp)
+        scores = forest.qed(counts, group_pairs=gp)
         assert abs(scores[0, 0] - 1.0) < 1e-12
 
     # ── Validation errors ────────────────────────────────────────────────── #
@@ -547,14 +547,14 @@ class TestQuartetQmetric:
         forest, counts = two_group_forest
         bad_counts = np.zeros((1, 3), dtype=np.int32)  # missing n_groups axis
         with pytest.raises(ValueError, match="shape"):
-            forest.quartet_qmetric(bad_counts)
+            forest.qed(bad_counts)
 
     def test_out_of_range_group_pair_raises(self, two_group_forest):
         """Out-of-range group index raises ValueError."""
         forest, counts = two_group_forest
         gp = np.array([[0, 99]], dtype=np.int32)
         with pytest.raises(ValueError, match="indices"):
-            forest.quartet_qmetric(counts, group_pairs=gp)
+            forest.qed(counts, group_pairs=gp)
 
 class TestGroupOffsets:
     """Tests for group_offsets CSR array."""

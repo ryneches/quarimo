@@ -382,16 +382,20 @@ def _load_tree_data(
         logger.debug(
             "Parsing %d NEWICK strings with %d worker process(es) "
             "(%d chars total, threshold=%d)",
-            n_total, effective_workers, total_chars, _MP_CHAR_THRESHOLD,
+            n_total,
+            effective_workers,
+            total_chars,
+            _MP_CHAR_THRESHOLD,
         )
         ctx = multiprocessing.get_context(_MP_CONTEXT)
         with ProcessPoolExecutor(max_workers=effective_workers, mp_context=ctx) as pool:
             trees: List["Tree"] = list(pool.map(_parse_newick_worker, flat_newicks))
     else:
         logger.debug(
-            "Parsing %d NEWICK strings sequentially "
-            "(%d chars total, threshold=%d)",
-            n_total, total_chars, _MP_CHAR_THRESHOLD,
+            "Parsing %d NEWICK strings sequentially (%d chars total, threshold=%d)",
+            n_total,
+            total_chars,
+            _MP_CHAR_THRESHOLD,
         )
         with suppress_logger("quarimo._tree"):
             trees = [Tree(newick) for newick in flat_newicks]
@@ -912,7 +916,9 @@ class Forest:
         if n_quartets == 0:
             return QuartetTopologyResult(
                 counts=np.zeros((0, self.n_groups, 3), dtype=np.int32),
-                steiner=np.zeros((0, self.n_groups, 3), dtype=np.float64) if steiner else None,
+                steiner=np.zeros((0, self.n_groups, 3), dtype=np.float64)
+                if steiner
+                else None,
                 groups=self.unique_groups,
                 quartets=quartets,
                 global_names=self.global_names,
@@ -939,7 +945,9 @@ class Forest:
         steiner_out = None
 
         if resolved_backend == "cuda":
-            counts_out, steiner_out = self._quartet_topology_cuda_unified(quartets, steiner)
+            counts_out, steiner_out = self._quartet_topology_cuda_unified(
+                quartets, steiner
+            )
 
         else:
             # CPU/Python backends: materialise quartets to array
@@ -976,14 +984,18 @@ class Forest:
                     _kernel_first_call[kernel_key] = False
 
                 if steiner:
-                    steiner_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.float64)
+                    steiner_out = np.zeros(
+                        (n_quartets, self.n_groups, 3), dtype=np.float64
+                    )
                     _quartet_steiner_njit(*common_args, counts_out, steiner_out)
                 else:
                     _quartet_counts_njit(*common_args, counts_out)
 
             elif resolved_backend == "python":
                 if steiner:
-                    steiner_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.float64)
+                    steiner_out = np.zeros(
+                        (n_quartets, self.n_groups, 3), dtype=np.float64
+                    )
                     steiner_arg = steiner_out
                 else:
                     steiner_arg = np.empty(0, dtype=np.float64)  # counts-only sentinel
@@ -1004,26 +1016,40 @@ class Forest:
             global_names=self.global_names,
         )
 
-    def quartet_qmetric(
+    def qed(
         self,
         counts: Union[np.ndarray, QuartetTopologyResult],
         group_pairs: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
-        Compute the quartet qmetric for all quartet × group-pair combinations.
+        Compute the Quartet Ensemble Discordance (QED) for all quartet × group-pair combinations.
 
-        The qmetric is an entropy-like similarity score in [-1, +1] that
-        measures how consistently two groups of trees agree on the dominant
-        quartet topology.  It is computed from the per-group topology counts
-        returned by :meth:`quartet_topology`.
+        QED is an entropy-like similarity score in [-1, +1] computed from the
+        per-group topology counts returned by :meth:`quartet_topology`.
 
         Score interpretation
         --------------------
-        +1.0  Perfect agreement — both groups show identical topology
-              distributions.
-        0.0   No information — one or both groups has no trees with all
-              four taxa present.
-        -1.0  Perfect disagreement — groups favour opposite topologies.
+        +1.0  The dominant topology is the same in both ensembles and receives
+              all the signal — perfect concordance.
+        0.0   No topology dominates, or one ensemble has no trees — no
+              information.
+        -1.0  Conflicting topologies dominate the two ensembles — perfect
+              discordance.
+
+        The score captures more than just whether the dominant topologies
+        agree.  Because each quartet has exactly three possible topologies,
+        QED is the lowest-order subtree measure that can distinguish signal
+        from noise in the minority topologies:
+
+        * If the same *two* topologies are supported in both ensembles (one
+          dominant, one minority), QED tends toward a positive value in (0, 1),
+          reflecting partial but concordant signal.
+        * If *different* two topologies are each dominant in one ensemble, QED
+          tends toward a negative value in (-1, 0), reflecting discordant
+          signal.
+        * If both non-dominant topologies are strongly represented in one or
+          both ensembles, QED tends toward 0, reflecting noise rather than
+          structured signal.
 
         Topology encoding
         -----------------
@@ -1046,8 +1072,8 @@ class Forest:
 
         Returns
         -------
-        qmetric : np.ndarray, float64, shape (n_quartets, n_pairs)
-            ``qmetric[qi, pi]`` is the qmetric score comparing groups
+        qed : np.ndarray, float64, shape (n_quartets, n_pairs)
+            ``qed[qi, pi]`` is the QED score comparing groups
             ``group_pairs[pi, 0]`` and ``group_pairs[pi, 1]`` for quartet
             ``qi``.
 
@@ -1060,8 +1086,8 @@ class Forest:
         Examples
         --------
         >>> q = Quartets.from_list(forest, [('A', 'B', 'C', 'D')])
-        >>> counts = forest.quartet_topology(q)          # (1, n_groups, 3)
-        >>> scores = forest.quartet_qmetric(counts)      # (1, n_pairs)
+        >>> counts = forest.quartet_topology(q)   # (1, n_groups, 3)
+        >>> scores = forest.qed(counts)           # (1, n_pairs)
         """
         if isinstance(counts, QuartetTopologyResult):
             counts = counts.counts
@@ -1085,8 +1111,7 @@ class Forest:
             group_pairs = np.asarray(group_pairs, dtype=np.int32)
             if group_pairs.ndim != 2 or group_pairs.shape[1] != 2:
                 raise ValueError(
-                    "group_pairs must have shape (n_pairs, 2), "
-                    f"got {group_pairs.shape}"
+                    f"group_pairs must have shape (n_pairs, 2), got {group_pairs.shape}"
                 )
             if group_pairs.size > 0:
                 if group_pairs.min() < 0 or group_pairs.max() >= self.n_groups:
@@ -1102,10 +1127,11 @@ class Forest:
             return out
 
         if _cpu_import_ok:
-            from quarimo._cpu_kernels import _qmetric_njit
-            _qmetric_njit(counts, group_pairs, n_quartets, n_pairs, out)
+            from quarimo._cpu_kernels import _qed_njit
+
+            _qed_njit(counts, group_pairs, n_quartets, n_pairs, out)
         else:
-            Forest._qmetric_kernel(counts, group_pairs, n_quartets, n_pairs, out)
+            Forest._qed_kernel(counts, group_pairs, n_quartets, n_pairs, out)
 
         return out
 
@@ -1268,12 +1294,16 @@ class Forest:
                 proc_offset = batch_offset
 
             # Zero-initialised counts and steiner (atomic.add requires it)
-            d_counts_b = cuda.to_device(np.zeros((bc, self.n_groups, 3), dtype=np.int32))
+            d_counts_b = cuda.to_device(
+                np.zeros((bc, self.n_groups, 3), dtype=np.int32)
+            )
 
             if steiner:
                 # Must use cuda.to_device(np.zeros(...)) — atomic accumulation
                 # requires zero-initialised device arrays.
-                d_steiner_b = cuda.to_device(np.zeros((bc, self.n_groups, 3), dtype=np.float64))
+                d_steiner_b = cuda.to_device(
+                    np.zeros((bc, self.n_groups, 3), dtype=np.float64)
+                )
                 logger.info("  🖥  launching Steiner kernel...")
                 time0 = time()
                 quartet_steiner_cuda_unified[blocks, tpb](
@@ -1615,9 +1645,17 @@ class Forest:
 
             for ti in range(n_trees):
                 ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = Forest._resolve_quartet(
-                    n0, n1, n2, n3, ti,
-                    global_to_local, node_offsets, tour_offsets, sp_offsets,
-                    lg_offsets, sp_tour_widths,
+                    n0,
+                    n1,
+                    n2,
+                    n3,
+                    ti,
+                    global_to_local,
+                    node_offsets,
+                    tour_offsets,
+                    sp_offsets,
+                    lg_offsets,
+                    sp_tour_widths,
                 )
                 if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
                     continue
@@ -1627,9 +1665,20 @@ class Forest:
                 occ2 = int(all_first_occ[nb + ln2])
                 occ3 = int(all_first_occ[nb + ln3])
                 topo, r0, r1, r2, r_winner = Forest._quartet_topology_and_rd(
-                    occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
-                    all_root_distance, all_sparse_table, all_euler_depth,
-                    all_log2_table, all_euler_tour,
+                    occ0,
+                    occ1,
+                    occ2,
+                    occ3,
+                    nb,
+                    tb,
+                    sb,
+                    lb,
+                    tw,
+                    all_root_distance,
+                    all_sparse_table,
+                    all_euler_depth,
+                    all_log2_table,
+                    all_euler_tour,
                 )
 
                 gi = int(tree_to_group_idx[ti])
@@ -1637,12 +1686,20 @@ class Forest:
 
                 if compute_steiner:
                     steiner_out[qi, gi, topo] += Forest._steiner_length(
-                        ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner,
+                        ln0,
+                        ln1,
+                        ln2,
+                        ln3,
+                        nb,
+                        r0,
+                        r1,
+                        r2,
+                        r_winner,
                         all_root_distance,
                     )
 
     @staticmethod
-    def _qmetric_kernel(
+    def _qed_kernel(
         counts: np.ndarray,
         pair_indices: np.ndarray,
         n_quartets: int,
@@ -1650,9 +1707,9 @@ class Forest:
         out: np.ndarray,
     ) -> None:
         """
-        **Private static.**  Pure-Python fallback for the qmetric kernel.
+        **Private static.**  Pure-Python fallback for the QED kernel.
 
-        Mirrors ``_qmetric_njit`` exactly; used when Numba is unavailable.
+        Mirrors ``_qed_njit`` exactly; used when Numba is unavailable.
         """
         import math as _math
 
@@ -1707,10 +1764,19 @@ class Forest:
                 out[qi, pi] = J * (1.0 + s)
 
     @staticmethod
-    def _resolve_quartet(n0, n1, n2, n3, ti,
-                         global_to_local,
-                         node_offsets, tour_offsets, sp_offsets, lg_offsets,
-                         sp_tour_widths):
+    def _resolve_quartet(
+        n0,
+        n1,
+        n2,
+        n3,
+        ti,
+        global_to_local,
+        node_offsets,
+        tour_offsets,
+        sp_offsets,
+        lg_offsets,
+        sp_tour_widths,
+    ):
         """
         **Private static.**  Map four global taxon IDs to tree-local positions
         for tree *ti*.
@@ -1738,19 +1804,30 @@ class Forest:
         ln1 = int(global_to_local[ti, n1])
         ln2 = int(global_to_local[ti, n2])
         ln3 = int(global_to_local[ti, n3])
-        nb  = int(node_offsets[ti])
-        tb  = int(tour_offsets[ti])
-        sb  = int(sp_offsets[ti])
-        lb  = int(lg_offsets[ti])
-        tw  = int(sp_tour_widths[ti])
+        nb = int(node_offsets[ti])
+        tb = int(tour_offsets[ti])
+        sb = int(sp_offsets[ti])
+        lb = int(lg_offsets[ti])
+        tw = int(sp_tour_widths[ti])
         return ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw
 
     @staticmethod
-    def _quartet_topology_and_rd(occ0, occ1, occ2, occ3,
-                                  nb, tb, sb, lb, tw,
-                                  all_root_distance,
-                                  all_sparse_table, all_euler_depth,
-                                  all_log2_table, all_euler_tour):
+    def _quartet_topology_and_rd(
+        occ0,
+        occ1,
+        occ2,
+        occ3,
+        nb,
+        tb,
+        sb,
+        lb,
+        tw,
+        all_root_distance,
+        all_sparse_table,
+        all_euler_depth,
+        all_log2_table,
+        all_euler_tour,
+    ):
         """
         **Private static.**  Six RMQ calls + four-point condition → topology
         and pair-sums.
@@ -1787,12 +1864,26 @@ class Forest:
         Pure-Python counterpart of ``_quartet_topology_and_rd_nb`` and
         ``_quartet_topology_and_rd_cuda``.
         """
+
         def lca_rd(oa, ob):
             l, r = (oa, ob) if oa <= ob else (ob, oa)
-            return float(all_root_distance[nb + Forest._rmq_csr(
-                l, r, sb, tw, all_sparse_table, all_euler_depth,
-                all_log2_table, lb, tb, all_euler_tour,
-            )])
+            return float(
+                all_root_distance[
+                    nb
+                    + Forest._rmq_csr(
+                        l,
+                        r,
+                        sb,
+                        tw,
+                        all_sparse_table,
+                        all_euler_depth,
+                        all_log2_table,
+                        lb,
+                        tb,
+                        all_euler_tour,
+                    )
+                ]
+            )
 
         rd01 = lca_rd(occ0, occ1)
         rd02 = lca_rd(occ0, occ2)
@@ -1806,16 +1897,21 @@ class Forest:
         r2 = rd03 + rd12  # topology 2: (n0,n3)|(n1,n2)
 
         if r0 >= r1 and r0 >= r2:
-            topo = 0; r_winner = r0
+            topo = 0
+            r_winner = r0
         elif r1 >= r0 and r1 >= r2:
-            topo = 1; r_winner = r1
+            topo = 1
+            r_winner = r1
         else:
-            topo = 2; r_winner = r2
+            topo = 2
+            r_winner = r2
 
         return topo, r0, r1, r2, r_winner
 
     @staticmethod
-    def _steiner_length(ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance):
+    def _steiner_length(
+        ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance
+    ):
         """
         **Private static.**  Steiner spanning length of the winning quartet
         topology.
@@ -1849,10 +1945,12 @@ class Forest:
         Pure-Python counterpart of ``_steiner_length_nb`` and
         ``_steiner_length_cuda``.
         """
-        leaf_sum = (float(all_root_distance[nb + ln0])
-                  + float(all_root_distance[nb + ln1])
-                  + float(all_root_distance[nb + ln2])
-                  + float(all_root_distance[nb + ln3]))
+        leaf_sum = (
+            float(all_root_distance[nb + ln0])
+            + float(all_root_distance[nb + ln1])
+            + float(all_root_distance[nb + ln2])
+            + float(all_root_distance[nb + ln3])
+        )
         return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
 
     @staticmethod

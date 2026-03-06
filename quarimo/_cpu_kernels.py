@@ -28,8 +28,8 @@ _quartet_counts_njit : njit function
 _quartet_steiner_njit : njit function
     Parallel quartet topology counts with Steiner distances.
 
-_qmetric_njit : njit function
-    Parallel qmetric computation over all quartet × group-pair combinations.
+_qed_njit : njit function
+    Parallel QED computation over all quartet × group-pair combinations.
 
 Notes
 -----
@@ -425,16 +425,16 @@ def _quartet_steiner_njit(
 
 
 # ======================================================================== #
-# QMetric Kernel                                                            #
+# QED Kernel                                                                #
 # ======================================================================== #
 
 @njit(parallel=True, cache=True)
-def _qmetric_njit(counts, pair_indices, n_quartets, n_pairs, out):
+def _qed_njit(counts, pair_indices, n_quartets, n_pairs, out):
     """
-    Compute the quartet qmetric for all quartet × group-pair combinations.
+    Compute the Quartet Ensemble Discordance (QED) for all quartet × group-pair combinations.
 
-    The qmetric is an entropy-like similarity score in [-1, +1] that measures
-    how consistently two groups of trees agree on the dominant quartet topology.
+    QED is an entropy-like similarity score in [-1, +1] that measures how
+    consistently two groups of trees agree on quartet topology.
 
     Parameters
     ----------
