@@ -5,6 +5,13 @@ Quartets class for quartet sampling and generation.
 import numpy as np
 from typing import Union, List, Tuple, Optional, Iterator
 
+# Maximum global taxon ID for which the staged int64 combinadic computation
+# is safe from intermediate overflow.  For d < this value every intermediate
+# product in the staged division fits in int64 (max intermediate ≈ 9.1×10^18
+# at d = 86 000, safely below int64 max ≈ 9.22×10^18).  Forests larger than
+# this fall back to Python-int (object) arithmetic.
+_QUARTET_IDX_INT64_THRESHOLD = 86_000
+
 
 class Quartets:
     """
@@ -448,6 +455,104 @@ class Quartets:
             # seed is a quartet or None
             return cls(forest, seed=seed, offset=1, count=count)
     
+    # ------------------------------------------------------------------
+    # Quartet indexing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def quartet_index(a: int, b: int, c: int, d: int) -> int:
+        """
+        Combinadic (combinatorial number system) rank of a sorted quartet.
+
+        Returns ``C(a,1) + C(b,2) + C(c,3) + C(d,4)``, a bijection from
+        4-element subsets of non-negative integers to the natural numbers.
+        The result is a unique, stable integer index for the quartet ``(a, b,
+        c, d)`` with ``a < b < c < d``.
+
+        The index depends only on the four global taxon ID values, not on
+        forest size or any other context.  It is therefore stable across
+        multiple result objects produced from the same forest, and across any
+        two forests that share the same global namespace.
+
+        Uses Python int arithmetic and is exact for any input size.
+
+        Parameters
+        ----------
+        a, b, c, d : int
+            Global taxon IDs, must satisfy ``a < b < c < d``.
+
+        Returns
+        -------
+        int
+
+        Examples
+        --------
+        >>> Quartets.quartet_index(0, 1, 2, 3)
+        0
+        >>> Quartets.quartet_index(0, 1, 2, 4)
+        1
+        >>> Quartets.quartet_index(1, 2, 3, 4)
+        4
+        """
+        return (
+            a
+            + b * (b - 1) // 2
+            + c * (c - 1) * (c - 2) // 6
+            + d * (d - 1) * (d - 2) * (d - 3) // 24
+        )
+
+    def index_array(self) -> np.ndarray:
+        """
+        Combinadic indices for all quartets in this object.
+
+        Each index is the value of :meth:`quartet_index` for the
+        corresponding quartet.
+
+        Returns
+        -------
+        np.ndarray
+            Shape ``(n_quartets,)``.  dtype is ``int64`` for forests with
+            fewer than ``_QUARTET_IDX_INT64_THRESHOLD`` global taxa (fast
+            vectorised path); Python-int ``object`` dtype for larger forests
+            (avoids intermediate overflow).  The ``object`` dtype is
+            transparently handled by :meth:`~._results.QuartetTopologyResult.to_frame`
+            and :meth:`~._results.QEDResult.to_frame` as a Polars ``Int128``
+            column.
+
+        Notes
+        -----
+        Calling this method materialises the full quartet sequence; for large
+        random windows this may be slow.  The result is not cached.
+        """
+        ids = np.array(list(self), dtype=np.int64)
+        if len(ids) == 0:
+            return np.empty(0, dtype=np.int64)
+
+        a, b, c, d = ids[:, 0], ids[:, 1], ids[:, 2], ids[:, 3]
+
+        if int(d.max()) < _QUARTET_IDX_INT64_THRESHOLD:
+            # Fast path: staged integer division.
+            # Each // step is exact (product of k consecutive integers is
+            # divisible by k!), and no intermediate value exceeds int64 max.
+            b2 = b * (b - 1) // 2
+            c3 = c * (c - 1) // 2 * (c - 2) // 3
+            d4 = d * (d - 1) // 2 * (d - 2) // 3 * (d - 3) // 4
+            return (a + b2 + c3 + d4).astype(np.int64)
+        else:
+            # Slow path: Python int arithmetic — arbitrary precision.
+            # Returns object dtype; callers that produce Polars DataFrames
+            # use pl.Int128 for this column.
+            a_o = a.astype(object)
+            b_o = b.astype(object)
+            c_o = c.astype(object)
+            d_o = d.astype(object)
+            return (
+                a_o
+                + b_o * (b_o - 1) // 2
+                + c_o * (c_o - 1) * (c_o - 2) // 6
+                + d_o * (d_o - 1) * (d_o - 2) * (d_o - 3) // 24
+            )
+
     def __repr__(self) -> str:
         """String representation."""
         n_seed = len(self.seed)

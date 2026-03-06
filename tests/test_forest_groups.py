@@ -556,6 +556,110 @@ class TestQuartetQED:
         with pytest.raises(ValueError, match="indices"):
             forest.qed(counts, group_pairs=gp)
 
+    # ── to_frame() ───────────────────────────────────────────────────────── #
+
+    def test_to_frame_long_shape(self, two_group_forest):
+        """Long form has n_quartets * n_pairs rows and expected columns."""
+        pytest.importorskip("polars")
+        forest, counts = two_group_forest
+        result = forest.qed(counts)
+        df = result.to_frame("long")
+        # quartet_idx, a, b, c, d, group_a, group_b, qed
+        assert df.shape == (1, 8)
+        assert list(df.columns) == [
+            "quartet_idx", "a", "b", "c", "d", "group_a", "group_b", "qed"
+        ]
+
+    def test_to_frame_wide_shape(self, two_group_forest):
+        """Wide form has n_quartets rows and one QED column per pair."""
+        pytest.importorskip("polars")
+        forest, counts = two_group_forest
+        result = forest.qed(counts)
+        df = result.to_frame("wide")
+        # quartet_idx, a, b, c, d, A_vs_B
+        assert df.shape == (1, 6)
+        assert df.columns[0] == "quartet_idx"
+        assert "A_vs_B" in df.columns
+
+    def test_to_frame_long_join_on_quartet_idx(self, two_group_forest):
+        """Long QED and long topology join 1-to-(n_groups×3) on quartet_idx."""
+        pytest.importorskip("polars")
+        forest, counts = two_group_forest
+        qed_df = forest.qed(counts).to_frame("long")
+        topo_df = counts.to_frame("long")
+        joined = qed_df.join(topo_df, on="quartet_idx", how="left")
+        # QED and topology columns both present
+        assert "qed" in joined.columns
+        assert "group" in joined.columns
+        assert "topology" in joined.columns
+        assert "count" in joined.columns
+        # 1 QED row × (n_groups=2 × n_topologies=3) topology rows = 6
+        assert joined.shape[0] == qed_df.shape[0] * forest.n_groups * 3
+
+    def test_to_frame_wide_join_on_quartet_idx(self, two_group_forest):
+        """Wide QED and wide topology join 1-to-1 on quartet_idx."""
+        pytest.importorskip("polars")
+        forest, counts = two_group_forest
+        qed_df = forest.qed(counts).to_frame("wide")
+        topo_df = counts.to_frame("wide")
+        joined = qed_df.join(topo_df, on="quartet_idx", how="left")
+        assert joined.shape[0] == qed_df.shape[0]
+        assert "A_vs_B" in joined.columns
+        assert "A_t0" in joined.columns
+
+    def test_to_frame_long_group_labels(self, two_group_forest):
+        """group_a and group_b columns contain the correct group names."""
+        pytest.importorskip("polars")
+        forest, counts = two_group_forest
+        df = forest.qed(counts).to_frame("long")
+        assert df["group_a"].to_list() == ["A"]
+        assert df["group_b"].to_list() == ["B"]
+
+    def test_to_frame_long_three_groups(self):
+        """Long form for 3 groups produces n_quartets * 3 rows (one per pair)."""
+        pytest.importorskip("polars")
+        groups = {
+            "A": ["((a:1,b:1):1,(c:1,d:1):1);"],
+            "B": ["((a:1,b:1):1,(c:1,d:1):1);"],
+            "C": ["((a:1,c:1):1,(b:1,d:1):1);"],
+        }
+        forest = Forest(groups)
+        q = Quartets.from_list(forest, [("a", "b", "c", "d")])
+        counts = forest.quartet_topology(q)
+        df = forest.qed(counts).to_frame("long")
+        assert df.shape[0] == 3  # 1 quartet * 3 pairs
+
+    def test_to_frame_wide_three_groups(self):
+        """Wide form for 3 groups has 3 QED columns."""
+        pytest.importorskip("polars")
+        groups = {
+            "A": ["((a:1,b:1):1,(c:1,d:1):1);"],
+            "B": ["((a:1,b:1):1,(c:1,d:1):1);"],
+            "C": ["((a:1,c:1):1,(b:1,d:1):1);"],
+        }
+        forest = Forest(groups)
+        q = Quartets.from_list(forest, [("a", "b", "c", "d")])
+        counts = forest.quartet_topology(q)
+        df = forest.qed(counts).to_frame("wide")
+        qed_cols = [c for c in df.columns if "_vs_" in c]
+        assert len(qed_cols) == 3
+
+    def test_to_frame_invalid_form(self, two_group_forest):
+        """Invalid form string raises ValueError."""
+        pytest.importorskip("polars")
+        forest, counts = two_group_forest
+        with pytest.raises(ValueError, match="form"):
+            forest.qed(counts).to_frame("diagonal")
+
+    def test_to_frame_raw_array_raises(self, two_group_forest):
+        """to_frame() raises RuntimeError when built from raw ndarray."""
+        pytest.importorskip("polars")
+        forest, counts = two_group_forest
+        result = forest.qed(counts.counts)  # raw ndarray — no metadata
+        with pytest.raises(RuntimeError, match="metadata"):
+            result.to_frame()
+
+
 class TestGroupOffsets:
     """Tests for group_offsets CSR array."""
 

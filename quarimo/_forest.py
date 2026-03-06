@@ -170,7 +170,7 @@ from quarimo._utils import jaccard_similarity, validate_quartet, format_newick
 from quarimo._context import suppress_logger, get_backend_override
 
 # Import result dataclasses
-from quarimo._results import BranchDistanceResult, QuartetTopologyResult
+from quarimo._results import BranchDistanceResult, QEDResult, QuartetTopologyResult
 
 # Backward compatibility alias for tests
 _jaccard = jaccard_similarity
@@ -1020,7 +1020,7 @@ class Forest:
         self,
         counts: Union[np.ndarray, QuartetTopologyResult],
         group_pairs: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
+    ) -> QEDResult:
         """
         Compute the Quartet Ensemble Discordance (QED) for all quartet × group-pair combinations.
 
@@ -1087,9 +1087,15 @@ class Forest:
         --------
         >>> q = Quartets.from_list(forest, [('A', 'B', 'C', 'D')])
         >>> counts = forest.quartet_topology(q)   # (1, n_groups, 3)
-        >>> scores = forest.qed(counts)           # (1, n_pairs)
+        >>> scores = forest.qed(counts)           # QEDResult, shape (1, n_pairs)
+        >>> df = scores.to_frame('wide')          # join on ['a','b','c','d']
         """
+        # Extract metadata before unwrapping
+        _quartets = None
+        _global_names = None
         if isinstance(counts, QuartetTopologyResult):
+            _quartets = counts.quartets
+            _global_names = counts.global_names
             counts = counts.counts
         counts = np.asarray(counts, dtype=np.int32)
         if counts.ndim != 3 or counts.shape[1] != self.n_groups or counts.shape[2] != 3:
@@ -1124,7 +1130,13 @@ class Forest:
         out = np.zeros((n_quartets, n_pairs), dtype=np.float64)
 
         if n_quartets == 0 or n_pairs == 0:
-            return out
+            return QEDResult(
+                scores=out,
+                groups=self.unique_groups,
+                group_pairs=group_pairs,
+                quartets=_quartets,
+                global_names=_global_names,
+            )
 
         if _cpu_import_ok:
             from quarimo._cpu_kernels import _qed_njit
@@ -1133,7 +1145,13 @@ class Forest:
         else:
             Forest._qed_kernel(counts, group_pairs, n_quartets, n_pairs, out)
 
-        return out
+        return QEDResult(
+            scores=out,
+            groups=self.unique_groups,
+            group_pairs=group_pairs,
+            quartets=_quartets,
+            global_names=_global_names,
+        )
 
     def _cuda_output_bytes_per_quartet(self, steiner: bool) -> int:
         """Bytes of GPU output array space required per quartet."""

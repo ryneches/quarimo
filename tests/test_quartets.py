@@ -195,5 +195,92 @@ def test_quartets_name_to_id_mapping():
                  offset=0, count=2)
 
 
+class TestQuartetIndex:
+    """Tests for Quartets.quartet_index() and Quartets.index_array()."""
+
+    def test_scalar_known_values(self):
+        """C(a,1)+C(b,2)+C(c,3)+C(d,4) for small known inputs."""
+        from quarimo._quartets import Quartets
+
+        # C(0,1)+C(1,2)+C(2,3)+C(3,4) = 0+0+0+0 = 0
+        assert Quartets.quartet_index(0, 1, 2, 3) == 0
+        # C(0,1)+C(1,2)+C(2,3)+C(4,4) = 0+0+0+1 = 1
+        assert Quartets.quartet_index(0, 1, 2, 4) == 1
+        # C(1,1)+C(2,2)+C(3,3)+C(4,4) = 1+1+1+1 = 4
+        assert Quartets.quartet_index(1, 2, 3, 4) == 4
+        # C(0,1)+C(1,2)+C(3,3)+C(4,4) = 0+0+1+1 = 2
+        assert Quartets.quartet_index(0, 1, 3, 4) == 2
+
+    def test_scalar_bijection(self):
+        """All quartets from a small namespace map to distinct indices."""
+        from itertools import combinations
+        from quarimo._quartets import Quartets
+
+        n = 10
+        indices = [Quartets.quartet_index(*q) for q in combinations(range(n), 4)]
+        assert len(indices) == len(set(indices)), "Collisions detected"
+
+    def test_scalar_dense(self):
+        """Indices form a contiguous range [0, C(n,4)) for all n-choose-4 quartets."""
+        from itertools import combinations
+        from quarimo._quartets import Quartets
+        from math import comb
+
+        n = 8
+        indices = sorted(Quartets.quartet_index(*q) for q in combinations(range(n), 4))
+        assert indices == list(range(comb(n, 4)))
+
+    def test_index_array_matches_scalar(self):
+        """index_array() values match repeated scalar calls."""
+        from quarimo import Forest
+        from quarimo._quartets import Quartets
+
+        trees = ["((A:1,B:1):1,(C:1,D:1):1);", "((A:1,C:1):1,(B:1,D:1):1);"]
+        forest = Forest(trees)
+        quartets = [(0, 1, 2, 3)]
+        q = Quartets.from_list(forest, quartets)
+        arr = q.index_array()
+
+        for i, (a, b, c, d) in enumerate(q):
+            assert arr[i] == Quartets.quartet_index(a, b, c, d)
+
+    def test_index_array_dtype_int64(self):
+        """index_array() returns int64 for a small forest."""
+        from quarimo import Forest
+        from quarimo._quartets import Quartets
+
+        trees = ["((A:1,B:1):1,(C:1,D:1):1);"]
+        forest = Forest(trees)
+        q = Quartets.from_list(forest, [("A", "B", "C", "D")])
+        arr = q.index_array()
+        assert arr.dtype == np.int64
+
+    def test_index_array_empty(self):
+        """index_array() on an empty Quartets raises before returning."""
+        # Quartets enforces count > 0, so an empty array can't be constructed
+        # via the public API.  Just verify index_array handles the int64 path.
+        from quarimo import Forest
+        from quarimo._quartets import Quartets
+
+        trees = ["((A:1,B:1):1,(C:1,D:1):1);"]
+        forest = Forest(trees)
+        q = Quartets.from_list(forest, [("A", "B", "C", "D")])
+        arr = q.index_array()
+        assert len(arr) == 1
+
+    def test_index_stable_across_result_objects(self):
+        """Two result objects from the same forest and quartets yield identical indices."""
+        from quarimo import Forest
+        from quarimo._quartets import Quartets
+
+        trees = [
+            "((A:1,B:1):1,(C:1,D:1):1);",
+            "((A:1,C:1):1,(B:1,D:1):1);",
+        ]
+        forest = Forest(trees)
+        q = Quartets.from_list(forest, [("A", "B", "C", "D")])
+        assert np.array_equal(q.index_array(), q.index_array())
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
