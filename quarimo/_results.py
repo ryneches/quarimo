@@ -89,13 +89,13 @@ class QuartetTopologyResult:
 
     steiner_min : np.ndarray or None, float64, shape (n_quartets, n_groups, 4)
         steiner_min[qi, gi, k] = minimum Steiner spanning length across all
-        trees in group gi that voted for topology k.  ``np.inf`` where
+        trees in group gi that voted for topology k.  ``np.nan`` where
         ``counts[qi, gi, k] == 0`` (no tree contributed).  None when
         ``steiner=False`` was passed to ``quartet_topology()``.
 
     steiner_max : np.ndarray or None, float64, shape (n_quartets, n_groups, 4)
         steiner_max[qi, gi, k] = maximum Steiner spanning length across all
-        trees in group gi that voted for topology k.  ``np.NINF`` where
+        trees in group gi that voted for topology k.  ``np.nan`` where
         ``counts[qi, gi, k] == 0`` (no tree contributed).  None when
         ``steiner=False`` was passed to ``quartet_topology()``.
 
@@ -119,6 +119,15 @@ class QuartetTopologyResult:
     groups: List[str]
     quartets: "Quartets"
     global_names: List[str]
+
+    def __post_init__(self) -> None:
+        # Replace kernel sentinels (+inf / -inf) with NaN in empty cells.
+        # Cells where counts == 0 never received a Steiner observation;
+        # NaN is numpy's canonical missing float and keeps nanmin/nanmax clean.
+        if self.steiner_min is not None:
+            empty = self.counts == 0
+            self.steiner_min[empty] = np.nan
+            self.steiner_max[empty] = np.nan  # type: ignore[index]
 
     # ------------------------------------------------------------------
     # Output
@@ -211,8 +220,12 @@ class QuartetTopologyResult:
             }
             if self.steiner is not None:
                 data["steiner_sum"] = self.steiner.ravel().tolist()
-                data["steiner_min"] = self.steiner_min.ravel().tolist()
-                data["steiner_max"] = self.steiner_max.ravel().tolist()
+                data["steiner_min"] = (
+                    pl.Series(self.steiner_min.ravel().tolist()).fill_nan(None)
+                )
+                data["steiner_max"] = (
+                    pl.Series(self.steiner_max.ravel().tolist()).fill_nan(None)
+                )
 
             if deduplicate:
                 return pl.DataFrame(data).unique()
@@ -232,8 +245,12 @@ class QuartetTopologyResult:
                     data[f"{group}_t{k}"] = self.counts[:, gi, k].tolist()
                     if self.steiner is not None:
                         data[f"{group}_steiner_t{k}"] = self.steiner[:, gi, k].tolist()
-                        data[f"{group}_steiner_min_t{k}"] = self.steiner_min[:, gi, k].tolist()
-                        data[f"{group}_steiner_max_t{k}"] = self.steiner_max[:, gi, k].tolist()
+                        data[f"{group}_steiner_min_t{k}"] = (
+                            pl.Series(self.steiner_min[:, gi, k].tolist()).fill_nan(None)
+                        )
+                        data[f"{group}_steiner_max_t{k}"] = (
+                            pl.Series(self.steiner_max[:, gi, k].tolist()).fill_nan(None)
+                        )
             if deduplicate:
                 return pl.DataFrame(data).unique()
             else:

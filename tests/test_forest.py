@@ -1259,16 +1259,16 @@ class TestQuartetTopology:
         assert result.steiner_min[0, 0, 1] == result.steiner_max[0, 0, 1]
 
     def test_steiner_min_max_sentinels_for_zero_count_topo(self, steiner_stats_forest):
-        """Topologies with no contributing trees keep their sentinel values: min=inf, max=-inf."""
+        """Topologies with no contributing trees have NaN (missing) for min and max."""
         result = steiner_stats_forest.quartet_topology(
             Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
             steiner=True,
         )
-        # topo 2 and topo 3 have zero contributing trees
+        # topo 2 and topo 3 have zero contributing trees — sentinels replaced with NaN
         for k in (2, 3):
             assert result.counts[0, 0, k] == 0
-            assert np.isinf(result.steiner_min[0, 0, k]) and result.steiner_min[0, 0, k] > 0
-            assert np.isinf(result.steiner_max[0, 0, k]) and result.steiner_max[0, 0, k] < 0
+            assert np.isnan(result.steiner_min[0, 0, k])
+            assert np.isnan(result.steiner_max[0, 0, k])
 
     def test_steiner_min_le_mean_le_max(self, steiner_stats_forest):
         """min ≤ mean ≤ max for all topologies with at least one contributing tree."""
@@ -1293,6 +1293,41 @@ class TestQuartetTopology:
         mean = np.where(mask, result.steiner / np.where(mask, result.counts, 1), 0.0)
         assert np.all(result.steiner_min[mask] <= mean[mask] + 1e-12)
         assert np.all(result.steiner_max[mask] >= mean[mask] - 1e-12)
+
+    def test_to_frame_long_steiner_min_max_nulls_for_empty_cells(self, steiner_stats_forest):
+        """to_frame('long') steiner_min/steiner_max are null (not NaN) for zero-count topologies."""
+        pytest.importorskip("polars")
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        df = result.to_frame("long", deduplicate=False)
+        # topo 2 and topo 3 rows have count=0 → steiner_min/max should be null, not NaN
+        empty_rows = df.filter(df["count"] == 0)
+        assert empty_rows["steiner_min"].is_null().all()
+        assert empty_rows["steiner_max"].is_null().all()
+        # topo 0 and topo 1 rows have data → should be non-null finite floats
+        filled_rows = df.filter(df["count"] > 0)
+        assert filled_rows["steiner_min"].is_null().sum() == 0
+        assert filled_rows["steiner_max"].is_null().sum() == 0
+
+    def test_to_frame_wide_steiner_min_max_nulls_for_empty_cells(self, steiner_stats_forest):
+        """to_frame('wide') steiner_min/max columns are null for zero-count topologies."""
+        pytest.importorskip("polars")
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        df = result.to_frame("wide", deduplicate=False)
+        group = steiner_stats_forest.unique_groups[0]
+        # topo 2 and 3 have no contributing trees → null in wide form
+        for k in (2, 3):
+            assert df[f"{group}_steiner_min_t{k}"][0] is None
+            assert df[f"{group}_steiner_max_t{k}"][0] is None
+        # topo 0 and 1 have data → non-null
+        for k in (0, 1):
+            assert df[f"{group}_steiner_min_t{k}"][0] is not None
+            assert df[f"{group}_steiner_max_t{k}"][0] is not None
 
     def test_steiner_values_match_phylotree_balanced_equal(self):
         nwk = "((A:1,B:1):1,(C:1,D:1):1);"
