@@ -243,14 +243,14 @@ def log_zero_length_branch_warning(
         Total count of user-provided zero-length branches across all trees.
     """
     logger.warning(
-        "%d of %d trees contain %d user-provided zero-length branch(es). "
-        "These will be treated as real branches (contributing 0 to root distances). "
-        "If a zero-length branch is intended to represent a polytomy, collapse it "
-        "into an explicit multifurcation in the NEWICK string instead.",
+        "%d of %d trees contain %d user-provided zero-length branch(es).",
         n_trees_with_zero,
         n_trees,
         total_zero_branches,
     )
+    logger.warning("   These will be treated as real branches in topology counts")
+    logger.warning("   that contribute 0 to distances. For actual multifrucations,")
+    logger.warning("   collapse them into into explicit polytomies.")
 
 
 def log_group_statistics(

@@ -100,8 +100,8 @@ class QuartetTopologyResult:
         the sorted global IDs stored in each quartet.
     """
 
-    counts: np.ndarray              # int32, (n_quartets, n_groups, 3)
-    steiner: Optional[np.ndarray]   # float64, (n_quartets, n_groups, 3) or None
+    counts: np.ndarray  # int32, (n_quartets, n_groups, 3)
+    steiner: Optional[np.ndarray]  # float64, (n_quartets, n_groups, 3) or None
     groups: List[str]
     quartets: "Quartets"
     global_names: List[str]
@@ -110,7 +110,7 @@ class QuartetTopologyResult:
     # Output
     # ------------------------------------------------------------------
 
-    def to_frame(self, form: str = "long") -> "pl.DataFrame":
+    def to_frame(self, form: str = "long", deduplicate: bool = True) -> "pl.DataFrame":
         """
         Convert to a Polars DataFrame.
 
@@ -135,6 +135,9 @@ class QuartetTopologyResult:
                 ``{group}_steiner_t{k}``.
                 Total rows: n_quartets.
 
+        deduplicate : { True, False }, default True
+            Remove duplicated rows before returning.
+
         Join key
         --------
         ``quartet_idx`` is a combinadic integer that uniquely and stably
@@ -143,7 +146,12 @@ class QuartetTopologyResult:
         join key when combining this DataFrame with a :class:`QEDResult`
         DataFrame — both forms produce a 1-to-1 join on ``quartet_idx``
         for wide output; for long output each QED row matches n_groups × 3
-        topology rows (filter by ``group`` after joining).
+        topology rows (filter by ``group`` after joining). Note that if
+        the same quartet is queried more than once (an important
+        consideration when sampling), duplicated indicies will cause the
+        join to fail. By default, .to_frame() calls .unique() before
+        returning, which may cause the row indecies not to match the
+        query. If this behavior is not wanted, use dedupliacte=False.
 
         Topology encoding
         -----------------
@@ -188,13 +196,15 @@ class QuartetTopologyResult:
             }
             if self.steiner is not None:
                 data["steiner_sum"] = self.steiner.ravel().tolist()
-            return pl.DataFrame(data)
+
+            if deduplicate:
+                return pl.DataFrame(data).unique()
+            else:
+                return pl.DataFrame(data)
 
         elif form == "wide":
             data = {
-                "quartet_idx": pl.Series(
-                    "quartet_idx", idx.tolist(), dtype=idx_dtype
-                ),
+                "quartet_idx": pl.Series("quartet_idx", idx.tolist(), dtype=idx_dtype),
                 "a": gnames[ids[:, 0]].tolist(),
                 "b": gnames[ids[:, 1]].tolist(),
                 "c": gnames[ids[:, 2]].tolist(),
@@ -205,7 +215,10 @@ class QuartetTopologyResult:
                     data[f"{group}_t{k}"] = self.counts[:, gi, k].tolist()
                     if self.steiner is not None:
                         data[f"{group}_steiner_t{k}"] = self.steiner[:, gi, k].tolist()
-            return pl.DataFrame(data)
+            if deduplicate:
+                return pl.DataFrame(data).unique()
+            else:
+                return pl.DataFrame(data)
 
         else:
             raise ValueError(f"form must be 'long' or 'wide', got {form!r}")
@@ -241,9 +254,9 @@ class QEDResult:
         ``None`` when ``qed()`` was called with a raw ndarray.
     """
 
-    scores: np.ndarray              # float64, (n_quartets, n_pairs)
+    scores: np.ndarray  # float64, (n_quartets, n_pairs)
     groups: List[str]
-    group_pairs: np.ndarray         # int32, (n_pairs, 2)
+    group_pairs: np.ndarray  # int32, (n_pairs, 2)
     quartets: Optional["Quartets"]
     global_names: Optional[List[str]]
 
@@ -281,7 +294,7 @@ class QEDResult:
     # Output
     # ------------------------------------------------------------------
 
-    def to_frame(self, form: str = "long") -> "pl.DataFrame":
+    def to_frame(self, form: str = "long", dedupliacte: bool = True) -> "pl.DataFrame":
         """
         Convert to a Polars DataFrame.
 
@@ -307,6 +320,9 @@ class QEDResult:
 
                 Join with ``QuartetTopologyResult.to_frame('wide')`` on
                 ``'quartet_idx'`` (1-to-1).
+
+        deduplicate : { True, False }, default True
+            Remove duplicated rows before returning.
 
         Returns
         -------
@@ -358,13 +374,14 @@ class QEDResult:
                 "group_b": [pair_gb[p] for p in pi.tolist()],
                 "qed": self.scores.ravel().tolist(),
             }
-            return pl.DataFrame(data)
+            if deduplicate:
+                return pl.DataFrame(data).unique()
+            else:
+                return pl.DataFrame(data)
 
         elif form == "wide":
             data = {
-                "quartet_idx": pl.Series(
-                    "quartet_idx", idx.tolist(), dtype=idx_dtype
-                ),
+                "quartet_idx": pl.Series("quartet_idx", idx.tolist(), dtype=idx_dtype),
                 "a": gnames[ids[:, 0]].tolist(),
                 "b": gnames[ids[:, 1]].tolist(),
                 "c": gnames[ids[:, 2]].tolist(),
@@ -373,7 +390,10 @@ class QEDResult:
             for pi in range(n_pairs):
                 col = f"{pair_ga[pi]}_vs_{pair_gb[pi]}"
                 data[col] = self.scores[:, pi].tolist()
-            return pl.DataFrame(data)
+            if dedupliacte:
+                return pl.DataFrame(data).unique()
+            else:
+                return pl.DataFrame(data)
 
         else:
             raise ValueError(f"form must be 'long' or 'wide', got {form!r}")
