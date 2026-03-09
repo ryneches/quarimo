@@ -173,6 +173,9 @@ from quarimo._context import suppress_logger, get_backend_override
 # Import result dataclasses
 from quarimo._results import BranchDistanceResult, QEDResult, QuartetTopologyResult
 
+# Import kernel data packaging
+from quarimo._kernel_data import ForestKernelData, QuartetKernelArgs
+
 # Backward compatibility alias for tests
 _jaccard = jaccard_similarity
 
@@ -528,8 +531,11 @@ class Forest:
             total_zero = sum(t.n_zero_length_branches for t in self._trees)
             log_zero_length_branch_warning(n_zero_trees, self.n_trees, total_zero)
 
+        # Package all forest arrays into a single kernel-dispatch object
+        self._build_kernel_data()
+
         # Upload tree structure to GPU once (if available)
-        self._d_tree = None
+        self._cuda_kernel_data: Optional[ForestKernelData] = None
         if _CUDA_AVAILABLE:
             self._upload_to_gpu()
 
@@ -557,36 +563,41 @@ class Forest:
             [group_to_idx[g] for g in self.group_labels], dtype=np.int32
         )
 
+    def _build_kernel_data(self) -> None:
+        """Package all forest arrays into a ``ForestKernelData`` for kernel dispatch."""
+        self._kernel_data = ForestKernelData(
+            global_to_local=self.global_to_local,
+            all_first_occ=self.all_first_occ,
+            all_root_distance=self.all_root_distance,
+            all_euler_tour=self.all_euler_tour,
+            all_euler_depth=self.all_euler_depth,
+            all_sparse_table=self.all_sparse_table,
+            all_log2_table=self.all_log2_table,
+            node_offsets=self.node_offsets,
+            tour_offsets=self.tour_offsets,
+            sp_offsets=self.sp_offsets,
+            lg_offsets=self.lg_offsets,
+            sp_tour_widths=self.sp_tour_widths,
+            tree_to_group_idx=self.tree_to_group_idx,
+            polytomy_offsets=self.polytomy_offsets,
+            polytomy_nodes=self.polytomy_nodes,
+            n_trees=self.n_trees,
+            n_global_taxa=self.n_global_taxa,
+            n_groups=self.n_groups,
+        )
+
     def _upload_to_gpu(self) -> None:
         """Upload all CSR tree-structure arrays to the GPU once at construction time."""
-        tree_arrays = {
-            "global_to_local": self.global_to_local,
-            "all_first_occ": self.all_first_occ,
-            "all_root_distance": self.all_root_distance,
-            "all_euler_tour": self.all_euler_tour,
-            "all_euler_depth": self.all_euler_depth,
-            "all_sparse_table": self.all_sparse_table,
-            "all_log2_table": self.all_log2_table,
-            "node_offsets": self.node_offsets,
-            "tour_offsets": self.tour_offsets,
-            "sp_offsets": self.sp_offsets,
-            "lg_offsets": self.lg_offsets,
-            "sp_tour_widths": self.sp_tour_widths,
-            "tree_to_group_idx": self.tree_to_group_idx,
-            "polytomy_offsets": self.polytomy_offsets,
-            "polytomy_nodes": self.polytomy_nodes,
-        }
-        total_bytes = sum(a.nbytes for a in tree_arrays.values())
         logger.info(
             "Uploading %d tree arrays (%.2f MB) to GPU...",
-            len(tree_arrays),
-            total_bytes / (1024**2),
+            len(self._kernel_data.device_arrays()),
+            self._kernel_data.upload_bytes / (1024**2),
         )
-        self._d_tree = {name: cuda.to_device(arr) for name, arr in tree_arrays.items()}
+        self._cuda_kernel_data = self._kernel_data.to_device()
 
     def __del__(self) -> None:
         """Free GPU device arrays when the Forest is garbage-collected."""
-        if getattr(self, "_d_tree", None) is None:
+        if getattr(self, "_cuda_kernel_data", None) is None:
             return
         try:
             # Only attempt cleanup when a CUDA context is still live.
@@ -594,11 +605,11 @@ class Forest:
             from numba import cuda as _cuda
 
             if _cuda.is_available():
-                for arr in self._d_tree.values():
+                for arr in self._cuda_kernel_data.device_arrays():
                     del arr
         except Exception:
             pass
-        self._d_tree = None
+        self._cuda_kernel_data = None
 
     def _log_group_statistics_method(self) -> None:
         """Log group membership statistics."""
@@ -646,18 +657,19 @@ class Forest:
 
         distances_out = np.full(self.n_trees, np.nan, dtype=np.float64)
 
-        g2l = self.global_to_local
-        fo = self.all_first_occ
-        rd = self.all_root_distance
-        et = self.all_euler_tour
-        ed = self.all_euler_depth
-        sp = self.all_sparse_table
-        lg = self.all_log2_table
-        no = self.node_offsets
-        to_ = self.tour_offsets
-        so = self.sp_offsets
-        lo_ = self.lg_offsets
-        stw = self.sp_tour_widths
+        kd = self._kernel_data
+        g2l = kd.global_to_local
+        fo = kd.all_first_occ
+        rd = kd.all_root_distance
+        et = kd.all_euler_tour
+        ed = kd.all_euler_depth
+        sp = kd.all_sparse_table
+        lg = kd.all_log2_table
+        no = kd.node_offsets
+        to_ = kd.tour_offsets
+        so = kd.sp_offsets
+        lo_ = kd.lg_offsets
+        stw = kd.sp_tour_widths
 
         for ti in range(self.n_trees):
             la = int(g2l[ti, ga])
@@ -928,27 +940,7 @@ class Forest:
             # CPU/Python backends: materialise quartets to array
             # Quartets iterator yields (a, b, c, d) as global IDs, already sorted
             sorted_ids = np.array(list(quartets), dtype=np.int32)
-
-            common_args = (
-                sorted_ids,
-                self.global_to_local,
-                self.all_first_occ,
-                self.all_root_distance,
-                self.all_euler_tour,
-                self.all_euler_depth,
-                self.all_sparse_table,
-                self.all_log2_table,
-                self.node_offsets,
-                self.tour_offsets,
-                self.sp_offsets,
-                self.lg_offsets,
-                self.sp_tour_widths,
-                n_quartets,
-                self.n_trees,
-                self.tree_to_group_idx,
-                self.polytomy_offsets,
-                self.polytomy_nodes,
-            )
+            common_args = self._kernel_data.cpu_common_args(sorted_ids, n_quartets)
 
             counts_out = np.zeros((n_quartets, self.n_groups, 4), dtype=np.int32)
 
@@ -1207,21 +1199,8 @@ class Forest:
         )
 
         # ── Pre-uploaded tree arrays ───────────────────────────────────────
-        dt = self._d_tree
-        d_gtl = dt["global_to_local"]
-        d_fo = dt["all_first_occ"]
-        d_rd = dt["all_root_distance"]
-        d_et = dt["all_euler_tour"]
-        d_ed = dt["all_euler_depth"]
-        d_sp = dt["all_sparse_table"]
-        d_lg = dt["all_log2_table"]
-        d_no = dt["node_offsets"]
-        d_to = dt["tour_offsets"]
-        d_so = dt["sp_offsets"]
-        d_lo = dt["lg_offsets"]
-        d_stw = dt["sp_tour_widths"]
-        d_poly_off = dt["polytomy_offsets"]
-        d_poly_nodes = dt["polytomy_nodes"]
+        d_fkd = self._cuda_kernel_data
+        d_forest_args = d_fkd.cuda_forest_args()
 
         # ── Batch size: how many quartets' output fits in free VRAM ───────
         batch_size = self._cuda_batch_size(steiner)
@@ -1243,8 +1222,7 @@ class Forest:
             steiner_out = np.zeros((n_quartets, self.n_groups, 4), dtype=np.float64)
 
         # ── Batched kernel dispatch ────────────────────────────────────────
-        n_seed = len(quartets.seed)
-        rng_seed = quartets.rng_seed
+        q_args = QuartetKernelArgs.from_quartets(quartets)
 
         for batch_idx in range(n_batches):
             bs = batch_idx * batch_size
@@ -1269,17 +1247,17 @@ class Forest:
             # every thread — identical to the deterministic case.
             # Without this step, every (qi, ti) thread would independently run
             # XorShift128 for the same qi, causing n_trees-fold RNG duplication.
-            batch_needs_rng = batch_offset + bc > n_seed
+            batch_needs_rng = batch_offset + bc > q_args.n_seed
             if batch_needs_rng:
                 d_quartet_batch = cuda.device_array((bc, 4), dtype=np.int32)
                 gen_blocks = (bc + 255) // 256
                 generate_quartets_cuda[gen_blocks, 256](
                     d_seed_quartets,
-                    n_seed,
+                    q_args.n_seed,
                     batch_offset,
                     bc,
-                    rng_seed,
-                    self.n_global_taxa,
+                    q_args.rng_seed,
+                    d_fkd.n_global_taxa,
                     d_quartet_batch,
                 )
                 proc_seed = d_quartet_batch
@@ -1287,8 +1265,10 @@ class Forest:
                 proc_offset = 0
             else:
                 proc_seed = d_seed_quartets
-                proc_n_seed = n_seed
+                proc_n_seed = q_args.n_seed
                 proc_offset = batch_offset
+
+            batch_args = q_args.cuda_batch_args(proc_seed, proc_offset, bc)
 
             # Zero-initialised counts and steiner (atomic.add requires it)
             d_counts_b = cuda.to_device(
@@ -1304,29 +1284,8 @@ class Forest:
                 logger.info("  🖥  launching Steiner kernel...")
                 time0 = time()
                 quartet_steiner_cuda_unified[blocks, tpb](
-                    proc_seed,
-                    proc_n_seed,
-                    proc_offset,
-                    bc,
-                    rng_seed,
-                    self.n_global_taxa,
-                    d_gtl,
-                    d_fo,
-                    d_rd,
-                    d_et,
-                    d_ed,
-                    d_sp,
-                    d_lg,
-                    d_no,
-                    d_to,
-                    d_so,
-                    d_lo,
-                    d_stw,
-                    dt["tree_to_group_idx"],
-                    d_poly_off,
-                    d_poly_nodes,
-                    d_counts_b,
-                    d_steiner_b,
+                    *batch_args, d_fkd.n_global_taxa, *d_forest_args,
+                    d_counts_b, d_steiner_b,
                 )
                 cuda.synchronize()
                 time1 = time()
@@ -1334,36 +1293,16 @@ class Forest:
                     "  💾 computation completed in %.3f seconds, moving data...",
                     time1 - time0,
                 )
-                # copy_to_host(ary=...) writes directly into the pre-allocateded output
+                # copy_to_host(ary=...) writes directly into the pre-allocated output
                 # slice — one GPU→CPU transfer, no temporary array, no extra CPU memcpy.
                 d_counts_b.copy_to_host(ary=counts_out[bs : bs + bc])
                 d_steiner_b.copy_to_host(ary=steiner_out[bs : bs + bc])
                 del d_steiner_b
             else:
-                logger.info("  🖥  launching Steiner kernel...")
+                logger.info("  🖥  launching counts kernel...")
                 time0 = time()
                 quartet_counts_cuda_unified[blocks, tpb](
-                    proc_seed,
-                    proc_n_seed,
-                    proc_offset,
-                    bc,
-                    rng_seed,
-                    self.n_global_taxa,
-                    d_gtl,
-                    d_fo,
-                    d_rd,
-                    d_et,
-                    d_ed,
-                    d_sp,
-                    d_lg,
-                    d_no,
-                    d_to,
-                    d_so,
-                    d_lo,
-                    d_stw,
-                    dt["tree_to_group_idx"],
-                    d_poly_off,
-                    d_poly_nodes,
+                    *batch_args, d_fkd.n_global_taxa, *d_forest_args,
                     d_counts_b,
                 )
                 cuda.synchronize()
