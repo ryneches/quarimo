@@ -1294,6 +1294,59 @@ class TestQuartetTopology:
         assert np.all(result.steiner_min[mask] <= mean[mask] + 1e-12)
         assert np.all(result.steiner_max[mask] >= mean[mask] - 1e-12)
 
+    def test_steiner_var_present_when_steiner_true(self, steiner_stats_forest):
+        """steiner_var is not None when steiner=True."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        assert result.steiner_var is not None
+        assert result.steiner_var.shape == (1, 1, 4)
+        assert result.steiner_var.dtype == np.float64
+
+    def test_steiner_var_none_when_steiner_false(self, steiner_stats_forest):
+        """steiner_var is None when steiner=False."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=False,
+        )
+        assert result.steiner_var is None
+
+    def test_steiner_var_topo0_two_trees(self, steiner_stats_forest):
+        """Topo 0 has two trees (S=6, S=12): population variance = ((6-9)^2 + (12-9)^2) / 2 = 9."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        # mean = 9, deviations = (-3, +3), var = (9 + 9) / 2 = 9
+        np.testing.assert_allclose(result.steiner_var[0, 0, 0], 9.0, rtol=1e-10)
+
+    def test_steiner_var_zero_for_single_tree_topo(self, steiner_stats_forest):
+        """Topo 1 has one tree (S=6): population variance is 0."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        np.testing.assert_allclose(result.steiner_var[0, 0, 1], 0.0, atol=1e-14)
+
+    def test_steiner_var_nan_for_zero_count_topo(self, steiner_stats_forest):
+        """Topologies with no contributing trees have NaN variance."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        for k in (2, 3):
+            assert result.counts[0, 0, k] == 0
+            assert np.isnan(result.steiner_var[0, 0, k])
+
+    def test_steiner_var_nonnegative(self, mixed_collection):
+        """Population variance is always >= 0 for all cells with count > 0."""
+        result = mixed_collection.quartet_topology(
+            Quartets.from_list(mixed_collection, self.BULK_QUARTETS), steiner=True
+        )
+        mask = result.counts > 0
+        assert np.all(result.steiner_var[mask] >= -1e-12)  # allow tiny float noise
+
     def test_to_frame_long_steiner_min_max_nulls_for_empty_cells(self, steiner_stats_forest):
         """to_frame('long') steiner_min/steiner_max are null (not NaN) for zero-count topologies."""
         pytest.importorskip("polars")
@@ -1328,6 +1381,30 @@ class TestQuartetTopology:
         for k in (0, 1):
             assert df[f"{group}_steiner_min_t{k}"][0] is not None
             assert df[f"{group}_steiner_max_t{k}"][0] is not None
+
+    def test_to_frame_long_steiner_var_nulls_for_empty_cells(self, steiner_stats_forest):
+        """to_frame('long') steiner_var is null for zero-count topologies, non-null for others."""
+        pytest.importorskip("polars")
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        df = result.to_frame("long", deduplicate=False)
+        assert df["steiner_var"].is_null().sum() == 2  # topo 2 and 3
+        assert df.filter(df["count"] > 0)["steiner_var"].is_null().sum() == 0
+
+    def test_to_frame_wide_steiner_var_column_present(self, steiner_stats_forest):
+        """to_frame('wide') includes steiner_var columns and correct nulls."""
+        pytest.importorskip("polars")
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        df = result.to_frame("wide", deduplicate=False)
+        group = steiner_stats_forest.unique_groups[0]
+        assert f"{group}_steiner_var_t0" in df.columns
+        assert df[f"{group}_steiner_var_t0"][0] is not None  # topo 0 has 2 trees
+        assert df[f"{group}_steiner_var_t2"][0] is None      # topo 2 has 0 trees
 
     def test_steiner_values_match_phylotree_balanced_equal(self):
         nwk = "((A:1,B:1):1,(C:1,D:1):1);"

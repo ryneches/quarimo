@@ -700,16 +700,16 @@ if _CUDA_AVAILABLE:
         counts,             # [count, n_groups, 4] int32
         steiner_out,        # [count, n_groups, 4] float64 — summed Steiner
         steiner_min_out,    # [count, n_groups, 4] float64 — min Steiner (init +inf)
-        steiner_max_out     # [count, n_groups, 4] float64 — max Steiner (init -inf)
+        steiner_max_out,    # [count, n_groups, 4] float64 — max Steiner (init -inf)
+        steiner_sum_sq_out  # [count, n_groups, 4] float64 — sum of squared Steiner (init 0)
     ):
         """
         Unified kernel with Steiner distances.
 
         Same as ``quartet_counts_cuda_unified`` plus Steiner spanning-length
-        accumulation per group.  ``counts``, ``steiner_out``, ``steiner_min_out``,
-        and ``steiner_max_out`` are all updated atomically; the host must
-        pre-initialise them (counts/steiner_out to 0, steiner_min_out to +inf,
-        steiner_max_out to -inf).
+        accumulation per group.  All outputs are updated atomically; the host
+        must pre-initialise them (counts/steiner_out/steiner_sum_sq_out to 0,
+        steiner_min_out to +inf, steiner_max_out to -inf).
         """
         qi, ti = cuda.grid(2)
         n_trees = node_offsets.shape[0] - 1
@@ -753,6 +753,7 @@ if _CUDA_AVAILABLE:
             cuda.atomic.add(steiner_out, (qi, gi, topo), sl)
             cuda.atomic.min(steiner_min_out, (qi, gi, topo), sl)
             cuda.atomic.max(steiner_max_out, (qi, gi, topo), sl)
+            cuda.atomic.add(steiner_sum_sq_out, (qi, gi, topo), sl * sl)
             return
 
         topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
@@ -761,14 +762,15 @@ if _CUDA_AVAILABLE:
             all_log2_table, all_euler_tour,
         )
 
-        # Store results — all four outputs need atomics (multiple ti threads
-        # share the same group row). outputs are pre-initialised by the host.
+        # Store results — all outputs need atomics (multiple ti threads
+        # share the same group row). Outputs are pre-initialised by the host.
         gi = tree_to_group_idx[ti]
         sl = _steiner_length_cuda(ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance)
         cuda.atomic.add(counts, (qi, gi, topo), 1)
         cuda.atomic.add(steiner_out, (qi, gi, topo), sl)
         cuda.atomic.min(steiner_min_out, (qi, gi, topo), sl)
         cuda.atomic.max(steiner_max_out, (qi, gi, topo), sl)
+        cuda.atomic.add(steiner_sum_sq_out, (qi, gi, topo), sl * sl)
 
 
 def _compute_cuda_grid(n_quartets, n_trees, threads_per_block=(16, 16)):

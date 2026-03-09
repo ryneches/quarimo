@@ -907,6 +907,7 @@ class Forest:
                 steiner=np.zeros(empty, dtype=np.float64) if steiner else None,
                 steiner_min=np.full(empty, np.inf, dtype=np.float64) if steiner else None,
                 steiner_max=np.full(empty, -np.inf, dtype=np.float64) if steiner else None,
+                steiner_var=np.zeros(empty, dtype=np.float64) if steiner else None,
                 groups=self.unique_groups,
                 quartets=quartets,
                 global_names=self.global_names,
@@ -933,9 +934,10 @@ class Forest:
         steiner_out = None
         steiner_min_out = None
         steiner_max_out = None
+        steiner_sum_sq_out = None
 
         if resolved_backend == "cuda":
-            counts_out, steiner_out, steiner_min_out, steiner_max_out = (
+            counts_out, steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out = (
                 self._quartet_topology_cuda_unified(quartets, steiner)
             )
 
@@ -952,6 +954,7 @@ class Forest:
                 steiner_out = np.zeros(shape, dtype=np.float64)
                 steiner_min_out = np.full(shape, np.inf, dtype=np.float64)
                 steiner_max_out = np.full(shape, -np.inf, dtype=np.float64)
+                steiner_sum_sq_out = np.zeros(shape, dtype=np.float64)
 
             if resolved_backend == "cpu-parallel":
                 kernel_key = f"cpu-parallel-{'steiner' if steiner else 'counts'}"
@@ -964,7 +967,7 @@ class Forest:
                 if steiner:
                     _quartet_steiner_njit(
                         *common_args, counts_out,
-                        steiner_out, steiner_min_out, steiner_max_out,
+                        steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
                     )
                 else:
                     _quartet_counts_njit(*common_args, counts_out)
@@ -974,12 +977,14 @@ class Forest:
                     steiner_arg = steiner_out
                     smin_arg = steiner_min_out
                     smax_arg = steiner_max_out
+                    ssq_arg = steiner_sum_sq_out
                 else:
                     steiner_arg = np.empty(0, dtype=np.float64)  # counts-only sentinel
                     smin_arg = np.empty(0, dtype=np.float64)
                     smax_arg = np.empty(0, dtype=np.float64)
+                    ssq_arg = np.empty(0, dtype=np.float64)
                 Forest._quartet_kernel(
-                    *common_args, counts_out, steiner_arg, smin_arg, smax_arg,
+                    *common_args, counts_out, steiner_arg, smin_arg, smax_arg, ssq_arg,
                 )
 
             else:
@@ -989,11 +994,24 @@ class Forest:
                 )
 
         # ── Suture: assemble result ────────────────────────────────────────────
+        # Compute variance from accumulated sum-of-squares.
+        # var = sum_sq/n - (sum/n)^2; NaN for cells where count == 0.
+        steiner_var_out = None
+        if steiner_sum_sq_out is not None:
+            mask = counts_out > 0
+            denom = np.where(mask, counts_out, 1).astype(np.float64)
+            steiner_var_out = np.where(
+                mask,
+                steiner_sum_sq_out / denom - (steiner_out / denom) ** 2,
+                np.nan,
+            )
+
         return QuartetTopologyResult(
             counts=counts_out,
             steiner=steiner_out,
             steiner_min=steiner_min_out,
             steiner_max=steiner_max_out,
+            steiner_var=steiner_var_out,
             groups=self.unique_groups,
             quartets=quartets,
             global_names=self.global_names,
@@ -1141,8 +1159,8 @@ class Forest:
         # counts: n_groups × 4 × int32 per quartet
         bpq = self.n_groups * 4 * 4
         if steiner:
-            # steiner_out + steiner_min_out + steiner_max_out: 3 × n_groups × 4 × float64
-            bpq += 3 * self.n_groups * 4 * 8
+            # steiner_out + steiner_min_out + steiner_max_out + steiner_sum_sq_out
+            bpq += 4 * self.n_groups * 4 * 8
         return bpq
 
     def _cuda_batch_size(self, steiner: bool) -> int:
@@ -1237,10 +1255,12 @@ class Forest:
         steiner_out: Optional[np.ndarray] = None
         steiner_min_out: Optional[np.ndarray] = None
         steiner_max_out: Optional[np.ndarray] = None
+        steiner_sum_sq_out: Optional[np.ndarray] = None
         if steiner:
             steiner_out = np.zeros(shape, dtype=np.float64)
             steiner_min_out = np.full(shape, np.inf, dtype=np.float64)
             steiner_max_out = np.full(shape, -np.inf, dtype=np.float64)
+            steiner_sum_sq_out = np.zeros(shape, dtype=np.float64)
 
         # ── Batched kernel dispatch ────────────────────────────────────────
         q_args = QuartetKernelArgs.from_quartets(quartets)
@@ -1308,11 +1328,15 @@ class Forest:
                 d_steiner_max_b = cuda.to_device(
                     np.full((bc, self.n_groups, 4), -np.inf, dtype=np.float64)
                 )
+                d_steiner_sum_sq_b = cuda.to_device(
+                    np.zeros((bc, self.n_groups, 4), dtype=np.float64)
+                )
                 logger.info("  🖥  launching Steiner kernel...")
                 time0 = time()
                 quartet_steiner_cuda_unified[blocks, tpb](
                     *batch_args, d_fkd.n_global_taxa, *d_forest_args,
                     d_counts_b, d_steiner_b, d_steiner_min_b, d_steiner_max_b,
+                    d_steiner_sum_sq_b,
                 )
                 cuda.synchronize()
                 time1 = time()
@@ -1326,7 +1350,8 @@ class Forest:
                 d_steiner_b.copy_to_host(ary=steiner_out[bs : bs + bc])
                 d_steiner_min_b.copy_to_host(ary=steiner_min_out[bs : bs + bc])
                 d_steiner_max_b.copy_to_host(ary=steiner_max_out[bs : bs + bc])
-                del d_steiner_b, d_steiner_min_b, d_steiner_max_b
+                d_steiner_sum_sq_b.copy_to_host(ary=steiner_sum_sq_out[bs : bs + bc])
+                del d_steiner_b, d_steiner_min_b, d_steiner_max_b, d_steiner_sum_sq_b
             else:
                 logger.info("  🖥  launching counts kernel...")
                 time0 = time()
@@ -1348,10 +1373,13 @@ class Forest:
 
         total_bytes = counts_out.nbytes
         if steiner_out is not None:
-            total_bytes += steiner_out.nbytes + steiner_min_out.nbytes + steiner_max_out.nbytes
+            total_bytes += (
+                steiner_out.nbytes + steiner_min_out.nbytes
+                + steiner_max_out.nbytes + steiner_sum_sq_out.nbytes
+            )
         logger.info("  D→H total: %.2f MB", total_bytes / (1024**2))
 
-        return counts_out, steiner_out, steiner_min_out, steiner_max_out
+        return counts_out, steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out
 
     # ================================================================== #
     # Private instance methods                                             #
@@ -1588,6 +1616,7 @@ class Forest:
         steiner_out: np.ndarray,
         steiner_min_out: np.ndarray,
         steiner_max_out: np.ndarray,
+        steiner_sum_sq_out: np.ndarray,
     ) -> None:
         """
         **Private static.**  Unified bulk quartet kernel.
@@ -1618,6 +1647,10 @@ class Forest:
             steiner_out.size > 0.
         steiner_max_out : float64 (n_quartets, n_groups, 4), pre-filled -inf
             Per-cell maximum Steiner length.  Meaningful only when
+            steiner_out.size > 0.
+        steiner_sum_sq_out : float64 (n_quartets, n_groups, 4), pre-filled 0
+            Per-cell sum of squared Steiner lengths.  Used post-kernel to
+            compute variance = sum_sq/n - (sum/n)^2.  Meaningful only when
             steiner_out.size > 0.
 
         Steiner bypass
@@ -1689,6 +1722,7 @@ class Forest:
                         steiner_min_out[qi, gi, topo] = sl
                     if sl > steiner_max_out[qi, gi, topo]:
                         steiner_max_out[qi, gi, topo] = sl
+                    steiner_sum_sq_out[qi, gi, topo] += sl * sl
 
     @staticmethod
     def _qed_kernel(

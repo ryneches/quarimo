@@ -99,6 +99,13 @@ class QuartetTopologyResult:
         ``counts[qi, gi, k] == 0`` (no tree contributed).  None when
         ``steiner=False`` was passed to ``quartet_topology()``.
 
+    steiner_var : np.ndarray or None, float64, shape (n_quartets, n_groups, 4)
+        steiner_var[qi, gi, k] = population variance of Steiner spanning length
+        across all trees in group gi that voted for topology k.
+        Computed as ``sum_sq/n - (sum/n)^2``.  ``np.nan`` where
+        ``counts[qi, gi, k] == 0``.  None when ``steiner=False`` was passed to
+        ``quartet_topology()``.  For n=1 trees the variance is exactly 0.
+
     groups : list of str
         Group axis labels, sorted alphabetically.  Axis 1 of ``counts`` and
         ``steiner`` corresponds to this list.
@@ -116,6 +123,7 @@ class QuartetTopologyResult:
     steiner: Optional[np.ndarray]   # float64, (n_quartets, n_groups, 4) or None
     steiner_min: Optional[np.ndarray]  # float64, (n_quartets, n_groups, 4) or None
     steiner_max: Optional[np.ndarray]  # float64, (n_quartets, n_groups, 4) or None
+    steiner_var: Optional[np.ndarray]  # float64, (n_quartets, n_groups, 4) or None
     groups: List[str]
     quartets: "Quartets"
     global_names: List[str]
@@ -147,7 +155,7 @@ class QuartetTopologyResult:
                 ``quartet_idx``, ``a``, ``b``, ``c``, ``d`` (taxon names,
                 sorted by global ID), ``group``, ``topology`` (int 0–3),
                 ``count``, and optionally ``steiner_sum``, ``steiner_min``,
-                ``steiner_max``.
+                ``steiner_max``, ``steiner_var``.
                 topology=3 means unresolved (polytomy).
                 Total rows: n_quartets × n_groups × 4.
 
@@ -156,7 +164,8 @@ class QuartetTopologyResult:
                 are followed by one count column per (group, topology)
                 combination named ``{group}_t{k}`` (k=0–3), and optionally
                 Steiner columns ``{group}_steiner_t{k}``,
-                ``{group}_steiner_min_t{k}``, ``{group}_steiner_max_t{k}``.
+                ``{group}_steiner_min_t{k}``, ``{group}_steiner_max_t{k}``,
+                ``{group}_steiner_var_t{k}``.
                 Total rows: n_quartets.
 
         deduplicate : { True, False }, default True
@@ -226,6 +235,9 @@ class QuartetTopologyResult:
                 data["steiner_max"] = (
                     pl.Series(self.steiner_max.ravel().tolist()).fill_nan(None)
                 )
+                data["steiner_var"] = (
+                    pl.Series(self.steiner_var.ravel().tolist()).fill_nan(None)
+                )
 
             if deduplicate:
                 return pl.DataFrame(data).unique()
@@ -250,6 +262,9 @@ class QuartetTopologyResult:
                         )
                         data[f"{group}_steiner_max_t{k}"] = (
                             pl.Series(self.steiner_max[:, gi, k].tolist()).fill_nan(None)
+                        )
+                        data[f"{group}_steiner_var_t{k}"] = (
+                            pl.Series(self.steiner_var[:, gi, k].tolist()).fill_nan(None)
                         )
             if deduplicate:
                 return pl.DataFrame(data).unique()

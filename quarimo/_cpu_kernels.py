@@ -405,7 +405,8 @@ def _quartet_steiner_njit(
         counts_out,
         steiner_out,
         steiner_min_out,
-        steiner_max_out):
+        steiner_max_out,
+        steiner_sum_sq_out):
     """
     Numba-compiled quartet kernel with Steiner distances.
 
@@ -431,6 +432,11 @@ def _quartet_steiner_njit(
     steiner_max_out : float64[n_quartets, n_groups, 4]
         Output array for per-cell maximum Steiner distance.
         Pre-filled with -inf by caller; cells with count=0 keep -inf.
+
+    steiner_sum_sq_out : float64[n_quartets, n_groups, 4]
+        Output array for the sum of squared Steiner distances per cell.
+        Used to compute variance = sum_sq/n - (sum/n)^2 after the kernel.
+        Pre-filled with zeros by caller.
     """
     for qi in prange(n_quartets):
         n0 = sorted_quartet_ids[qi, 0]
@@ -469,6 +475,7 @@ def _quartet_steiner_njit(
                 steiner_min_out[qi, gi, topo] = sl
             if sl > steiner_max_out[qi, gi, topo]:
                 steiner_max_out[qi, gi, topo] = sl
+            steiner_sum_sq_out[qi, gi, topo] += sl * sl
 
 
 # ======================================================================== #
