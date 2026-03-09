@@ -21,6 +21,10 @@ _quartet_topology_and_rd_cuda
 _steiner_length_cuda
     Steiner spanning length of the winning quartet topology.
 
+_polytomy_check_cuda
+    CSR polytomy scan + tie check → (found, topo, r0, r1, r2, rw).
+    Called by both unified kernels; returns found=False for binary trees.
+
 Kernels (called from _forest.py via the cuda backend)
 ------------------------------------------------------
 generate_quartets_cuda
@@ -338,6 +342,79 @@ if _CUDA_AVAILABLE:
                   + all_root_distance[nb + ln3])
         return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
 
+    @cuda.jit(device=True)
+    def _polytomy_check_cuda(occ0, occ1, occ2, occ3,
+                              nb, tb, sb, lb, tw,
+                              poly_start, poly_end, polytomy_nodes,
+                              all_sparse_table, all_euler_depth, all_log2_table,
+                              all_euler_tour, all_root_distance):
+        """
+        CSR-based polytomy detection with tie check (device-only).
+
+        Scans polytomy-inserted nodes for tree *ti* and determines whether
+        the quartet is unresolvable (all three pair-sums equal) or resolves
+        to a normal topology despite spanning a polytomy node.
+
+        Returns
+        -------
+        found : bool
+            True if a polytomy node is an LCA of any quartet pair.
+            False when poly_end <= poly_start (binary tree, zero overhead)
+            or when no polytomy node is any of the six LCAs.
+        topo : int32
+            Winning topology (0–3).  Meaningful only when found=True.
+        r0, r1, r2 : float64
+            Pair sums for topologies 0, 1, 2.  Meaningful only when found=True.
+        rw : float64
+            Pair sum of the winning topology.  Meaningful only when found=True.
+        """
+        if poly_end <= poly_start:
+            return False, 0, 0.0, 0.0, 0.0, 0.0
+
+        l = occ0; r = occ1
+        if l > r: l, r = r, l
+        lca01 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
+                               all_log2_table, lb, tb, all_euler_tour)
+        l = occ0; r = occ2
+        if l > r: l, r = r, l
+        lca02 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
+                               all_log2_table, lb, tb, all_euler_tour)
+        l = occ0; r = occ3
+        if l > r: l, r = r, l
+        lca03 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
+                               all_log2_table, lb, tb, all_euler_tour)
+        l = occ1; r = occ2
+        if l > r: l, r = r, l
+        lca12 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
+                               all_log2_table, lb, tb, all_euler_tour)
+        l = occ1; r = occ3
+        if l > r: l, r = r, l
+        lca13 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
+                               all_log2_table, lb, tb, all_euler_tour)
+        l = occ2; r = occ3
+        if l > r: l, r = r, l
+        lca23 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
+                               all_log2_table, lb, tb, all_euler_tour)
+
+        for j in range(poly_start, poly_end):
+            pn = polytomy_nodes[j]
+            if (pn == lca01 or pn == lca02 or pn == lca03
+                    or pn == lca12 or pn == lca13 or pn == lca23):
+                rd01 = all_root_distance[nb + lca01]; rd23 = all_root_distance[nb + lca23]
+                rd02 = all_root_distance[nb + lca02]; rd13 = all_root_distance[nb + lca13]
+                rd03 = all_root_distance[nb + lca03]; rd12 = all_root_distance[nb + lca12]
+                r0 = rd01 + rd23; r1 = rd02 + rd13; r2 = rd03 + rd12
+                if r0 == r1 and r1 == r2:
+                    return True, 3, r0, r1, r2, r0
+                elif r0 >= r1 and r0 >= r2:
+                    return True, 0, r0, r1, r2, r0
+                elif r1 >= r0 and r1 >= r2:
+                    return True, 1, r0, r1, r2, r1
+                else:
+                    return True, 2, r0, r1, r2, r2
+
+        return False, 0, 0.0, 0.0, 0.0, 0.0
+
     @cuda.jit
     def _quartet_counts_cuda(
             sorted_quartet_ids,
@@ -575,43 +652,15 @@ if _CUDA_AVAILABLE:
         # CSR-based polytomy detection (zero overhead for trees without polytomies)
         poly_start = polytomy_offsets[ti]
         poly_end = polytomy_offsets[ti + 1]
-        if poly_end > poly_start:
-            l = occ0; r = occ1
-            if l > r: l, r = r, l
-            lca01 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-            l = occ0; r = occ2
-            if l > r: l, r = r, l
-            lca02 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-            l = occ0; r = occ3
-            if l > r: l, r = r, l
-            lca03 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-            l = occ1; r = occ2
-            if l > r: l, r = r, l
-            lca12 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-            l = occ1; r = occ3
-            if l > r: l, r = r, l
-            lca13 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-            l = occ2; r = occ3
-            if l > r: l, r = r, l
-            lca23 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-            for j in range(poly_start, poly_end):
-                pn = polytomy_nodes[j]
-                if (pn == lca01 or pn == lca02 or pn == lca03
-                        or pn == lca12 or pn == lca13 or pn == lca23):
-                    rd01 = all_root_distance[nb + lca01]; rd23 = all_root_distance[nb + lca23]
-                    rd02 = all_root_distance[nb + lca02]; rd13 = all_root_distance[nb + lca13]
-                    rd03 = all_root_distance[nb + lca03]; rd12 = all_root_distance[nb + lca12]
-                    r0 = rd01 + rd23; r1 = rd02 + rd13; r2 = rd03 + rd12
-                    gi = tree_to_group_idx[ti]
-                    if r0 == r1 and r1 == r2:
-                        cuda.atomic.add(counts, (qi, gi, 3), 1)
-                    elif r0 >= r1 and r0 >= r2:
-                        cuda.atomic.add(counts, (qi, gi, 0), 1)
-                    elif r1 >= r0 and r1 >= r2:
-                        cuda.atomic.add(counts, (qi, gi, 1), 1)
-                    else:
-                        cuda.atomic.add(counts, (qi, gi, 2), 1)
-                    return
+        found, topo, r0, r1, r2, rw = _polytomy_check_cuda(
+            occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+            poly_start, poly_end, polytomy_nodes,
+            all_sparse_table, all_euler_depth, all_log2_table,
+            all_euler_tour, all_root_distance,
+        )
+        if found:
+            cuda.atomic.add(counts, (qi, tree_to_group_idx[ti], topo), 1)
+            return
 
         topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
             occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
@@ -687,47 +736,19 @@ if _CUDA_AVAILABLE:
         # CSR-based polytomy detection (zero overhead for trees without polytomies)
         poly_start = polytomy_offsets[ti]
         poly_end = polytomy_offsets[ti + 1]
-        if poly_end > poly_start:
-            l = occ0; r = occ1
-            if l > r: l, r = r, l
-            lca01 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-            l = occ0; r = occ2
-            if l > r: l, r = r, l
-            lca02 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-            l = occ0; r = occ3
-            if l > r: l, r = r, l
-            lca03 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-            l = occ1; r = occ2
-            if l > r: l, r = r, l
-            lca12 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-            l = occ1; r = occ3
-            if l > r: l, r = r, l
-            lca13 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-            l = occ2; r = occ3
-            if l > r: l, r = r, l
-            lca23 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-            for j in range(poly_start, poly_end):
-                pn = polytomy_nodes[j]
-                if (pn == lca01 or pn == lca02 or pn == lca03
-                        or pn == lca12 or pn == lca13 or pn == lca23):
-                    rd01 = all_root_distance[nb + lca01]; rd23 = all_root_distance[nb + lca23]
-                    rd02 = all_root_distance[nb + lca02]; rd13 = all_root_distance[nb + lca13]
-                    rd03 = all_root_distance[nb + lca03]; rd12 = all_root_distance[nb + lca12]
-                    r0 = rd01 + rd23; r1 = rd02 + rd13; r2 = rd03 + rd12
-                    gi = tree_to_group_idx[ti]
-                    if r0 == r1 and r1 == r2:
-                        topo = 3; rw = r0
-                    elif r0 >= r1 and r0 >= r2:
-                        topo = 0; rw = r0
-                    elif r1 >= r0 and r1 >= r2:
-                        topo = 1; rw = r1
-                    else:
-                        topo = 2; rw = r2
-                    cuda.atomic.add(counts, (qi, gi, topo), 1)
-                    cuda.atomic.add(steiner_out, (qi, gi, topo), _steiner_length_cuda(
-                        ln0, ln1, ln2, ln3, nb, r0, r1, r2, rw, all_root_distance,
-                    ))
-                    return
+        found, topo, r0, r1, r2, rw = _polytomy_check_cuda(
+            occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+            poly_start, poly_end, polytomy_nodes,
+            all_sparse_table, all_euler_depth, all_log2_table,
+            all_euler_tour, all_root_distance,
+        )
+        if found:
+            gi = tree_to_group_idx[ti]
+            cuda.atomic.add(counts, (qi, gi, topo), 1)
+            cuda.atomic.add(steiner_out, (qi, gi, topo), _steiner_length_cuda(
+                ln0, ln1, ln2, ln3, nb, r0, r1, r2, rw, all_root_distance,
+            ))
+            return
 
         topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
             occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
