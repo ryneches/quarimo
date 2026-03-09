@@ -1717,12 +1717,10 @@ class Forest:
                     sl = Forest._steiner_length(
                         ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance,
                     )
-                    steiner_out[qi, gi, topo] += sl
-                    if sl < steiner_min_out[qi, gi, topo]:
-                        steiner_min_out[qi, gi, topo] = sl
-                    if sl > steiner_max_out[qi, gi, topo]:
-                        steiner_max_out[qi, gi, topo] = sl
-                    steiner_sum_sq_out[qi, gi, topo] += sl * sl
+                    Forest._accumulate_steiner(
+                        qi, gi, topo, sl,
+                        steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
+                    )
 
     @staticmethod
     def _qed_kernel(
@@ -1988,6 +1986,25 @@ class Forest:
             + float(all_root_distance[nb + ln3])
         )
         return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
+
+    @staticmethod
+    def _accumulate_steiner(
+        qi, gi, topo, sl,
+        steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
+    ):
+        """
+        Accumulate one Steiner observation into the four per-cell stat arrays.
+
+        Pure-Python counterpart of ``_accumulate_steiner_nb`` and
+        ``_accumulate_steiner_cuda``.  No atomics — called from the
+        single-threaded Python fallback kernel.
+        """
+        steiner_out[qi, gi, topo] += sl
+        if sl < steiner_min_out[qi, gi, topo]:
+            steiner_min_out[qi, gi, topo] = sl
+        if sl > steiner_max_out[qi, gi, topo]:
+            steiner_max_out[qi, gi, topo] = sl
+        steiner_sum_sq_out[qi, gi, topo] += sl * sl
 
     @staticmethod
     def _rmq_csr(

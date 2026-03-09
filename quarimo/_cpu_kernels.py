@@ -304,6 +304,41 @@ def _steiner_length_nb(ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_di
     return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
 
 
+@njit(cache=True)
+def _accumulate_steiner_nb(qi, gi, topo, sl,
+                            steiner_out, steiner_min_out,
+                            steiner_max_out, steiner_sum_sq_out):
+    """
+    Accumulate one Steiner observation into the four per-cell stat arrays.
+
+    CPU counterpart of ``_accumulate_steiner_cuda``.  Inlined by Numba; no
+    function-call overhead at runtime.  Counts are intentionally excluded —
+    the caller increments ``counts_out`` unconditionally before deciding
+    whether to compute a Steiner length.
+
+    Parameters
+    ----------
+    qi, gi, topo : int
+        Output cell indices.
+    sl : float64
+        Steiner spanning length for this (tree, quartet) observation.
+    steiner_out : float64[n_quartets, n_groups, 4]
+        Accumulates the sum of Steiner lengths.
+    steiner_min_out : float64[n_quartets, n_groups, 4]
+        Accumulates the per-cell minimum; pre-filled with +inf by caller.
+    steiner_max_out : float64[n_quartets, n_groups, 4]
+        Accumulates the per-cell maximum; pre-filled with -inf by caller.
+    steiner_sum_sq_out : float64[n_quartets, n_groups, 4]
+        Accumulates the sum of squared lengths (used for variance).
+    """
+    steiner_out[qi, gi, topo] += sl
+    if sl < steiner_min_out[qi, gi, topo]:
+        steiner_min_out[qi, gi, topo] = sl
+    if sl > steiner_max_out[qi, gi, topo]:
+        steiner_max_out[qi, gi, topo] = sl
+    steiner_sum_sq_out[qi, gi, topo] += sl * sl
+
+
 @njit(parallel=True, cache=True)
 def _quartet_counts_njit(
         sorted_quartet_ids,
@@ -470,12 +505,10 @@ def _quartet_steiner_njit(
                 ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance,
             )
             counts_out[qi, gi, topo] += 1
-            steiner_out[qi, gi, topo] += sl
-            if sl < steiner_min_out[qi, gi, topo]:
-                steiner_min_out[qi, gi, topo] = sl
-            if sl > steiner_max_out[qi, gi, topo]:
-                steiner_max_out[qi, gi, topo] = sl
-            steiner_sum_sq_out[qi, gi, topo] += sl * sl
+            _accumulate_steiner_nb(
+                qi, gi, topo, sl,
+                steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
+            )
 
 
 # ======================================================================== #
