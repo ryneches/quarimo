@@ -44,7 +44,7 @@ def log_optimization_status(numba_available: bool) -> None:
     # Basic system info
     cpu_count = os.cpu_count() or 1
     logger.info(
-        f"System: {platform.machine()} ({platform.system()}), "
+        f"💻 System: {platform.machine()} ({platform.system()}), "
         f"{cpu_count} CPU cores, Python {platform.python_version()}"
     )
 
@@ -91,7 +91,7 @@ def log_optimization_status(numba_available: bool) -> None:
 
             if cuda.is_available():
                 gpus = cuda.gpus
-                logger.info(f"CUDA available: {len(gpus)} GPU(s) detected")
+                logger.info(f"🎮 CUDA available: {len(gpus)} GPU(s) detected")
                 for i, gpu in enumerate(gpus):
                     logger.info(f"  GPU {i}: {gpu.name.decode()}")
             else:
@@ -211,10 +211,10 @@ def log_polytomy_statistics(polytomy_offsets: "np.ndarray", n_trees: int) -> Non
     n_poly_trees = int((counts > 0).sum())
     total_poly_nodes = int(polytomy_offsets[-1])
     if n_poly_trees == 0:
-        logger.info("Polytomies: none (all trees are strictly bifurcating)")
+        logger.info("🌿 Polytomies: none (all trees are strictly bifurcating)")
     else:
         logger.info(
-            "Polytomies: %d of %d trees (%.1f%%), %d total inserted nodes; "
+            "🌿 Polytomies: %d of %d trees (%.1f%%), %d total inserted nodes; "
             "unresolvable quartets will be counted as topology k=3",
             n_poly_trees,
             n_trees,
@@ -243,7 +243,7 @@ def log_zero_length_branch_warning(
         Total count of user-provided zero-length branches across all trees.
     """
     logger.warning(
-        "%d of %d trees contain %d user-provided zero-length branch(es).",
+        "🚨 %d of %d trees contain %d user-provided zero-length branch(es).",
         n_trees_with_zero,
         n_trees,
         total_zero_branches,
@@ -329,7 +329,7 @@ def log_namespace_coverage(
             )
             if float(coverage.min()) < 0.5:
                 logger.warning(
-                    "  '%s': some trees cover < 50%% of the group taxa "
+                    "🚨 '%s': some trees cover < 50%% of the group taxa "
                     "(min=%.3f) — highly disjoint taxon sets within this group.",
                     group_name,
                     float(coverage.min()),
@@ -388,7 +388,7 @@ def log_collection_statistics(
     """
     # Basic counts
     logger.info(
-        "Collection built: %d trees, %d global taxa, %d total leaves",
+        "✅ Collection built: %d trees, %d global taxa, %d total leaves",
         n_trees,
         n_global_taxa,
         total_leaves,
@@ -404,7 +404,7 @@ def log_collection_statistics(
     # Warn if namespace is highly disjoint (low overlap)
     if trees_per_taxon_mean < 2.0 and n_trees > 2:
         logger.warning(
-            "Low namespace overlap detected: average taxon appears in %.1f trees. "
+            "🚨 Low namespace overlap detected: average taxon appears in %.1f trees. "
             "This may indicate highly disjoint taxon sets across trees, which "
             "reduces the number of viable quartet queries.",
             trees_per_taxon_mean,
@@ -434,7 +434,7 @@ def log_collection_statistics(
 
     if mem_gb > system_threshold_gb:
         logger.warning(
-            "Memory footprint (%.2f GB) exceeds typical system memory threshold "
+            "🚨 Memory footprint (%.2f GB) exceeds typical system memory threshold "
             "(%.1f GB = 80%% of 16 GB). Consider filtering taxa or using fewer trees.",
             mem_gb,
             system_threshold_gb,
@@ -442,7 +442,7 @@ def log_collection_statistics(
 
     if mem_gb > gpu_threshold_gb:
         logger.warning(
-            "Memory footprint (%.2f GB) exceeds typical GPU memory threshold "
+            "🚨 Memory footprint (%.2f GB) exceeds typical GPU memory threshold "
             "(%.1f GB = 80%% of 8 GB). GPU operations may require batching or "
             "a higher-memory device.",
             mem_gb,

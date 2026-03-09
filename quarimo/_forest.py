@@ -505,7 +505,7 @@ class Forest:
 
         # Log before parsing so the message appears while work is in progress
         _n_total = sum(len(v) for v in newick_input.values())
-        logger.info("Loading %d tree(s) from NEWICK strings...", _n_total)
+        logger.info("🌲 Loading %d tree(s) from NEWICK strings...", _n_total)
         if self.n_groups > 1:
             logger.info("  Organized into %d labeled groups", self.n_groups)
         else:
@@ -519,10 +519,10 @@ class Forest:
         self._build_group_mappings()
 
         # Build namespace and CSR layout
-        logger.info("Building global taxon namespace...")
+        logger.info("🔖 Building global taxon namespace...")
         self._build_global_namespace()
 
-        logger.info("Packing arrays into CSR flat layout...")
+        logger.info("📦 Packing arrays into CSR flat layout...")
         self._pack_csr()
         log_polytomy_statistics(self.polytomy_offsets, self.n_trees)
 
@@ -589,7 +589,7 @@ class Forest:
     def _upload_to_gpu(self) -> None:
         """Upload all CSR tree-structure arrays to the GPU once at construction time."""
         logger.info(
-            "Uploading %d tree arrays (%.2f MB) to GPU...",
+            "📤 Uploading %d tree arrays (%.2f MB) to GPU...",
             len(self._kernel_data.device_arrays()),
             self._kernel_data.upload_bytes / (1024**2),
         )
@@ -928,7 +928,7 @@ class Forest:
 
         # Log execution mode
         mode_str = "Steiner" if steiner else "counts-only"
-        logger.info(f"quartet_topology({mode_str}, backend={resolved_backend!r})")
+        logger.info(f"🧬 quartet_topology({mode_str}, backend={resolved_backend!r})")
 
         # ── 3. Dispatch to backend ────────────────────────────────────────
         steiner_out = None
@@ -1218,14 +1218,14 @@ class Forest:
         # Track first-call compilation
         kernel_key = f"cuda-unified-{'steiner' if steiner else 'counts'}"
         if _kernel_first_call.get(kernel_key, False):
-            logger.info("  Compiling %s kernel (cached for future calls)", kernel_key)
+            logger.info("  🔨 Compiling %s kernel (cached for future calls)", kernel_key)
             _kernel_first_call[kernel_key] = False
 
         # ── Seed array (tiny per-call upload) ─────────────────────────────
         seed_array = np.array(quartets.seed, dtype=np.int32)
         d_seed_quartets = cuda.to_device(seed_array)
         logger.info(
-            "  Quartet seed: %s %s, %d bytes → generates %d quartets on GPU",
+            "  🌱 Quartet seed: %s %s, %d bytes → generates %d quartets on GPU",
             seed_array.shape,
             seed_array.dtype,
             seed_array.nbytes,
@@ -1242,7 +1242,7 @@ class Forest:
 
         bpq = self._cuda_output_bytes_per_quartet(steiner)
         logger.info(
-            "  Output: %.2f MB total, batch_size=%d (%d batch%s)",
+            "  📊 Output: %.2f MB total, batch_size=%d (%d batch%s)",
             n_quartets * bpq / (1024**2),
             batch_size,
             n_batches,
@@ -1331,7 +1331,7 @@ class Forest:
                 d_steiner_sum_sq_b = cuda.to_device(
                     np.zeros((bc, self.n_groups, 4), dtype=np.float64)
                 )
-                logger.info("  🖥  launching Steiner kernel...")
+                logger.info("  🧮 launching Steiner kernel...")
                 time0 = time()
                 quartet_steiner_cuda_unified[blocks, tpb](
                     *batch_args, d_fkd.n_global_taxa, *d_forest_args,
@@ -1353,7 +1353,7 @@ class Forest:
                 d_steiner_sum_sq_b.copy_to_host(ary=steiner_sum_sq_out[bs : bs + bc])
                 del d_steiner_b, d_steiner_min_b, d_steiner_max_b, d_steiner_sum_sq_b
             else:
-                logger.info("  🖥  launching counts kernel...")
+                logger.info("  🧮 launching counts kernel...")
                 time0 = time()
                 quartet_counts_cuda_unified[blocks, tpb](
                     *batch_args, d_fkd.n_global_taxa, *d_forest_args,
@@ -1377,7 +1377,7 @@ class Forest:
                 steiner_out.nbytes + steiner_min_out.nbytes
                 + steiner_max_out.nbytes + steiner_sum_sq_out.nbytes
             )
-        logger.info("  D→H total: %.2f MB", total_bytes / (1024**2))
+        logger.info("  ✅ D→H total: %.2f MB", total_bytes / (1024**2))
 
         return counts_out, steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out
 
