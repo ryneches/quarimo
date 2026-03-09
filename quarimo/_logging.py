@@ -194,42 +194,63 @@ def log_backend_availability(
 # ============================================================================ #
 
 
-def log_multifurcation_warning(
-    n_multifurcating: int, multifurcating_indices: List[int], n_trees: int
-) -> None:
+def log_polytomy_statistics(polytomy_offsets: "np.ndarray", n_trees: int) -> None:
     """
-    Emit consolidated multifurcation warning.
+    Log polytomy statistics at INFO level.
 
     Parameters
     ----------
-    n_multifurcating : int
-        Number of trees that required multifurcation resolution.
-    multifurcating_indices : List[int]
-        Indices of trees that were multifurcating.
+    polytomy_offsets : np.ndarray, int32 (n_trees + 1,)
+        CSR offsets array from ``Forest._pack_csr()``.
+        ``polytomy_offsets[ti+1] - polytomy_offsets[ti]`` is the number of
+        polytomy-inserted internal nodes in tree *ti*.
     n_trees : int
         Total number of trees in collection.
     """
-    if n_multifurcating > 0:
-        if n_multifurcating == 1:
-            logger.warning(
-                "1 tree required multifurcation resolution (tree index %d). "
-                "Zero-length branches were added to enforce bifurcation.",
-                multifurcating_indices[0],
-            )
-        elif n_multifurcating <= 5:
-            logger.warning(
-                "%d trees required multifurcation resolution (tree indices: %s). "
-                "Zero-length branches were added to enforce bifurcation.",
-                n_multifurcating,
-                ", ".join(map(str, multifurcating_indices)),
-            )
-        else:
-            logger.warning(
-                "%d trees required multifurcation resolution (%.1f%% of total). "
-                "Zero-length branches were added to enforce bifurcation.",
-                n_multifurcating,
-                100.0 * n_multifurcating / n_trees,
-            )
+    counts = polytomy_offsets[1:] - polytomy_offsets[:-1]
+    n_poly_trees = int((counts > 0).sum())
+    total_poly_nodes = int(polytomy_offsets[-1])
+    if n_poly_trees == 0:
+        logger.info("Polytomies: none (all trees are strictly bifurcating)")
+    else:
+        logger.info(
+            "Polytomies: %d of %d trees (%.1f%%), %d total inserted nodes; "
+            "unresolvable quartets will be counted as topology k=3",
+            n_poly_trees,
+            n_trees,
+            100.0 * n_poly_trees / n_trees,
+            total_poly_nodes,
+        )
+
+
+def log_zero_length_branch_warning(
+    n_trees_with_zero: int, n_trees: int, total_zero_branches: int
+) -> None:
+    """
+    Warn that user-provided zero-length branches were detected.
+
+    These are distinct from the zero-length branches quarimo inserts during
+    polytomy resolution (which are sentinel values).  User-provided zeros
+    are treated as real branches and contribute 0 to root distances.
+
+    Parameters
+    ----------
+    n_trees_with_zero : int
+        Number of trees containing at least one user-provided zero-length branch.
+    n_trees : int
+        Total number of trees in collection.
+    total_zero_branches : int
+        Total count of user-provided zero-length branches across all trees.
+    """
+    logger.warning(
+        "%d of %d trees contain %d user-provided zero-length branch(es). "
+        "These will be treated as real branches (contributing 0 to root distances). "
+        "If a zero-length branch is intended to represent a polytomy, collapse it "
+        "into an explicit multifurcation in the NEWICK string instead.",
+        n_trees_with_zero,
+        n_trees,
+        total_zero_branches,
+    )
 
 
 def log_group_statistics(

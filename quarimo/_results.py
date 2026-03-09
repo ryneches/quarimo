@@ -75,16 +75,17 @@ class QuartetTopologyResult:
 
     Attributes
     ----------
-    counts : np.ndarray, int32, shape (n_quartets, n_groups, 3)
+    counts : np.ndarray, int32, shape (n_quartets, n_groups, 4)
         counts[qi, gi, k] = number of trees in group gi where quartet qi
         has topology k.  Trees where any of the four taxa are absent do not
-        contribute.
+        contribute.  k=3 accumulates unresolved (polytomy) counts.
 
-    steiner : np.ndarray or None, float64, shape (n_quartets, n_groups, 3)
+    steiner : np.ndarray or None, float64, shape (n_quartets, n_groups, 4)
         steiner[qi, gi, k] = summed Steiner spanning length for group gi,
         topology k.  None when ``steiner=False`` was passed to
         ``quartet_topology()``.  Mean Steiner per tree:
         ``steiner[qi, gi, k] / max(counts[qi, gi, k], 1)``.
+        k=3 accumulates Steiner sums for unresolved quartets.
 
     groups : list of str
         Group axis labels, sorted alphabetically.  Axis 1 of ``counts`` and
@@ -121,15 +122,16 @@ class QuartetTopologyResult:
             ``'long'``
                 One row per (quartet, group, topology) triple.  Columns:
                 ``quartet_idx``, ``a``, ``b``, ``c``, ``d`` (taxon names,
-                sorted by global ID), ``group``, ``topology`` (int 0–2),
+                sorted by global ID), ``group``, ``topology`` (int 0–3),
                 ``count``, and optionally ``steiner_sum``.
-                Total rows: n_quartets × n_groups × 3.
+                topology=3 means unresolved (polytomy).
+                Total rows: n_quartets × n_groups × 4.
 
             ``'wide'``
                 One row per quartet.  Columns ``quartet_idx``, ``a``–``d``
                 are followed by one count column per (group, topology)
-                combination named ``{group}_t{k}``, and optionally one
-                Steiner column per combination named
+                combination named ``{group}_t{k}`` (k=0–3), and optionally
+                one Steiner column per combination named
                 ``{group}_steiner_t{k}``.
                 Total rows: n_quartets.
 
@@ -150,6 +152,7 @@ class QuartetTopologyResult:
           topology 0 → (a, b) | (c, d)
           topology 1 → (a, c) | (b, d)
           topology 2 → (a, d) | (b, c)
+          topology 3 → unresolved (polytomy)
 
         Returns
         -------
@@ -167,13 +170,13 @@ class QuartetTopologyResult:
         idx_dtype = pl.Int128 if idx.dtype == object else pl.Int64
 
         if form == "long":
-            qi = np.repeat(np.arange(n_q), n_g * 3)
-            gi = np.tile(np.repeat(np.arange(n_g), 3), n_q)
-            ti = np.tile(np.arange(3), n_q * n_g)
+            qi = np.repeat(np.arange(n_q), n_g * 4)
+            gi = np.tile(np.repeat(np.arange(n_g), 4), n_q)
+            ti = np.tile(np.arange(4), n_q * n_g)
 
             data: dict = {
                 "quartet_idx": pl.Series(
-                    "quartet_idx", np.repeat(idx, n_g * 3).tolist(), dtype=idx_dtype
+                    "quartet_idx", np.repeat(idx, n_g * 4).tolist(), dtype=idx_dtype
                 ),
                 "a": gnames[ids[qi, 0]].tolist(),
                 "b": gnames[ids[qi, 1]].tolist(),
@@ -198,7 +201,7 @@ class QuartetTopologyResult:
                 "d": gnames[ids[:, 3]].tolist(),
             }
             for gi, group in enumerate(self.groups):
-                for k in range(3):
+                for k in range(4):
                     data[f"{group}_t{k}"] = self.counts[:, gi, k].tolist()
                     if self.steiner is not None:
                         data[f"{group}_steiner_t{k}"] = self.steiner[:, gi, k].tolist()

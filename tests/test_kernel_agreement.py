@@ -319,6 +319,8 @@ class TestFourPointCondition:
                     continue  # all taxa absent in this tree
 
                 k_win = int(counts[qi, gi].argmax())
+                if k_win == 3:
+                    continue  # unresolved (polytomy) — four-point condition not applicable
                 _, s0, s1, s2 = _steiner_and_sums(pairwise, n0, n1, n2, n3, gi)
                 if s0 is None:
                     continue  # absent taxon (shouldn't happen when count>0, but guard anyway)
@@ -659,6 +661,8 @@ class TestSuchTreePolytomyAgreement:
                 s_min = min(s_vals)
                 valid_ks = frozenset(k for k, s in enumerate(s_vals) if abs(s - s_min) < tol)
                 if len(valid_ks) > 1:
+                    # k=3 (unresolved) is also valid when multiple topologies are tied
+                    valid_ks = valid_ks | frozenset([3])
                     tied.append((qi, names, valid_ks))
 
             if not tied:

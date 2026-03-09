@@ -161,14 +161,15 @@ def _quartet_topology_and_rd_nb(occ0, occ1, occ2, occ3,
                                  nb, tb, sb, lb, tw,
                                  all_root_distance,
                                  all_sparse_table, all_euler_depth,
-                                 all_log2_table, all_euler_tour):
+                                 all_log2_table, all_euler_tour,
+                                 poly_start, poly_end, polytomy_nodes):
     """
     Six RMQ calls + four-point condition → topology and pair-sums.
 
-    Computes all six pairwise LCA root-distances for four taxa (whose first
-    Euler-tour occurrences are ``occ0..occ3``), applies the four-point
-    condition to determine the winning unrooted split, and returns the topology
-    index alongside all three pair-sums and the winning pair-sum.
+    Computes all six pairwise LCA node IDs for four taxa, checks whether any
+    is a polytomy-inserted internal node (via the CSR ``polytomy_nodes`` list),
+    and if so returns topo=3 immediately.  Otherwise applies the four-point
+    condition on LCA root-distances to determine the winning unrooted split.
 
     Parameters
     ----------
@@ -183,64 +184,83 @@ def _quartet_topology_and_rd_nb(occ0, occ1, occ2, occ3,
         CSR-packed root distances.
     all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour
         CSR-packed RMQ arrays.
+    poly_start, poly_end : int
+        Slice bounds into ``polytomy_nodes`` for tree *ti*
+        (``polytomy_offsets[ti]`` and ``polytomy_offsets[ti+1]``).
+        When ``poly_start == poly_end`` the tree has no polytomy nodes and the
+        CSR check is skipped entirely (zero overhead for the common case).
+    polytomy_nodes : int32[:]
+        Flat CSR array of local polytomy-node IDs across all trees.
 
     Returns
     -------
     topo : int
         Winning topology index: 0 = (n0,n1)|(n2,n3),
                                 1 = (n0,n2)|(n1,n3),
-                                2 = (n0,n3)|(n1,n2).
+                                2 = (n0,n3)|(n1,n2),
+                                3 = unresolved (polytomy-inserted LCA detected).
     r0, r1, r2 : float64
-        Pair-sums for each of the three topologies.
+        Pair-sums for each of the three topologies; all 0.0 when topo==3.
     r_winner : float64
-        Score of the winning topology (max of r0, r1, r2).
-
-    Notes
-    -----
-    Uses ``>=`` comparisons so polytomies (tied scores) are handled
-    consistently.
+        Score of the winning topology; 0.0 when topo==3.
     """
     l = occ0; r = occ1
     if l > r: l, r = r, l
-    rd01 = all_root_distance[nb + _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
-                                               all_euler_depth, all_log2_table,
-                                               lb, tb, all_euler_tour)]
+    lca01 = _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
+                         all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
     l = occ0; r = occ2
     if l > r: l, r = r, l
-    rd02 = all_root_distance[nb + _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
-                                               all_euler_depth, all_log2_table,
-                                               lb, tb, all_euler_tour)]
+    lca02 = _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
+                         all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
     l = occ0; r = occ3
     if l > r: l, r = r, l
-    rd03 = all_root_distance[nb + _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
-                                               all_euler_depth, all_log2_table,
-                                               lb, tb, all_euler_tour)]
+    lca03 = _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
+                         all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
     l = occ1; r = occ2
     if l > r: l, r = r, l
-    rd12 = all_root_distance[nb + _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
-                                               all_euler_depth, all_log2_table,
-                                               lb, tb, all_euler_tour)]
+    lca12 = _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
+                         all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
     l = occ1; r = occ3
     if l > r: l, r = r, l
-    rd13 = all_root_distance[nb + _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
-                                               all_euler_depth, all_log2_table,
-                                               lb, tb, all_euler_tour)]
+    lca13 = _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
+                         all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
     l = occ2; r = occ3
     if l > r: l, r = r, l
-    rd23 = all_root_distance[nb + _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
-                                               all_euler_depth, all_log2_table,
-                                               lb, tb, all_euler_tour)]
+    lca23 = _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
+                         all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
+
+    rd01 = all_root_distance[nb + lca01]
+    rd02 = all_root_distance[nb + lca02]
+    rd03 = all_root_distance[nb + lca03]
+    rd12 = all_root_distance[nb + lca12]
+    rd13 = all_root_distance[nb + lca13]
+    rd23 = all_root_distance[nb + lca23]
 
     r0 = rd01 + rd23  # topology 0: (n0,n1)|(n2,n3)
     r1 = rd02 + rd13  # topology 1: (n0,n2)|(n1,n3)
     r2 = rd03 + rd12  # topology 2: (n0,n3)|(n1,n2)
 
+    # CSR-based polytomy detection (zero overhead for trees without polytomies).
+    # The CSR check is the fast pre-filter: only trees with polytomy-inserted
+    # nodes enter the loop.  The numerical tie-check (r0==r1==r2) is safe here
+    # because it is restricted to trees where a polytomy node IS an LCA, so
+    # any tie is caused by the zero-length sentinel branch (exact IEEE-754
+    # equality), not by floating-point coincidence in real branch lengths.
+    if poly_end > poly_start:
+        for j in range(poly_start, poly_end):
+            pn = polytomy_nodes[j]
+            if (pn == lca01 or pn == lca02 or pn == lca03
+                    or pn == lca12 or pn == lca13 or pn == lca23):
+                if r0 == r1 and r1 == r2:
+                    return np.int32(3), r0, r1, r2, r0
+                break  # polytomy node found but no tie: fall through to resolved
+
     if r0 >= r1 and r0 >= r2:
-        topo = 0; r_winner = r0
+        topo = np.int32(0); r_winner = r0
     elif r1 >= r0 and r1 >= r2:
-        topo = 1; r_winner = r1
+        topo = np.int32(1); r_winner = r1
     else:
-        topo = 2; r_winner = r2
+        topo = np.int32(2); r_winner = r2
 
     return topo, r0, r1, r2, r_winner
 
@@ -302,6 +322,8 @@ def _quartet_counts_njit(
         n_quartets,
         n_trees,
         tree_to_group_idx,
+        polytomy_offsets,
+        polytomy_nodes,
         counts_out):
     """
     Numba-compiled counts-only quartet kernel.
@@ -326,8 +348,9 @@ def _quartet_counts_njit(
     n_quartets, n_trees : int
     tree_to_group_idx : int32[n_trees]
         Maps each tree index to its group index.
-    counts_out : int32[n_quartets, n_groups, 3]
+    counts_out : int32[n_quartets, n_groups, 4]
         Accumulated in-place; pre-filled with zeros by caller.
+        Last axis: k=0,1,2 resolved topologies; k=3 unresolved (polytomy).
     """
     for qi in prange(n_quartets):
         n0 = sorted_quartet_ids[qi, 0]
@@ -348,10 +371,13 @@ def _quartet_counts_njit(
             occ1 = all_first_occ[nb + ln1]
             occ2 = all_first_occ[nb + ln2]
             occ3 = all_first_occ[nb + ln3]
+            poly_start = polytomy_offsets[ti]
+            poly_end = polytomy_offsets[ti + 1]
             topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_nb(
                 occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
                 all_root_distance, all_sparse_table, all_euler_depth,
                 all_log2_table, all_euler_tour,
+                poly_start, poly_end, polytomy_nodes,
             )
             counts_out[qi, tree_to_group_idx[ti], topo] += 1
 
@@ -374,6 +400,8 @@ def _quartet_steiner_njit(
         n_quartets,
         n_trees,
         tree_to_group_idx,
+        polytomy_offsets,
+        polytomy_nodes,
         counts_out,
         steiner_out):
     """
@@ -390,8 +418,9 @@ def _quartet_steiner_njit(
     ----------
     Same as _quartet_counts_njit, plus:
 
-    steiner_out : float64[n_quartets, n_groups, 3]
+    steiner_out : float64[n_quartets, n_groups, 4]
         Output array for summed Steiner distances per group per topology.
+        Last axis: k=0,1,2 resolved topologies; k=3 unresolved (polytomy).
     """
     for qi in prange(n_quartets):
         n0 = sorted_quartet_ids[qi, 0]
@@ -412,10 +441,13 @@ def _quartet_steiner_njit(
             occ1 = all_first_occ[nb + ln1]
             occ2 = all_first_occ[nb + ln2]
             occ3 = all_first_occ[nb + ln3]
+            poly_start = polytomy_offsets[ti]
+            poly_end = polytomy_offsets[ti + 1]
             topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_nb(
                 occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
                 all_root_distance, all_sparse_table, all_euler_depth,
                 all_log2_table, all_euler_tour,
+                poly_start, poly_end, polytomy_nodes,
             )
             gi = tree_to_group_idx[ti]
             counts_out[qi, gi, topo] += 1

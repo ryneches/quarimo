@@ -24,7 +24,7 @@ The module uses Python's standard logging framework with one logger:
                      optimization status (LLVM, CUDA, threading),
                      construction stages, taxa/tree counts, memory footprint,
                      namespace overlap statistics, array dimensions.
-      WARNING level: Multifurcation corrections, high memory usage alerts,
+      WARNING level: High memory usage alerts, low namespace overlap,
                      numba performance warnings (e.g., parallel=True but no
                      prange loops detected).
 
@@ -145,7 +145,8 @@ from quarimo._logging import (
     log_optimization_status,
     install_numba_warning_filter,
     log_backend_availability,
-    log_multifurcation_warning,
+    log_polytomy_statistics,
+    log_zero_length_branch_warning,
     log_group_statistics,
     log_namespace_coverage,
     log_collection_statistics,
@@ -297,12 +298,7 @@ def _parse_newick_worker(newick: str) -> "Tree":
     """Subprocess worker: parse one NEWICK string into a Tree.
 
     Kept at module scope so it is picklable by :mod:`multiprocessing`.
-    Logger suppression is set per-worker rather than inheriting a context
-    manager from the parent process.
     """
-    import logging
-
-    logging.getLogger("quarimo._tree").setLevel(logging.WARNING)
     return Tree(newick)
 
 
@@ -310,7 +306,7 @@ def _load_tree_data(
     newick_input: Dict[str, List[str]],
     ordered_groups: List[str],
     n_threads: Optional[int] = None,
-) -> Tuple[List["Tree"], List[str], int, List[int]]:
+) -> Tuple[List["Tree"], List[str]]:
     """Parse NEWICK strings into :class:`Tree` instances, optionally in parallel.
 
     Trees are returned in *ordered_groups* order so that the caller can build
@@ -340,10 +336,6 @@ def _load_tree_data(
         (group, newick) sequence.
     group_labels : list[str]
         Per-tree group label, parallel to *trees*.
-    n_multifurcating : int
-        Number of trees that required multifurcation resolution.
-    multifurcating_indices : list[int]
-        Global tree indices of multifurcating trees.
 
     Raises
     ------
@@ -351,22 +343,15 @@ def _load_tree_data(
         If any group in *ordered_groups* is present in *newick_input* but
         has an empty list of NEWICK strings.
     """
-    # ── 1. Flatten and pre-screen for multifurcation ──────────────────────
+    # ── 1. Flatten ─────────────────────────────────────────────────────────
     flat_groups: List[str] = []
     flat_newicks: List[str] = []
-    n_multifurcating = 0
-    multifurcating_indices: List[int] = []
 
     for group_name in ordered_groups:
         newicks = newick_input[group_name]
         if not newicks:
             raise ValueError(f"Group '{group_name}' is empty")
         for newick in newicks:
-            idx = len(flat_newicks)
-            s = newick.strip().rstrip(";")
-            if s.count("(") < s.count(","):
-                n_multifurcating += 1
-                multifurcating_indices.append(idx)
             flat_groups.append(group_name)
             flat_newicks.append(newick)
 
@@ -397,10 +382,9 @@ def _load_tree_data(
             total_chars,
             _MP_CHAR_THRESHOLD,
         )
-        with suppress_logger("quarimo._tree"):
-            trees = [Tree(newick) for newick in flat_newicks]
+        trees = [Tree(newick) for newick in flat_newicks]
 
-    return trees, flat_groups, n_multifurcating, multifurcating_indices
+    return trees, flat_groups
 
 
 class Forest:
@@ -525,17 +509,8 @@ class Forest:
             logger.info("  Single group: %s", self.unique_groups[0])
 
         # Parse NEWICK strings into Tree objects (parallel when dataset is large)
-        self._trees, self.group_labels, n_multifurcating, multifurcating_indices = (
-            _load_tree_data(newick_input, self.unique_groups)
-        )
-
-        # Set n_trees BEFORE logging multifurcation warning
+        self._trees, self.group_labels = _load_tree_data(newick_input, self.unique_groups)
         self.n_trees = len(self._trees)
-
-        # Emit consolidated multifurcation warning
-        self._log_multifurcation_warning_method(
-            n_multifurcating, multifurcating_indices
-        )
 
         # Build group mappings
         self._build_group_mappings()
@@ -546,6 +521,12 @@ class Forest:
 
         logger.info("Packing arrays into CSR flat layout...")
         self._pack_csr()
+        log_polytomy_statistics(self.polytomy_offsets, self.n_trees)
+
+        n_zero_trees = sum(1 for t in self._trees if t.n_zero_length_branches > 0)
+        if n_zero_trees > 0:
+            total_zero = sum(t.n_zero_length_branches for t in self._trees)
+            log_zero_length_branch_warning(n_zero_trees, self.n_trees, total_zero)
 
         # Upload tree structure to GPU once (if available)
         self._d_tree = None
@@ -592,6 +573,8 @@ class Forest:
             "lg_offsets": self.lg_offsets,
             "sp_tour_widths": self.sp_tour_widths,
             "tree_to_group_idx": self.tree_to_group_idx,
+            "polytomy_offsets": self.polytomy_offsets,
+            "polytomy_nodes": self.polytomy_nodes,
         }
         total_bytes = sum(a.nbytes for a in tree_arrays.values())
         logger.info(
@@ -616,14 +599,6 @@ class Forest:
         except Exception:
             pass
         self._d_tree = None
-
-    def _log_multifurcation_warning_method(
-        self, n_multifurcating: int, multifurcating_indices: List[int]
-    ) -> None:
-        """Emit consolidated multifurcation warning."""
-        log_multifurcation_warning(
-            n_multifurcating, multifurcating_indices, self.n_trees
-        )
 
     def _log_group_statistics_method(self) -> None:
         """Log group membership statistics."""
@@ -915,8 +890,8 @@ class Forest:
         n_quartets = len(quartets)
         if n_quartets == 0:
             return QuartetTopologyResult(
-                counts=np.zeros((0, self.n_groups, 3), dtype=np.int32),
-                steiner=np.zeros((0, self.n_groups, 3), dtype=np.float64)
+                counts=np.zeros((0, self.n_groups, 4), dtype=np.int32),
+                steiner=np.zeros((0, self.n_groups, 4), dtype=np.float64)
                 if steiner
                 else None,
                 groups=self.unique_groups,
@@ -971,9 +946,11 @@ class Forest:
                 n_quartets,
                 self.n_trees,
                 self.tree_to_group_idx,
+                self.polytomy_offsets,
+                self.polytomy_nodes,
             )
 
-            counts_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.int32)
+            counts_out = np.zeros((n_quartets, self.n_groups, 4), dtype=np.int32)
 
             if resolved_backend == "cpu-parallel":
                 kernel_key = f"cpu-parallel-{'steiner' if steiner else 'counts'}"
@@ -985,7 +962,7 @@ class Forest:
 
                 if steiner:
                     steiner_out = np.zeros(
-                        (n_quartets, self.n_groups, 3), dtype=np.float64
+                        (n_quartets, self.n_groups, 4), dtype=np.float64
                     )
                     _quartet_steiner_njit(*common_args, counts_out, steiner_out)
                 else:
@@ -994,7 +971,7 @@ class Forest:
             elif resolved_backend == "python":
                 if steiner:
                     steiner_out = np.zeros(
-                        (n_quartets, self.n_groups, 3), dtype=np.float64
+                        (n_quartets, self.n_groups, 4), dtype=np.float64
                     )
                     steiner_arg = steiner_out
                 else:
@@ -1098,9 +1075,9 @@ class Forest:
             _global_names = counts.global_names
             counts = counts.counts
         counts = np.asarray(counts, dtype=np.int32)
-        if counts.ndim != 3 or counts.shape[1] != self.n_groups or counts.shape[2] != 3:
+        if counts.ndim != 3 or counts.shape[1] != self.n_groups or counts.shape[2] < 3:
             raise ValueError(
-                f"counts must have shape (n_quartets, {self.n_groups}, 3), "
+                f"counts must have shape (n_quartets, {self.n_groups}, 3+), "
                 f"got {counts.shape}"
             )
         n_quartets = counts.shape[0]
@@ -1155,11 +1132,11 @@ class Forest:
 
     def _cuda_output_bytes_per_quartet(self, steiner: bool) -> int:
         """Bytes of GPU output array space required per quartet."""
-        # counts: n_groups × 3 × int32 per quartet
-        bpq = self.n_groups * 3 * 4
+        # counts: n_groups × 4 × int32 per quartet
+        bpq = self.n_groups * 4 * 4
         if steiner:
-            # steiner_out: n_groups × 3 × float64 per quartet
-            bpq += self.n_groups * 3 * 8
+            # steiner_out: n_groups × 4 × float64 per quartet
+            bpq += self.n_groups * 4 * 8
         return bpq
 
     def _cuda_batch_size(self, steiner: bool) -> int:
@@ -1243,6 +1220,8 @@ class Forest:
         d_so = dt["sp_offsets"]
         d_lo = dt["lg_offsets"]
         d_stw = dt["sp_tour_widths"]
+        d_poly_off = dt["polytomy_offsets"]
+        d_poly_nodes = dt["polytomy_nodes"]
 
         # ── Batch size: how many quartets' output fits in free VRAM ───────
         batch_size = self._cuda_batch_size(steiner)
@@ -1258,10 +1237,10 @@ class Forest:
         )
 
         # ── Host accumulation arrays ───────────────────────────────────────
-        counts_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.int32)
+        counts_out = np.zeros((n_quartets, self.n_groups, 4), dtype=np.int32)
         steiner_out: Optional[np.ndarray] = None
         if steiner:
-            steiner_out = np.zeros((n_quartets, self.n_groups, 3), dtype=np.float64)
+            steiner_out = np.zeros((n_quartets, self.n_groups, 4), dtype=np.float64)
 
         # ── Batched kernel dispatch ────────────────────────────────────────
         n_seed = len(quartets.seed)
@@ -1313,14 +1292,14 @@ class Forest:
 
             # Zero-initialised counts and steiner (atomic.add requires it)
             d_counts_b = cuda.to_device(
-                np.zeros((bc, self.n_groups, 3), dtype=np.int32)
+                np.zeros((bc, self.n_groups, 4), dtype=np.int32)
             )
 
             if steiner:
                 # Must use cuda.to_device(np.zeros(...)) — atomic accumulation
                 # requires zero-initialised device arrays.
                 d_steiner_b = cuda.to_device(
-                    np.zeros((bc, self.n_groups, 3), dtype=np.float64)
+                    np.zeros((bc, self.n_groups, 4), dtype=np.float64)
                 )
                 logger.info("  🖥  launching Steiner kernel...")
                 time0 = time()
@@ -1344,6 +1323,8 @@ class Forest:
                     d_lo,
                     d_stw,
                     dt["tree_to_group_idx"],
+                    d_poly_off,
+                    d_poly_nodes,
                     d_counts_b,
                     d_steiner_b,
                 )
@@ -1381,6 +1362,8 @@ class Forest:
                     d_lo,
                     d_stw,
                     dt["tree_to_group_idx"],
+                    d_poly_off,
+                    d_poly_nodes,
                     d_counts_b,
                 )
                 cuda.synchronize()
@@ -1540,6 +1523,21 @@ class Forest:
             "Group offsets don't sum to total trees"
         )
 
+        # ---- Polytomy CSR arrays ------------------------------------- #
+        # polytomy_offsets[ti+1] - polytomy_offsets[ti] = number of polytomy-
+        # inserted internal nodes in tree ti.  polytomy_nodes holds their
+        # local node IDs.  Both arrays are pre-uploaded to GPU in _upload_to_gpu.
+        poly_sizes = np.array([len(t.polytomy_node_ids) for t in trees], dtype=np.int64)
+        self.polytomy_offsets = np.zeros(NT + 1, dtype=np.int32)
+        self.polytomy_offsets[1:] = np.cumsum(poly_sizes).astype(np.int32)
+        total_poly = int(self.polytomy_offsets[-1])
+        if total_poly > 0:
+            self.polytomy_nodes = np.concatenate(
+                [np.array(t.polytomy_node_ids, dtype=np.int32) for t in trees]
+            )
+        else:
+            self.polytomy_nodes = np.empty(0, dtype=np.int32)
+
     def _log_statistics_method(self) -> None:
         """
         **Private.**  Log collection statistics: taxon counts, memory usage,
@@ -1617,6 +1615,8 @@ class Forest:
         n_quartets: int,
         n_trees: int,
         tree_to_group_idx: np.ndarray,
+        polytomy_offsets: np.ndarray,
+        polytomy_nodes: np.ndarray,
         counts_out: np.ndarray,
         steiner_out: np.ndarray,
     ) -> None:
@@ -1636,15 +1636,16 @@ class Forest:
         n_quartets, n_trees : int
         tree_to_group_idx : int32 (n_trees,)
             Maps each tree index to its group index.
-        counts_out : int32 (n_quartets, n_groups, 3), pre-filled with zeros
+        counts_out : int32 (n_quartets, n_groups, 4), pre-filled with zeros
             Filled in-place.  counts_out[qi, gi, k] = number of trees in
             group gi where quartet qi has topology k.
+            k=3 accumulates unresolved (polytomy) counts.
         steiner_out : float64 array, pre-filled with zeros
             If steiner_out.size == 0 (sentinel: pass np.empty(0)):
                 Steiner calculation is skipped entirely.
-            Otherwise, must have shape (n_quartets, n_groups, 3).
+            Otherwise, must have shape (n_quartets, n_groups, 4).
                 steiner_out[qi, gi, k] = summed Steiner lengths for group gi,
-                topology k, quartet qi.
+                topology k, quartet qi.  k=3 accumulates unresolved Steiner.
 
         Steiner bypass
         --------------
@@ -1682,6 +1683,8 @@ class Forest:
                 occ1 = int(all_first_occ[nb + ln1])
                 occ2 = int(all_first_occ[nb + ln2])
                 occ3 = int(all_first_occ[nb + ln3])
+                poly_start = int(polytomy_offsets[ti])
+                poly_end = int(polytomy_offsets[ti + 1])
                 topo, r0, r1, r2, r_winner = Forest._quartet_topology_and_rd(
                     occ0,
                     occ1,
@@ -1697,6 +1700,9 @@ class Forest:
                     all_euler_depth,
                     all_log2_table,
                     all_euler_tour,
+                    poly_start,
+                    poly_end,
+                    polytomy_nodes,
                 )
 
                 gi = int(tree_to_group_idx[ti])
@@ -1845,6 +1851,9 @@ class Forest:
         all_euler_depth,
         all_log2_table,
         all_euler_tour,
+        poly_start,
+        poly_end,
+        polytomy_nodes,
     ):
         """
         **Private static.**  Six RMQ calls + four-point condition → topology
@@ -1883,36 +1892,43 @@ class Forest:
         ``_quartet_topology_and_rd_cuda``.
         """
 
-        def lca_rd(oa, ob):
+        def lca_id(oa, ob):
             l, r = (oa, ob) if oa <= ob else (ob, oa)
-            return float(
-                all_root_distance[
-                    nb
-                    + Forest._rmq_csr(
-                        l,
-                        r,
-                        sb,
-                        tw,
-                        all_sparse_table,
-                        all_euler_depth,
-                        all_log2_table,
-                        lb,
-                        tb,
-                        all_euler_tour,
-                    )
-                ]
+            return Forest._rmq_csr(
+                l, r, sb, tw, all_sparse_table, all_euler_depth,
+                all_log2_table, lb, tb, all_euler_tour,
             )
 
-        rd01 = lca_rd(occ0, occ1)
-        rd02 = lca_rd(occ0, occ2)
-        rd03 = lca_rd(occ0, occ3)
-        rd12 = lca_rd(occ1, occ2)
-        rd13 = lca_rd(occ1, occ3)
-        rd23 = lca_rd(occ2, occ3)
+        lid01 = lca_id(occ0, occ1)
+        lid02 = lca_id(occ0, occ2)
+        lid03 = lca_id(occ0, occ3)
+        lid12 = lca_id(occ1, occ2)
+        lid13 = lca_id(occ1, occ3)
+        lid23 = lca_id(occ2, occ3)
+
+        rd01 = float(all_root_distance[nb + lid01])
+        rd02 = float(all_root_distance[nb + lid02])
+        rd03 = float(all_root_distance[nb + lid03])
+        rd12 = float(all_root_distance[nb + lid12])
+        rd13 = float(all_root_distance[nb + lid13])
+        rd23 = float(all_root_distance[nb + lid23])
 
         r0 = rd01 + rd23  # topology 0: (n0,n1)|(n2,n3)
         r1 = rd02 + rd13  # topology 1: (n0,n2)|(n1,n3)
         r2 = rd03 + rd12  # topology 2: (n0,n3)|(n1,n2)
+
+        # CSR-based polytomy detection (zero overhead for trees without polytomies).
+        # CSR is the pre-filter; numerical tie r0==r1==r2 confirms an unresolvable
+        # quartet.  A polytomy-inserted node can be an LCA for many resolved
+        # quartets — only the all-equal tie means the quartet truly spans the
+        # polytomy and is unresolvable (k=3).
+        if poly_end > poly_start:
+            for j in range(poly_start, poly_end):
+                pn = int(polytomy_nodes[j])
+                if pn in (lid01, lid02, lid03, lid12, lid13, lid23):
+                    if r0 == r1 and r1 == r2:
+                        return 3, r0, r1, r2, r0
+                    break  # polytomy node is LCA but quartet is resolved; fall through
 
         if r0 >= r1 and r0 >= r2:
             topo = 0

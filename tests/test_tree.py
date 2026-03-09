@@ -976,14 +976,15 @@ class TestMultifurcationResolution:
       star_4leaf.tree            — (A,B,C,D) — star/unresolved topology
     """
 
-    def test_warning_emitted_on_trifurcating_root(self, caplog):
+    def test_no_warning_on_trifurcating_root(self, caplog):
+        """Polytomy resolution is silent at tree level; stats are logged by Forest."""
         import logging
 
         with caplog.at_level(logging.WARNING):
             load_tree("trifurcating_root.tree")
         assert (
             len([r for r in caplog.records if "bifurcating" in r.getMessage().lower()])
-            == 1
+            == 0
         )
 
     def test_no_warning_on_bifurcating_tree(self, caplog):

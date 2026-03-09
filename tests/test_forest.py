@@ -171,24 +171,23 @@ class TestConstruction:
                 basic_namespace[f"max_depth_{i}"]
             )
 
-    def test_multifurcating_tree_gets_warning(self, caplog):
-        """Test that multifurcating trees emit a consolidated WARNING."""
+    def test_multifurcating_tree_logs_polytomy_info(self, caplog):
+        """Test that multifurcating trees emit an INFO-level polytomy stat."""
         import logging
 
         newick = "(A:1,B:1,C:1);"
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.INFO):
             Forest([newick])
-        # Should have exactly one warning about multifurcation
-        multifurcation_warnings = [
+        polytomy_records = [
             r
             for r in caplog.records
-            if r.levelname == "WARNING" and "multifurcation" in r.getMessage().lower()
+            if r.levelname == "INFO" and "polytom" in r.getMessage().lower()
         ]
-        assert len(multifurcation_warnings) == 1
-        assert "1 tree" in multifurcation_warnings[0].getMessage()
+        assert len(polytomy_records) == 1
+        assert "1 of 1" in polytomy_records[0].getMessage()
 
-    def test_multiple_multifurcating_trees_consolidated_warning(self, caplog):
-        """Multiple multifurcating trees produce ONE consolidated warning."""
+    def test_multiple_multifurcating_trees_logs_polytomy_info(self, caplog):
+        """Multiple multifurcating trees produce one consolidated INFO polytomy stat."""
         import logging
 
         newicks = [
@@ -196,17 +195,59 @@ class TestConstruction:
             "((A:1,B:1):1,C:1);",  # bifurcating
             "(X:1,Y:1,Z:1,W:1);",  # multifurcation (4-way)
         ]
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.INFO):
             Forest(newicks)
-        multifurcation_warnings = [
+        polytomy_records = [
             r
             for r in caplog.records
-            if r.levelname == "WARNING" and "multifurcation" in r.getMessage().lower()
+            if r.levelname == "INFO" and "polytom" in r.getMessage().lower()
         ]
-        # Should have exactly ONE warning, not 2
-        assert len(multifurcation_warnings) == 1
-        # Should mention "2 trees"
-        assert "2 trees" in multifurcation_warnings[0].getMessage()
+        assert len(polytomy_records) == 1
+        assert "2 of 3" in polytomy_records[0].getMessage()
+
+    def test_zero_length_branch_warning(self, caplog):
+        """User-provided zero-length branches trigger a WARNING."""
+        import logging
+
+        # Internal zero-length branch: ((A:1,B:1):0,(C:1,D:1):1)
+        newick = "((A:1,B:1):0,(C:1,D:1):1);"
+        with caplog.at_level(logging.WARNING):
+            Forest([newick])
+        zero_warnings = [
+            r
+            for r in caplog.records
+            if r.levelname == "WARNING" and "zero-length" in r.getMessage().lower()
+        ]
+        assert len(zero_warnings) == 1
+        assert "1 of 1" in zero_warnings[0].getMessage()
+
+    def test_no_zero_length_warning_for_clean_tree(self, caplog):
+        """No zero-length warning for trees with all positive branch lengths."""
+        import logging
+
+        newick = "((A:1,B:1):1,(C:1,D:1):1);"
+        with caplog.at_level(logging.WARNING):
+            Forest([newick])
+        zero_warnings = [
+            r
+            for r in caplog.records
+            if r.levelname == "WARNING" and "zero-length" in r.getMessage().lower()
+        ]
+        assert len(zero_warnings) == 0
+
+    def test_no_zero_length_warning_for_polytomy(self, caplog):
+        """Polytomy-inserted zero-length branches do NOT trigger the warning."""
+        import logging
+
+        newick = "(A:1,B:1,C:1);"  # trifurcation → quarimo inserts a zero-length branch
+        with caplog.at_level(logging.WARNING):
+            Forest([newick])
+        zero_warnings = [
+            r
+            for r in caplog.records
+            if r.levelname == "WARNING" and "zero-length" in r.getMessage().lower()
+        ]
+        assert len(zero_warnings) == 0
 
     def test_single_tree_collection(self):
         c = Forest(["((A:1,B:1):1,(C:1,D:1):1);"])
@@ -864,7 +905,7 @@ class TestQuartetTopology:
             Quartets.from_list(basic_collection, [("A", "B", "C", "D")])
         )
         assert isinstance(result, QuartetTopologyResult)
-        assert result.counts.shape == (1, 1, 3)
+        assert result.counts.shape == (1, 1, 4)
         assert result.counts.dtype == np.int32
 
     def test_bulk_counts_shape_and_dtype(self, mixed_collection):
@@ -872,7 +913,7 @@ class TestQuartetTopology:
             Quartets.from_list(mixed_collection, self.BULK_QUARTETS)
         )
         assert isinstance(result, QuartetTopologyResult)
-        assert result.counts.shape == (3, 1, 3)
+        assert result.counts.shape == (3, 1, 4)
         assert result.counts.dtype == np.int32
 
     def test_steiner_returns_result(self, mixed_collection):
@@ -886,14 +927,14 @@ class TestQuartetTopology:
         result = mixed_collection.quartet_topology(
             Quartets.from_list(mixed_collection, self.BULK_QUARTETS), steiner=True
         )
-        assert result.counts.shape == (3, 1, 3)
+        assert result.counts.shape == (3, 1, 4)
         assert result.counts.dtype == np.int32
 
     def test_steiner_distances_shape_and_dtype(self, mixed_collection):
         result = mixed_collection.quartet_topology(
             Quartets.from_list(mixed_collection, self.BULK_QUARTETS), steiner=True
         )
-        assert result.steiner.shape == (3, 1, 3)
+        assert result.steiner.shape == (3, 1, 4)
         assert result.steiner.dtype == np.float64
 
     def test_single_quartet_steiner_shapes(self, basic_collection):
@@ -901,8 +942,8 @@ class TestQuartetTopology:
             Quartets.from_list(basic_collection, [("A", "B", "C", "D")]),
             steiner=True,
         )
-        assert result.counts.shape == (1, 1, 3)
-        assert result.steiner.shape == (1, 1, 3)
+        assert result.counts.shape == (1, 1, 4)
+        assert result.steiner.shape == (1, 1, 4)
 
     # ── steiner=False correctness ────────────────────────────────────────── #
 
@@ -928,6 +969,38 @@ class TestQuartetTopology:
         assert result.counts[0, 0, 0] == 2
         assert result.counts[0, 0, 1] == 2
         assert result.counts[0, 0, 2] == 1
+
+    def test_polytomy_topology_k3(self):
+        """Star polytomy (A,B,C,D) is binarized with zero-length internals → k=3."""
+        c = Forest(["(A:1,B:1,C:1,D:1);"])  # star tree — one polytomy
+        result = c.quartet_topology(Quartets.from_list(c, [("A", "B", "C", "D")]))
+        # The star tree resolves to a zero-internal-branch binarization → k=3
+        assert result.counts[0, 0, 3] == 1, (
+            f"Expected unresolved count 1, got counts={result.counts[0, 0]}"
+        )
+        assert result.counts[0, 0, :3].sum() == 0
+
+    def test_polytomy_steiner_k3(self):
+        """Star polytomy has Steiner sum accumulated in k=3 slot."""
+        c = Forest(["(A:1,B:1,C:1,D:1);"])
+        result = c.quartet_topology(
+            Quartets.from_list(c, [("A", "B", "C", "D")]), steiner=True
+        )
+        assert result.steiner[0, 0, 3] > 0.0
+        assert result.steiner[0, 0, :3].sum() == 0.0
+
+    def test_polytomy_mixed_trees(self):
+        """Mix of resolved and polytomous trees: k=0,1,2 plus k=3 accumulate correctly."""
+        c = Forest([
+            "((A:1,B:1):1,(C:1,D:1):1);",  # topo 0 (resolved)
+            "(A:1,B:1,C:1,D:1);",           # topo 3 (polytomy)
+            "((A:1,C:1):1,(B:1,D:1):1);",  # topo 1 (resolved)
+        ])
+        result = c.quartet_topology(Quartets.from_list(c, [("A", "B", "C", "D")]))
+        assert result.counts[0, 0, 0] == 1
+        assert result.counts[0, 0, 1] == 1
+        assert result.counts[0, 0, 2] == 0
+        assert result.counts[0, 0, 3] == 1
 
     def test_absent_taxon_excluded(self):
         c = Forest(
@@ -974,7 +1047,7 @@ class TestQuartetTopology:
             frozenset({frozenset({n0, n2}), frozenset({n1, n3})}): 1,
             frozenset({frozenset({n0, n3}), frozenset({n1, n2})}): 2,
         }
-        individual = np.zeros(3, dtype=np.int32)
+        individual = np.zeros(4, dtype=np.int32)  # 4 slots: k=0,1,2 resolved + k=3 unresolved
         for tree in basic_collection._trees:
             if tree._name_index is None:
                 tree._build_name_index()
@@ -1070,9 +1143,9 @@ class TestQuartetTopology:
         result = c.quartet_topology(
             Quartets.from_list(c, [("A", "B", "C", "D")]), steiner=True
         )
-        # steiner shape (1, 1, 3): 1 quartet, 1 group, 3 topologies
+        # steiner shape (1, 1, 4): 1 quartet, 1 group, 4 topologies (k=0,1,2 resolved + k=3 unresolved)
         # Each topology has exactly one tree voting for it → all slots non-zero
-        assert result.steiner.shape == (1, 1, 3)
+        assert result.steiner.shape == (1, 1, 4)
         assert result.counts[0, 0, 0] == 1
         assert result.counts[0, 0, 1] == 1
         assert result.counts[0, 0, 2] == 1
@@ -1169,14 +1242,14 @@ class TestQuartetTopology:
             Quartets.from_list(mixed_collection, [("A", "B", "C", "D")]),
             steiner=True,
         )
-        # result.steiner.shape == (1, 1, 3): 1 quartet, 1 group, 3 topologies
+        # result.steiner.shape == (1, 1, 4): 1 quartet, 1 group, 4 topologies
         n0, n1, n2, n3 = "A", "B", "C", "D"
         topo_map = {
             frozenset({frozenset({n0, n1}), frozenset({n2, n3})}): 0,
             frozenset({frozenset({n0, n2}), frozenset({n1, n3})}): 1,
             frozenset({frozenset({n0, n3}), frozenset({n1, n2})}): 2,
         }
-        expected_sums = np.zeros(3, dtype=np.float64)
+        expected_sums = np.zeros(4, dtype=np.float64)  # k=0,1,2 resolved + k=3 unresolved
         for tree in mixed_collection._trees:
             if tree._name_index is None:
                 tree._build_name_index()
@@ -1250,7 +1323,7 @@ class TestQuartetTopology:
         result = mixed_collection.quartet_topology(
             Quartets.from_list(mixed_collection, list(gen()))
         )
-        assert result.counts.shape == (2, 1, 3)
+        assert result.counts.shape == (2, 1, 4)
 
     def test_empty_list_raises(self, mixed_collection):
         """Quartets.from_list with an empty list raises ValueError (count must be positive)."""

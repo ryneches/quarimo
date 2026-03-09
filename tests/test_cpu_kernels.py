@@ -96,8 +96,8 @@ class TestQuartetCountsKernel:
         import inspect
         sig = inspect.signature(_quartet_counts_njit)
         params = list(sig.parameters.keys())
-        # 16 CSR/metadata params + tree_to_group_idx + counts_out = 17
-        assert len(params) == 17
+        # 16 CSR/metadata params + tree_to_group_idx + polytomy_offsets + polytomy_nodes + counts_out = 19
+        assert len(params) == 19
 
 
 class TestQuartetSteinerKernel:
@@ -118,7 +118,7 @@ class TestQuartetSteinerKernel:
         steiner_params = len(inspect.signature(_quartet_steiner_njit).parameters)
         # Steiner kernel should have one extra parameter (steiner_out)
         assert steiner_params == counts_params + 1
-        assert steiner_params == 18
+        assert steiner_params == 20
 
 
 class TestNumbaIntegration:

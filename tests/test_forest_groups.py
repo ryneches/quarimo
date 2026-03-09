@@ -223,7 +223,7 @@ class TestGroupedQuartetTopology:
     """Tests for per-group quartet topology output."""
 
     def test_counts_shape(self):
-        """counts.shape == (n_quartets, n_groups, 3) for a 2-group forest."""
+        """counts.shape == (n_quartets, n_groups, 4) for a 2-group forest."""
         groups = {
             "A": [
                 "((a:1,b:1):1,(c:1,d:1):1);",
@@ -236,7 +236,7 @@ class TestGroupedQuartetTopology:
         c = Forest(groups)
         quartets = [("a", "b", "c", "d")]
         result = c.quartet_topology(Quartets.from_list(c, quartets))
-        assert result.counts.shape == (1, 2, 3)
+        assert result.counts.shape == (1, 2, 4)
         assert result.counts.dtype == np.int32
 
     def test_per_group_counts_correct(self):
@@ -276,7 +276,7 @@ class TestGroupedQuartetTopology:
         assert int(result.counts[0].sum()) == 3  # 3 trees total, all have a,b,c,d
 
     def test_steiner_shape(self):
-        """steiner.shape == (n_quartets, n_groups, 3)."""
+        """steiner.shape == (n_quartets, n_groups, 4)."""
         groups = {
             "A": ["((a:1,b:1):1,(c:1,d:1):1);"],
             "B": ["((a:1,c:1):1,(b:1,d:1):1);"],
@@ -285,8 +285,8 @@ class TestGroupedQuartetTopology:
         result = c.quartet_topology(
             Quartets.from_list(c, [("a", "b", "c", "d")]), steiner=True
         )
-        assert result.counts.shape == (1, 2, 3)
-        assert result.steiner.shape == (1, 2, 3)
+        assert result.counts.shape == (1, 2, 4)
+        assert result.steiner.shape == (1, 2, 4)
         assert result.steiner.dtype == np.float64
 
     def test_steiner_values_correct(self):
@@ -314,7 +314,7 @@ class TestGroupedQuartetTopology:
         assert result.steiner[0, 1, 2] == 0.0
 
     def test_counts_only_works_without_steiner(self):
-        """counts-only mode returns shape (n_quartets, n_groups, 3)."""
+        """counts-only mode returns shape (n_quartets, n_groups, 4)."""
         groups = {
             "A": ["((a:1,b:1):1,(c:1,d:1):1);"],
             "B": ["((a:1,c:1):1,(b:1,d:1):1);"],
@@ -323,7 +323,7 @@ class TestGroupedQuartetTopology:
         result = c.quartet_topology(
             Quartets.from_list(c, [("a", "b", "c", "d")]), steiner=False
         )
-        assert result.counts.shape == (1, 2, 3)
+        assert result.counts.shape == (1, 2, 4)
         assert isinstance(result, QuartetTopologyResult)
 
 
@@ -347,7 +347,7 @@ class TestBackwardCompatibility:
 
         # Functionality via new Quartets interface
         result = c.quartet_topology(Quartets.from_list(c, [("A", "B", "C", "D")]))
-        assert result.counts.shape == (1, 1, 3)
+        assert result.counts.shape == (1, 1, 4)
 
     def test_quartet_topology_unchanged(self):
         """Test that quartet_topology works correctly via Quartets.from_list."""
@@ -356,15 +356,15 @@ class TestBackwardCompatibility:
 
         # Counts-only mode
         result = c.quartet_topology(Quartets.from_list(c, [("A", "B", "C", "D")]))
-        assert result.counts.shape == (1, 1, 3)
+        assert result.counts.shape == (1, 1, 4)
         assert result.counts.sum() == 3  # All 3 trees
 
         # Steiner mode
         result_s = c.quartet_topology(
             Quartets.from_list(c, [("A", "B", "C", "D")]), steiner=True
         )
-        assert result_s.counts.shape == (1, 1, 3)
-        assert result_s.steiner.shape == (1, 1, 3)
+        assert result_s.counts.shape == (1, 1, 4)
+        assert result_s.steiner.shape == (1, 1, 4)
 
 
 class TestQuartetQED:
@@ -593,8 +593,8 @@ class TestQuartetQED:
         assert "group" in joined.columns
         assert "topology" in joined.columns
         assert "count" in joined.columns
-        # 1 QED row × (n_groups=2 × n_topologies=3) topology rows = 6
-        assert joined.shape[0] == qed_df.shape[0] * forest.n_groups * 3
+        # 1 QED row × (n_groups=2 × n_topologies=4) topology rows = 8
+        assert joined.shape[0] == qed_df.shape[0] * forest.n_groups * 4
 
     def test_to_frame_wide_join_on_quartet_idx(self, two_group_forest):
         """Wide QED and wide topology join 1-to-1 on quartet_idx."""

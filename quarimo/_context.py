@@ -86,15 +86,15 @@ def suppress_logger(logger_name: str, level: int = logging.CRITICAL):
 @contextmanager
 def quiet(level: int = logging.CRITICAL):
     """
-    Temporarily suppress all forest logging.
+    Temporarily suppress all quarimo logging.
 
-    Convenience wrapper for suppressing both 'tree' and
-    'forest' loggers simultaneously.
+    Suppresses the ``quarimo`` parent logger, which covers all child loggers
+    (``quarimo._forest``, ``quarimo._tree``, ``quarimo._logging``, etc.).
 
     Parameters
     ----------
     level : int, default logging.CRITICAL
-        Temporary logging level for both loggers.
+        Temporary logging level.
 
     Yields
     ------
@@ -116,19 +116,14 @@ def quiet(level: int = logging.CRITICAL):
     ...     with use_backend('cpu-parallel'):
     ...         counts = c.quartet_topology(quartets)
     """
-    tree_logger = logging.getLogger("tree")
-    forest_logger = logging.getLogger("forest")
-
-    original_tree_level = tree_logger.level
-    original_forest_level = forest_logger.level
+    quarimo_logger = logging.getLogger("quarimo")
+    original_level = quarimo_logger.level
 
     try:
-        tree_logger.setLevel(level)
-        forest_logger.setLevel(level)
+        quarimo_logger.setLevel(level)
         yield
     finally:
-        tree_logger.setLevel(original_tree_level)
-        forest_logger.setLevel(original_forest_level)
+        quarimo_logger.setLevel(original_level)
 
 
 # ============================================================================ #
@@ -355,5 +350,4 @@ def silent_benchmark(backend: str = "best"):
     """
     with quiet():
         with use_backend(backend):
-            with suppress_warnings():
-                yield
+            yield

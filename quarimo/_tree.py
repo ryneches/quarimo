@@ -464,16 +464,6 @@ class Tree:
         n_leaves = n_commas + 1
 
         if n_parens < n_commas:
-            import logging
-
-            logger = logging.getLogger(__name__)
-            n_extra = n_commas - n_parens
-            logger.warning(
-                f"Input tree is not strictly bifurcating: {n_parens} internal "
-                f"nodes for {n_leaves} leaves (expected {n_commas}). "
-                f"{n_extra} multifurcation(s) will be resolved into zero-length "
-                f"bifurcations. The order of splitting is arbitrary."
-            )
             s = Tree._resolve_multifurcations(s[:n_chars])
             n_chars = len(s)
             if n_chars > 0 and s[n_chars - 1] == ";":
@@ -625,6 +615,25 @@ class Tree:
 
             stack_top += 1
             stack_node[stack_top] = node_id
+
+        # Identify polytomy-inserted internal nodes.  _resolve_multifurcations
+        # marks them with sentinel distance :nan.  Scan internal nodes (indices
+        # n_leaves .. n_nodes-2, i.e. non-root internals) to collect them, then
+        # reset to 0.0 so that root_distance in _build_lca_structures is clean.
+        polytomy_ids = []
+        for _i in range(n_leaves, n_nodes - 1):
+            if np.isnan(distance[_i]):
+                polytomy_ids.append(_i)
+                distance[_i] = 0.0
+        self.polytomy_node_ids: list = polytomy_ids
+
+        # Detect user-provided zero-length branches (not our polytomy sentinels).
+        # Scan all non-root nodes; polytomy-inserted sentinels were just reset
+        # from NaN and are excluded via the polytomy set.
+        _poly_set = set(polytomy_ids)
+        self.n_zero_length_branches: int = sum(
+            1 for _i in range(n_nodes - 1) if distance[_i] == 0.0 and _i not in _poly_set
+        )
 
         self.names = names
         self.parent = parent
@@ -879,7 +888,7 @@ class Tree:
                 while len(children) > 2:
                     left = children.pop(0)
                     right = children.pop(0)
-                    children.insert(0, f"({left},{right}):0.0")
+                    children.insert(0, f"({left},{right}):nan")
 
                 node_str = "(" + ",".join(children) + ")"
                 i += 1
@@ -934,7 +943,7 @@ class Tree:
         while len(root_children) > 2:
             left = root_children.pop(0)
             right = root_children.pop(0)
-            root_children.insert(0, f"({left},{right}):0.0")
+            root_children.insert(0, f"({left},{right}):nan")
         return "(" + ",".join(root_children) + ");"
 
     @staticmethod
