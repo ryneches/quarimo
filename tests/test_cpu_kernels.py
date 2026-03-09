@@ -111,14 +111,14 @@ class TestQuartetSteinerKernel:
         """Test that Steiner kernel has expected name."""
         assert _quartet_steiner_njit.__name__ == '_quartet_steiner_njit'
     
-    def test_steiner_has_one_more_param_than_counts(self):
-        """Test that Steiner kernel has steiner_out parameter."""
+    def test_steiner_has_three_more_params_than_counts(self):
+        """Test that Steiner kernel has steiner_out, steiner_min_out, steiner_max_out parameters."""
         import inspect
         counts_params = len(inspect.signature(_quartet_counts_njit).parameters)
         steiner_params = len(inspect.signature(_quartet_steiner_njit).parameters)
-        # Steiner kernel should have one extra parameter (steiner_out)
-        assert steiner_params == counts_params + 1
-        assert steiner_params == 20
+        # Steiner kernel has 3 extra output parameters: steiner_out, steiner_min_out, steiner_max_out
+        assert steiner_params == counts_params + 3
+        assert steiner_params == 22
 
 
 class TestNumbaIntegration:

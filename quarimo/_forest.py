@@ -901,11 +901,12 @@ class Forest:
 
         n_quartets = len(quartets)
         if n_quartets == 0:
+            empty = (0, self.n_groups, 4)
             return QuartetTopologyResult(
-                counts=np.zeros((0, self.n_groups, 4), dtype=np.int32),
-                steiner=np.zeros((0, self.n_groups, 4), dtype=np.float64)
-                if steiner
-                else None,
+                counts=np.zeros(empty, dtype=np.int32),
+                steiner=np.zeros(empty, dtype=np.float64) if steiner else None,
+                steiner_min=np.full(empty, np.inf, dtype=np.float64) if steiner else None,
+                steiner_max=np.full(empty, -np.inf, dtype=np.float64) if steiner else None,
                 groups=self.unique_groups,
                 quartets=quartets,
                 global_names=self.global_names,
@@ -930,10 +931,12 @@ class Forest:
 
         # ── 3. Dispatch to backend ────────────────────────────────────────
         steiner_out = None
+        steiner_min_out = None
+        steiner_max_out = None
 
         if resolved_backend == "cuda":
-            counts_out, steiner_out = self._quartet_topology_cuda_unified(
-                quartets, steiner
+            counts_out, steiner_out, steiner_min_out, steiner_max_out = (
+                self._quartet_topology_cuda_unified(quartets, steiner)
             )
 
         else:
@@ -944,6 +947,12 @@ class Forest:
 
             counts_out = np.zeros((n_quartets, self.n_groups, 4), dtype=np.int32)
 
+            if steiner:
+                shape = (n_quartets, self.n_groups, 4)
+                steiner_out = np.zeros(shape, dtype=np.float64)
+                steiner_min_out = np.full(shape, np.inf, dtype=np.float64)
+                steiner_max_out = np.full(shape, -np.inf, dtype=np.float64)
+
             if resolved_backend == "cpu-parallel":
                 kernel_key = f"cpu-parallel-{'steiner' if steiner else 'counts'}"
                 if _kernel_first_call.get(kernel_key, False):
@@ -953,22 +962,25 @@ class Forest:
                     _kernel_first_call[kernel_key] = False
 
                 if steiner:
-                    steiner_out = np.zeros(
-                        (n_quartets, self.n_groups, 4), dtype=np.float64
+                    _quartet_steiner_njit(
+                        *common_args, counts_out,
+                        steiner_out, steiner_min_out, steiner_max_out,
                     )
-                    _quartet_steiner_njit(*common_args, counts_out, steiner_out)
                 else:
                     _quartet_counts_njit(*common_args, counts_out)
 
             elif resolved_backend == "python":
                 if steiner:
-                    steiner_out = np.zeros(
-                        (n_quartets, self.n_groups, 4), dtype=np.float64
-                    )
                     steiner_arg = steiner_out
+                    smin_arg = steiner_min_out
+                    smax_arg = steiner_max_out
                 else:
                     steiner_arg = np.empty(0, dtype=np.float64)  # counts-only sentinel
-                Forest._quartet_kernel(*common_args, counts_out, steiner_arg)
+                    smin_arg = np.empty(0, dtype=np.float64)
+                    smax_arg = np.empty(0, dtype=np.float64)
+                Forest._quartet_kernel(
+                    *common_args, counts_out, steiner_arg, smin_arg, smax_arg,
+                )
 
             else:
                 # This should never be reached due to validation above
@@ -980,6 +992,8 @@ class Forest:
         return QuartetTopologyResult(
             counts=counts_out,
             steiner=steiner_out,
+            steiner_min=steiner_min_out,
+            steiner_max=steiner_max_out,
             groups=self.unique_groups,
             quartets=quartets,
             global_names=self.global_names,
@@ -1127,8 +1141,8 @@ class Forest:
         # counts: n_groups × 4 × int32 per quartet
         bpq = self.n_groups * 4 * 4
         if steiner:
-            # steiner_out: n_groups × 4 × float64 per quartet
-            bpq += self.n_groups * 4 * 8
+            # steiner_out + steiner_min_out + steiner_max_out: 3 × n_groups × 4 × float64
+            bpq += 3 * self.n_groups * 4 * 8
         return bpq
 
     def _cuda_batch_size(self, steiner: bool) -> int:
@@ -1169,8 +1183,10 @@ class Forest:
 
         Returns
         -------
-        counts : ndarray, shape (n_quartets, 3)
-        steiner_distances : ndarray, shape (n_quartets, n_trees, 3)  [steiner only]
+        counts : ndarray, int32, shape (n_quartets, n_groups, 4)
+        steiner : ndarray or None, float64, shape (n_quartets, n_groups, 4)
+        steiner_min : ndarray or None, float64, shape (n_quartets, n_groups, 4)
+        steiner_max : ndarray or None, float64, shape (n_quartets, n_groups, 4)
         """
         from quarimo._cuda_kernels import (
             _compute_cuda_grid,
@@ -1216,10 +1232,15 @@ class Forest:
         )
 
         # ── Host accumulation arrays ───────────────────────────────────────
-        counts_out = np.zeros((n_quartets, self.n_groups, 4), dtype=np.int32)
+        shape = (n_quartets, self.n_groups, 4)
+        counts_out = np.zeros(shape, dtype=np.int32)
         steiner_out: Optional[np.ndarray] = None
+        steiner_min_out: Optional[np.ndarray] = None
+        steiner_max_out: Optional[np.ndarray] = None
         if steiner:
-            steiner_out = np.zeros((n_quartets, self.n_groups, 4), dtype=np.float64)
+            steiner_out = np.zeros(shape, dtype=np.float64)
+            steiner_min_out = np.full(shape, np.inf, dtype=np.float64)
+            steiner_max_out = np.full(shape, -np.inf, dtype=np.float64)
 
         # ── Batched kernel dispatch ────────────────────────────────────────
         q_args = QuartetKernelArgs.from_quartets(quartets)
@@ -1276,16 +1297,22 @@ class Forest:
             )
 
             if steiner:
-                # Must use cuda.to_device(np.zeros(...)) — atomic accumulation
-                # requires zero-initialised device arrays.
+                # Pre-initialise steiner_min to +inf, steiner_max to -inf so that
+                # cuda.atomic.min / cuda.atomic.max work correctly.
                 d_steiner_b = cuda.to_device(
                     np.zeros((bc, self.n_groups, 4), dtype=np.float64)
+                )
+                d_steiner_min_b = cuda.to_device(
+                    np.full((bc, self.n_groups, 4), np.inf, dtype=np.float64)
+                )
+                d_steiner_max_b = cuda.to_device(
+                    np.full((bc, self.n_groups, 4), -np.inf, dtype=np.float64)
                 )
                 logger.info("  🖥  launching Steiner kernel...")
                 time0 = time()
                 quartet_steiner_cuda_unified[blocks, tpb](
                     *batch_args, d_fkd.n_global_taxa, *d_forest_args,
-                    d_counts_b, d_steiner_b,
+                    d_counts_b, d_steiner_b, d_steiner_min_b, d_steiner_max_b,
                 )
                 cuda.synchronize()
                 time1 = time()
@@ -1297,7 +1324,9 @@ class Forest:
                 # slice — one GPU→CPU transfer, no temporary array, no extra CPU memcpy.
                 d_counts_b.copy_to_host(ary=counts_out[bs : bs + bc])
                 d_steiner_b.copy_to_host(ary=steiner_out[bs : bs + bc])
-                del d_steiner_b
+                d_steiner_min_b.copy_to_host(ary=steiner_min_out[bs : bs + bc])
+                d_steiner_max_b.copy_to_host(ary=steiner_max_out[bs : bs + bc])
+                del d_steiner_b, d_steiner_min_b, d_steiner_max_b
             else:
                 logger.info("  🖥  launching counts kernel...")
                 time0 = time()
@@ -1317,13 +1346,12 @@ class Forest:
                 del d_quartet_batch
             del d_counts_b
 
+        total_bytes = counts_out.nbytes
         if steiner_out is not None:
-            total_bytes = counts_out.nbytes + steiner_out.nbytes
-        else:
-            total_bytes = counts_out.nbytes
+            total_bytes += steiner_out.nbytes + steiner_min_out.nbytes + steiner_max_out.nbytes
         logger.info("  D→H total: %.2f MB", total_bytes / (1024**2))
 
-        return counts_out, steiner_out
+        return counts_out, steiner_out, steiner_min_out, steiner_max_out
 
     # ================================================================== #
     # Private instance methods                                             #
@@ -1558,6 +1586,8 @@ class Forest:
         polytomy_nodes: np.ndarray,
         counts_out: np.ndarray,
         steiner_out: np.ndarray,
+        steiner_min_out: np.ndarray,
+        steiner_max_out: np.ndarray,
     ) -> None:
         """
         **Private static.**  Unified bulk quartet kernel.
@@ -1576,22 +1606,25 @@ class Forest:
         tree_to_group_idx : int32 (n_trees,)
             Maps each tree index to its group index.
         counts_out : int32 (n_quartets, n_groups, 4), pre-filled with zeros
-            Filled in-place.  counts_out[qi, gi, k] = number of trees in
-            group gi where quartet qi has topology k.
-            k=3 accumulates unresolved (polytomy) counts.
+            counts_out[qi, gi, k] = number of trees in group gi where quartet
+            qi has topology k.  k=3 accumulates unresolved (polytomy) counts.
         steiner_out : float64 array, pre-filled with zeros
             If steiner_out.size == 0 (sentinel: pass np.empty(0)):
                 Steiner calculation is skipped entirely.
-            Otherwise, must have shape (n_quartets, n_groups, 4).
-                steiner_out[qi, gi, k] = summed Steiner lengths for group gi,
-                topology k, quartet qi.  k=3 accumulates unresolved Steiner.
+            Otherwise, shape (n_quartets, n_groups, 4).
+                steiner_out[qi, gi, k] = summed Steiner lengths.
+        steiner_min_out : float64 (n_quartets, n_groups, 4), pre-filled +inf
+            Per-cell minimum Steiner length.  Meaningful only when
+            steiner_out.size > 0.
+        steiner_max_out : float64 (n_quartets, n_groups, 4), pre-filled -inf
+            Per-cell maximum Steiner length.  Meaningful only when
+            steiner_out.size > 0.
 
         Steiner bypass
         --------------
         The sentinel ``steiner_out = np.empty(0, dtype=np.float64)`` signals
-        counts-only mode.  The Steiner block is skipped with a single
-        ``if steiner_out.size > 0`` guard; no branching overhead in the
-        topology core.
+        counts-only mode.  All Steiner updates are skipped with a single
+        ``if compute_steiner`` guard; no branching overhead in the topology core.
         """
         compute_steiner = steiner_out.size > 0
 
@@ -1648,18 +1681,14 @@ class Forest:
                 counts_out[qi, gi, topo] += 1
 
                 if compute_steiner:
-                    steiner_out[qi, gi, topo] += Forest._steiner_length(
-                        ln0,
-                        ln1,
-                        ln2,
-                        ln3,
-                        nb,
-                        r0,
-                        r1,
-                        r2,
-                        r_winner,
-                        all_root_distance,
+                    sl = Forest._steiner_length(
+                        ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance,
                     )
+                    steiner_out[qi, gi, topo] += sl
+                    if sl < steiner_min_out[qi, gi, topo]:
+                        steiner_min_out[qi, gi, topo] = sl
+                    if sl > steiner_max_out[qi, gi, topo]:
+                        steiner_max_out[qi, gi, topo] = sl
 
     @staticmethod
     def _qed_kernel(

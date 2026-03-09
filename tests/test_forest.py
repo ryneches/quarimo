@@ -1159,22 +1159,140 @@ class TestQuartetTopology:
         )
         assert np.all(result.steiner >= 0.0)
 
-    def test_steiner_column_sum_over_count_gives_mean(self):
-        """dists[qi, gi, k] / counts[qi, gi, k] == mean Steiner for topo k."""
-        c = Forest(
+    @pytest.fixture
+    def steiner_stats_forest(self):
+        """
+        Three-tree forest designed for testing Steiner distance statistics.
+
+        Trees and their quartet (A,B,C,D) contributions:
+
+          tree 0: ((A:1,B:1):1,(C:1,D:1):1)  → topo 0, S=6
+          tree 1: ((A:2,B:2):2,(C:2,D:2):2)  → topo 0, S=12
+          tree 2: ((A:1,C:1):1,(B:1,D:1):1)  → topo 1, S=6
+
+        Expected for quartet (A,B,C,D):
+          topo 0: count=2, sum=18, mean=9, min=6,  max=12
+          topo 1: count=1, sum=6,  mean=6, min=6,  max=6
+          topo 2: count=0, sum=0,  min=inf, max=-inf
+          topo 3: count=0 (no polytomies)
+
+        Steiner length formula for balanced equal-weight trees:
+          S = leaf_sum - (r_winner + r0 + r1 + r2) / 2
+          tree 0: (2+2+2+2) - (2+2+0+0)/2 = 8 - 2 = 6
+          tree 1: (4+4+4+4) - (4+4+0+0)/2 = 16 - 4 = 12
+          tree 2: (2+2+2+2) - (2+2+0+0)/2 = 8 - 2 = 6  (topo 1 wins)
+        """
+        return Forest(
             [
                 "((A:1,B:1):1,(C:1,D:1):1);",  # topo 0, S=6
                 "((A:2,B:2):2,(C:2,D:2):2);",  # topo 0, S=12
                 "((A:1,C:1):1,(B:1,D:1):1);",  # topo 1, S=6
             ]
         )
-        result = c.quartet_topology(
-            Quartets.from_list(c, [("A", "B", "C", "D")]), steiner=True
+
+    def test_steiner_column_sum_over_count_gives_mean(self, steiner_stats_forest):
+        """dists[qi, gi, k] / counts[qi, gi, k] == mean Steiner for topo k."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
         )
         # steiner[0, 0, 0] = sum of Steiner for topo 0 = 6+12=18, counts=2, mean=9
         # steiner[0, 0, 1] = Steiner for topo 1 = 6, counts=1, mean=6
         np.testing.assert_allclose(result.steiner[0, 0, 0] / result.counts[0, 0, 0], 9.0, rtol=1e-10)
         np.testing.assert_allclose(result.steiner[0, 0, 1] / result.counts[0, 0, 1], 6.0, rtol=1e-10)
+
+    # ── steiner min/max statistics ───────────────────────────────────────── #
+
+    def test_steiner_min_max_present_when_steiner_true(self, steiner_stats_forest):
+        """steiner_min and steiner_max are not None when steiner=True."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        assert result.steiner_min is not None
+        assert result.steiner_max is not None
+
+    def test_steiner_min_max_none_when_steiner_false(self, steiner_stats_forest):
+        """steiner_min and steiner_max are None when steiner=False."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")])
+        )
+        assert result.steiner_min is None
+        assert result.steiner_max is None
+
+    def test_steiner_min_max_shape_and_dtype(self, steiner_stats_forest):
+        """steiner_min and steiner_max have the same shape and dtype as steiner."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        assert result.steiner_min.shape == result.steiner.shape == (1, 1, 4)
+        assert result.steiner_max.shape == result.steiner.shape == (1, 1, 4)
+        assert result.steiner_min.dtype == np.float64
+        assert result.steiner_max.dtype == np.float64
+
+    def test_steiner_min_topo0_is_smaller_tree(self, steiner_stats_forest):
+        """topo 0 min is 6 (tree 0, branch-length-1), not 12 (tree 1, branch-length-2)."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        np.testing.assert_allclose(result.steiner_min[0, 0, 0], 6.0, rtol=1e-10)
+
+    def test_steiner_max_topo0_is_larger_tree(self, steiner_stats_forest):
+        """topo 0 max is 12 (tree 1, branch-length-2), not 6 (tree 0, branch-length-1)."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        np.testing.assert_allclose(result.steiner_max[0, 0, 0], 12.0, rtol=1e-10)
+
+    def test_steiner_min_equals_max_for_single_tree_topo(self, steiner_stats_forest):
+        """When only one tree votes for a topology, min == max == that Steiner value."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        # topo 1 has exactly one contributing tree (S=6)
+        np.testing.assert_allclose(result.steiner_min[0, 0, 1], 6.0, rtol=1e-10)
+        np.testing.assert_allclose(result.steiner_max[0, 0, 1], 6.0, rtol=1e-10)
+        assert result.steiner_min[0, 0, 1] == result.steiner_max[0, 0, 1]
+
+    def test_steiner_min_max_sentinels_for_zero_count_topo(self, steiner_stats_forest):
+        """Topologies with no contributing trees keep their sentinel values: min=inf, max=-inf."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        # topo 2 and topo 3 have zero contributing trees
+        for k in (2, 3):
+            assert result.counts[0, 0, k] == 0
+            assert np.isinf(result.steiner_min[0, 0, k]) and result.steiner_min[0, 0, k] > 0
+            assert np.isinf(result.steiner_max[0, 0, k]) and result.steiner_max[0, 0, k] < 0
+
+    def test_steiner_min_le_mean_le_max(self, steiner_stats_forest):
+        """min ≤ mean ≤ max for all topologies with at least one contributing tree."""
+        result = steiner_stats_forest.quartet_topology(
+            Quartets.from_list(steiner_stats_forest, [("A", "B", "C", "D")]),
+            steiner=True,
+        )
+        for k in range(4):
+            count = result.counts[0, 0, k]
+            if count == 0:
+                continue
+            mean = result.steiner[0, 0, k] / count
+            assert result.steiner_min[0, 0, k] <= mean + 1e-12
+            assert result.steiner_max[0, 0, k] >= mean - 1e-12
+
+    def test_steiner_min_le_sum_per_count(self, mixed_collection):
+        """min ≤ mean ≤ max holds across all quartets and topologies in mixed_collection."""
+        result = mixed_collection.quartet_topology(
+            Quartets.from_list(mixed_collection, self.BULK_QUARTETS), steiner=True
+        )
+        mask = result.counts > 0
+        mean = np.where(mask, result.steiner / np.where(mask, result.counts, 1), 0.0)
+        assert np.all(result.steiner_min[mask] <= mean[mask] + 1e-12)
+        assert np.all(result.steiner_max[mask] >= mean[mask] - 1e-12)
 
     def test_steiner_values_match_phylotree_balanced_equal(self):
         nwk = "((A:1,B:1):1,(C:1,D:1):1);"

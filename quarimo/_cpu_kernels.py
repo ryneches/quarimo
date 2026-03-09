@@ -403,7 +403,9 @@ def _quartet_steiner_njit(
         polytomy_offsets,
         polytomy_nodes,
         counts_out,
-        steiner_out):
+        steiner_out,
+        steiner_min_out,
+        steiner_max_out):
     """
     Numba-compiled quartet kernel with Steiner distances.
 
@@ -421,6 +423,14 @@ def _quartet_steiner_njit(
     steiner_out : float64[n_quartets, n_groups, 4]
         Output array for summed Steiner distances per group per topology.
         Last axis: k=0,1,2 resolved topologies; k=3 unresolved (polytomy).
+
+    steiner_min_out : float64[n_quartets, n_groups, 4]
+        Output array for per-cell minimum Steiner distance.
+        Pre-filled with +inf by caller; cells with count=0 keep +inf.
+
+    steiner_max_out : float64[n_quartets, n_groups, 4]
+        Output array for per-cell maximum Steiner distance.
+        Pre-filled with -inf by caller; cells with count=0 keep -inf.
     """
     for qi in prange(n_quartets):
         n0 = sorted_quartet_ids[qi, 0]
@@ -450,10 +460,15 @@ def _quartet_steiner_njit(
                 poly_start, poly_end, polytomy_nodes,
             )
             gi = tree_to_group_idx[ti]
-            counts_out[qi, gi, topo] += 1
-            steiner_out[qi, gi, topo] += _steiner_length_nb(
+            sl = _steiner_length_nb(
                 ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance,
             )
+            counts_out[qi, gi, topo] += 1
+            steiner_out[qi, gi, topo] += sl
+            if sl < steiner_min_out[qi, gi, topo]:
+                steiner_min_out[qi, gi, topo] = sl
+            if sl > steiner_max_out[qi, gi, topo]:
+                steiner_max_out[qi, gi, topo] = sl
 
 
 # ======================================================================== #
