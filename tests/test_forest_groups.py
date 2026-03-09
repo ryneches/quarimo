@@ -659,6 +659,127 @@ class TestQuartetQED:
         with pytest.raises(RuntimeError, match="metadata"):
             result.to_frame()
 
+    # ── deduplicate parameter ─────────────────────────────────────────────── #
+
+    @pytest.fixture
+    def duplicate_quartet_forest(self):
+        """2-group forest with the same quartet queried twice (explicit duplicates)."""
+        groups = {
+            "A": ["((a:1,b:1):1,(c:1,d:1):1);", "((a:1,b:1):1,(c:1,d:1):1);"],
+            "B": ["((a:1,c:1):1,(b:1,d:1):1);", "((a:1,c:1):1,(b:1,d:1):1);"],
+        }
+        forest = Forest(groups)
+        # Same quartet listed twice → qi=0 and qi=1 are identical
+        q = Quartets.from_list(forest, [("a", "b", "c", "d"), ("a", "b", "c", "d")])
+        counts = forest.quartet_topology(q)
+        return forest, counts
+
+    def test_topology_deduplicate_true_long_removes_duplicate_rows(
+        self, duplicate_quartet_forest
+    ):
+        """QuartetTopologyResult.to_frame('long', deduplicate=True) drops identical rows."""
+        pytest.importorskip("polars")
+        forest, counts = duplicate_quartet_forest
+        df_dedup = counts.to_frame("long", deduplicate=True)
+        df_raw = counts.to_frame("long", deduplicate=False)
+        # Raw has 2 quartets × 2 groups × 4 topologies = 16 rows; dedup collapses to 8
+        assert df_raw.shape[0] == 16
+        assert df_dedup.shape[0] == 8
+
+    def test_topology_deduplicate_true_wide_removes_duplicate_rows(
+        self, duplicate_quartet_forest
+    ):
+        """QuartetTopologyResult.to_frame('wide', deduplicate=True) drops identical rows."""
+        pytest.importorskip("polars")
+        forest, counts = duplicate_quartet_forest
+        df_dedup = counts.to_frame("wide", deduplicate=True)
+        df_raw = counts.to_frame("wide", deduplicate=False)
+        assert df_raw.shape[0] == 2   # two identical rows
+        assert df_dedup.shape[0] == 1  # collapsed to one
+
+    def test_topology_deduplicate_false_long_preserves_all_rows(
+        self, duplicate_quartet_forest
+    ):
+        """QuartetTopologyResult.to_frame('long', deduplicate=False) keeps all rows."""
+        pytest.importorskip("polars")
+        _, counts = duplicate_quartet_forest
+        df = counts.to_frame("long", deduplicate=False)
+        assert df.shape[0] == 16  # 2 quartets × 2 groups × 4 topologies
+
+    def test_topology_deduplicate_false_wide_preserves_all_rows(
+        self, duplicate_quartet_forest
+    ):
+        """QuartetTopologyResult.to_frame('wide', deduplicate=False) keeps all rows."""
+        pytest.importorskip("polars")
+        _, counts = duplicate_quartet_forest
+        df = counts.to_frame("wide", deduplicate=False)
+        assert df.shape[0] == 2  # two identical rows
+
+    def test_qed_deduplicate_true_long_removes_duplicate_rows(
+        self, duplicate_quartet_forest
+    ):
+        """QEDResult.to_frame('long', deduplicate=True) drops identical rows."""
+        pytest.importorskip("polars")
+        forest, counts = duplicate_quartet_forest
+        result = forest.qed(counts)
+        df_dedup = result.to_frame("long", deduplicate=True)
+        df_raw = result.to_frame("long", deduplicate=False)
+        # Raw: 2 quartets × 1 pair = 2 rows; dedup collapses to 1
+        assert df_raw.shape[0] == 2
+        assert df_dedup.shape[0] == 1
+
+    def test_qed_deduplicate_true_wide_removes_duplicate_rows(
+        self, duplicate_quartet_forest
+    ):
+        """QEDResult.to_frame('wide', deduplicate=True) drops identical rows."""
+        pytest.importorskip("polars")
+        forest, counts = duplicate_quartet_forest
+        result = forest.qed(counts)
+        df_dedup = result.to_frame("wide", deduplicate=True)
+        df_raw = result.to_frame("wide", deduplicate=False)
+        assert df_raw.shape[0] == 2
+        assert df_dedup.shape[0] == 1
+
+    def test_qed_deduplicate_false_long_preserves_all_rows(
+        self, duplicate_quartet_forest
+    ):
+        """QEDResult.to_frame('long', deduplicate=False) keeps all rows."""
+        pytest.importorskip("polars")
+        forest, counts = duplicate_quartet_forest
+        df = forest.qed(counts).to_frame("long", deduplicate=False)
+        assert df.shape[0] == 2  # 2 quartets × 1 pair
+
+    def test_qed_deduplicate_false_wide_preserves_all_rows(
+        self, duplicate_quartet_forest
+    ):
+        """QEDResult.to_frame('wide', deduplicate=False) keeps all rows."""
+        pytest.importorskip("polars")
+        forest, counts = duplicate_quartet_forest
+        df = forest.qed(counts).to_frame("wide", deduplicate=False)
+        assert df.shape[0] == 2
+
+    def test_join_works_after_deduplication(self, duplicate_quartet_forest):
+        """With duplicates present, deduplicate=True (default) enables a clean join."""
+        pytest.importorskip("polars")
+        forest, counts = duplicate_quartet_forest
+        qed_df = forest.qed(counts).to_frame("wide")      # deduplicate=True
+        topo_df = counts.to_frame("wide")                  # deduplicate=True
+        joined = qed_df.join(topo_df, on="quartet_idx", how="left")
+        # Both sides have 1 row after dedup → 1-to-1 join
+        assert joined.shape[0] == 1
+
+    def test_join_produces_cartesian_product_without_deduplication(
+        self, duplicate_quartet_forest
+    ):
+        """With deduplicate=False, duplicate quartet_idx values cause extra join rows."""
+        pytest.importorskip("polars")
+        forest, counts = duplicate_quartet_forest
+        qed_df = forest.qed(counts).to_frame("wide", deduplicate=False)
+        topo_df = counts.to_frame("wide", deduplicate=False)
+        joined = qed_df.join(topo_df, on="quartet_idx", how="left")
+        # 2 qed rows × 2 matching topo rows each = 4 rows
+        assert joined.shape[0] == 4
+
 
 class TestGroupOffsets:
     """Tests for group_offsets CSR array."""

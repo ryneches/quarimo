@@ -294,7 +294,7 @@ class QEDResult:
     # Output
     # ------------------------------------------------------------------
 
-    def to_frame(self, form: str = "long", dedupliacte: bool = True) -> "pl.DataFrame":
+    def to_frame(self, form: str = "long", deduplicate: bool = True) -> "pl.DataFrame":
         """
         Convert to a Polars DataFrame.
 
@@ -390,7 +390,7 @@ class QEDResult:
             for pi in range(n_pairs):
                 col = f"{pair_ga[pi]}_vs_{pair_gb[pi]}"
                 data[col] = self.scores[:, pi].tolist()
-            if dedupliacte:
+            if deduplicate:
                 return pl.DataFrame(data).unique()
             else:
                 return pl.DataFrame(data)
