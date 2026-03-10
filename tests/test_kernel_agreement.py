@@ -765,6 +765,23 @@ class TestParallelIntegrity:
     # 1. Duplicate consistency
     # ------------------------------------------------------------------
 
+    # Tolerance for Steiner sum comparisons.
+    #
+    # On CPU/Python the accumulation is sequential and deterministic, so exact
+    # equality holds.  On CUDA, cuda.atomic.add(float64) serialises additions
+    # in non-deterministic thread order.  Because each tree produces a
+    # different Steiner length for a given quartet, re-ordering those additions
+    # yields slightly different IEEE-754 rounding at the low-order bits.
+    #
+    # Observed relative error in CI: ≤ 4.4e-16 (< 2 × machine epsilon).
+    # Theoretical worst case for n ≈ 100 trees: O(n · ε · |v|) ≈ 1e-12 rel.
+    #
+    # rtol=1e-8 is therefore:
+    #   - orders of magnitude above the observed FP noise
+    #   - orders of magnitude below any real computation error (wrong topology
+    #     → factor-of-2 Steiner difference → ~100% relative error)
+    _STEINER_RTOL = 1e-8
+
     def _check_duplicate_consistency(self, forest, quartets_x3, backend):
         n = self._N_UNIQUE_QUARTETS
         with silent_benchmark(backend):
@@ -784,16 +801,19 @@ class TestParallelIntegrity:
                     "a CPU/GPU quartet-sequence mismatch."
                 ),
             )
-            np.testing.assert_array_equal(
+            np.testing.assert_allclose(
                 steiner[0:n],
                 steiner[lo:hi],
+                rtol=self._STEINER_RTOL,
+                atol=0,
                 err_msg=(
-                    f"Duplicate quartet Steiner sums differ at copy {copy_idx} [{backend}]. "
-                    "Identical quartets against the same forest must yield exactly "
-                    "the same Steiner values — floating-point reordering does not "
-                    "apply here because each (qi, ti) thread writes one independent "
-                    "value, and atomic accumulation order is irrelevant when all "
-                    "addends are identical."
+                    f"Duplicate quartet Steiner sums differ at copy {copy_idx} [{backend}] "
+                    f"by more than rtol={self._STEINER_RTOL}. "
+                    "Identical quartets against the same forest must yield nearly "
+                    "identical Steiner sums. Small FP differences (< 2 × machine "
+                    "epsilon) are expected on CUDA due to non-deterministic "
+                    "cuda.atomic.add ordering; large differences indicate a wrong "
+                    "quartet, wrong topology, or corrupted output cell."
                 ),
             )
 
@@ -823,10 +843,17 @@ class TestParallelIntegrity:
                 results[i].counts,
                 err_msg=f"Non-deterministic counts (run 0 vs {i}) [{backend}]",
             )
-            np.testing.assert_array_equal(
+            np.testing.assert_allclose(
                 results[0].steiner,
                 results[i].steiner,
-                err_msg=f"Non-deterministic Steiner sums (run 0 vs {i}) [{backend}]",
+                rtol=self._STEINER_RTOL,
+                atol=0,
+                err_msg=(
+                    f"Non-deterministic Steiner sums (run 0 vs {i}) [{backend}] "
+                    f"differ by more than rtol={self._STEINER_RTOL}. "
+                    "Sub-ULP variation is expected on CUDA (non-deterministic "
+                    "cuda.atomic.add ordering); larger differences indicate a bug."
+                ),
             )
 
     def test_determinism_python(self, stress_forest, stress_quartets):
