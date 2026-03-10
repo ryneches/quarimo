@@ -697,5 +697,252 @@ class TestSuchTreePolytomyAgreement:
         )
 
 
+class TestParallelIntegrity:
+    """
+    Torture tests for parallel processing correctness.
+
+    These tests check four properties that must hold for any correct
+    implementation regardless of backend, thread count, or batch layout:
+
+    1. Duplicate consistency
+       The same quartet processed at two different positions in the input
+       must accumulate identical counts and Steiner values.  This is the
+       most direct test for race conditions and CPU-GPU sequence mismatches:
+       if any thread writes to a wrong qi cell, or if the GPU generates a
+       different quartet than the CPU at some position, copies of the same
+       quartet will show different counts.
+
+    2. Determinism
+       Running the same query multiple times gives bit-identical results.
+       Any non-determinism from floating-point atomic reordering, OS thread
+       scheduling, or GPU warp divergence shows up here.
+
+    3. Count conservation
+       For a forest where every tree contains all four taxa, the sum of
+       counts over all topologies and groups must equal n_trees for every
+       quartet.  Dropped or double-counted (qi, ti) pairs violate this.
+
+    4. Order independence
+       Reversing the input quartet list must reverse the output rows without
+       changing per-quartet counts.  If threads compute the wrong output qi
+       index (e.g., off-by-one or cross-batch contamination), reversing the
+       input exposes the error as a non-reversal of the output.
+
+    Stress forest
+    -------------
+    Trees 0–2 (three distinct binary topologies, all 8 taxa) repeated 33×
+    = 99 trees.  Every C(8,4) = 70 quartet sees all four taxa in all 99
+    trees, making count conservation trivially checkable: each quartet must
+    accumulate exactly 99 votes total.  Three distinct topologies ensure the
+    counts are non-trivially distributed (not all in one slot), which would
+    mask some write-to-wrong-cell errors.
+    """
+
+    _STRESS_TREES = TREES[0:3] * 33  # 99 trees: 33 of each binary topology
+    _N_TREES = 99
+    _N_UNIQUE_QUARTETS = 70  # C(8, 4)
+
+    @pytest.fixture(scope="class")
+    def stress_forest(self):
+        """Single-group forest: 99 trees, 8 taxa, no missing-taxon cases."""
+        with quiet():
+            return Forest(self._STRESS_TREES)
+
+    @pytest.fixture(scope="class")
+    def stress_quartets(self, stress_forest):
+        """All 70 quartets over the 8-taxon namespace (forward order)."""
+        taxa = sorted(stress_forest.global_names)
+        return Quartets.from_list(stress_forest, list(itertools.combinations(taxa, 4)))
+
+    @pytest.fixture(scope="class")
+    def stress_quartets_x3(self, stress_forest):
+        """Same 70 quartets repeated 3× = 210 total (copies at qi, qi+70, qi+140)."""
+        taxa = sorted(stress_forest.global_names)
+        q_list = list(itertools.combinations(taxa, 4))
+        return Quartets.from_list(stress_forest, q_list * 3)
+
+    # ------------------------------------------------------------------
+    # 1. Duplicate consistency
+    # ------------------------------------------------------------------
+
+    def _check_duplicate_consistency(self, forest, quartets_x3, backend):
+        n = self._N_UNIQUE_QUARTETS
+        with silent_benchmark(backend):
+            result = forest.quartet_topology(quartets_x3, steiner=True)
+        counts = result.counts   # (210, n_groups, 4)
+        steiner = result.steiner  # (210, n_groups, 4)
+
+        for copy_idx in (1, 2):
+            lo, hi = copy_idx * n, (copy_idx + 1) * n
+            np.testing.assert_array_equal(
+                counts[0:n],
+                counts[lo:hi],
+                err_msg=(
+                    f"Duplicate quartet counts differ at copy {copy_idx} [{backend}]. "
+                    "The same quartet processed at two positions must accumulate "
+                    "identical counts — a discrepancy indicates a race condition or "
+                    "a CPU/GPU quartet-sequence mismatch."
+                ),
+            )
+            np.testing.assert_array_equal(
+                steiner[0:n],
+                steiner[lo:hi],
+                err_msg=(
+                    f"Duplicate quartet Steiner sums differ at copy {copy_idx} [{backend}]. "
+                    "Identical quartets against the same forest must yield exactly "
+                    "the same Steiner values — floating-point reordering does not "
+                    "apply here because each (qi, ti) thread writes one independent "
+                    "value, and atomic accumulation order is irrelevant when all "
+                    "addends are identical."
+                ),
+            )
+
+    def test_duplicate_consistency_python(self, stress_forest, stress_quartets_x3):
+        self._check_duplicate_consistency(stress_forest, stress_quartets_x3, "python")
+
+    @cpu_parallel_skip
+    def test_duplicate_consistency_cpu(self, stress_forest, stress_quartets_x3):
+        self._check_duplicate_consistency(stress_forest, stress_quartets_x3, "cpu-parallel")
+
+    @cuda_skip
+    def test_duplicate_consistency_cuda(self, stress_forest, stress_quartets_x3):
+        self._check_duplicate_consistency(stress_forest, stress_quartets_x3, "cuda")
+
+    # ------------------------------------------------------------------
+    # 2. Determinism
+    # ------------------------------------------------------------------
+
+    def _check_determinism(self, forest, quartets, backend, n_runs: int = 5):
+        results = []
+        for _ in range(n_runs):
+            with silent_benchmark(backend):
+                results.append(forest.quartet_topology(quartets, steiner=True))
+        for i in range(1, n_runs):
+            np.testing.assert_array_equal(
+                results[0].counts,
+                results[i].counts,
+                err_msg=f"Non-deterministic counts (run 0 vs {i}) [{backend}]",
+            )
+            np.testing.assert_array_equal(
+                results[0].steiner,
+                results[i].steiner,
+                err_msg=f"Non-deterministic Steiner sums (run 0 vs {i}) [{backend}]",
+            )
+
+    def test_determinism_python(self, stress_forest, stress_quartets):
+        self._check_determinism(stress_forest, stress_quartets, "python")
+
+    @cpu_parallel_skip
+    def test_determinism_cpu(self, stress_forest, stress_quartets):
+        self._check_determinism(stress_forest, stress_quartets, "cpu-parallel")
+
+    @cuda_skip
+    def test_determinism_cuda(self, stress_forest, stress_quartets):
+        self._check_determinism(stress_forest, stress_quartets, "cuda", n_runs=10)
+
+    # ------------------------------------------------------------------
+    # 3. Count conservation
+    # ------------------------------------------------------------------
+
+    def _check_count_conservation(self, forest, quartets, backend):
+        """Sum of counts over all topologies and groups must equal n_trees."""
+        with silent_benchmark(backend):
+            counts = forest.quartet_topology(quartets).counts  # (n_q, n_groups, 4)
+        totals = counts.sum(axis=(1, 2))  # (n_quartets,) — sum over groups and topologies
+        expected = np.full(len(quartets), self._N_TREES, dtype=np.int64)
+        np.testing.assert_array_equal(
+            totals,
+            expected,
+            err_msg=(
+                f"Count conservation violated [{backend}]. "
+                f"Every quartet has all 4 taxa in all {self._N_TREES} trees, "
+                f"so total votes must equal {self._N_TREES}. "
+                "Deviations indicate dropped or double-counted (qi, ti) pairs."
+            ),
+        )
+
+    def test_count_conservation_python(self, stress_forest, stress_quartets):
+        self._check_count_conservation(stress_forest, stress_quartets, "python")
+
+    @cpu_parallel_skip
+    def test_count_conservation_cpu(self, stress_forest, stress_quartets):
+        self._check_count_conservation(stress_forest, stress_quartets, "cpu-parallel")
+
+    @cuda_skip
+    def test_count_conservation_cuda(self, stress_forest, stress_quartets):
+        self._check_count_conservation(stress_forest, stress_quartets, "cuda")
+
+    # ------------------------------------------------------------------
+    # 4. Order independence
+    # ------------------------------------------------------------------
+
+    def _check_order_independence(self, forest, quartets, backend):
+        """Reversing the quartet list must reverse the output rows exactly."""
+        taxa = sorted(forest.global_names)
+        q_list = list(itertools.combinations(taxa, 4))
+        q_rev = Quartets.from_list(forest, q_list[::-1])
+
+        with silent_benchmark(backend):
+            counts_fwd = forest.quartet_topology(quartets).counts
+        with silent_benchmark(backend):
+            counts_rev = forest.quartet_topology(q_rev).counts
+
+        np.testing.assert_array_equal(
+            counts_fwd,
+            counts_rev[::-1],
+            err_msg=(
+                f"Order independence violated [{backend}]. "
+                "Reversing the input quartet list must produce exactly the "
+                "reversed output rows. Any cross-qi contamination (wrong "
+                "thread writing to a neighbour's cell) violates this."
+            ),
+        )
+
+    def test_order_independence_python(self, stress_forest, stress_quartets):
+        self._check_order_independence(stress_forest, stress_quartets, "python")
+
+    @cpu_parallel_skip
+    def test_order_independence_cpu(self, stress_forest, stress_quartets):
+        self._check_order_independence(stress_forest, stress_quartets, "cpu-parallel")
+
+    @cuda_skip
+    def test_order_independence_cuda(self, stress_forest, stress_quartets):
+        self._check_order_independence(stress_forest, stress_quartets, "cuda")
+
+    # ------------------------------------------------------------------
+    # 5. CUDA batch-size independence
+    # ------------------------------------------------------------------
+
+    @cuda_skip
+    def test_cuda_batch_size_independence(self, stress_forest, stress_quartets_x3):
+        """Forcing batch_size=1 must give the same result as the default batch size.
+
+        With batch_size=1 every quartet is processed in its own CUDA launch.
+        Cross-batch contamination (e.g., wrong offset propagation) causes
+        counts to differ from the default (all-in-one) run.
+        """
+        with silent_benchmark("cuda"):
+            counts_default = stress_forest.quartet_topology(stress_quartets_x3).counts
+
+        # Build a fresh forest instance so we can override _cuda_batch_size
+        # without affecting the shared class fixture.
+        with quiet():
+            forest2 = Forest(self._STRESS_TREES)
+        forest2._cuda_batch_size = lambda steiner: 1  # one quartet per CUDA launch
+
+        with silent_benchmark("cuda"):
+            counts_batched = forest2.quartet_topology(stress_quartets_x3).counts
+
+        np.testing.assert_array_equal(
+            counts_default,
+            counts_batched,
+            err_msg=(
+                "CUDA counts differ with batch_size=1 vs default. "
+                "A batch-boundary error (e.g., wrong offset passed to kernel) "
+                "is likely."
+            ),
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
