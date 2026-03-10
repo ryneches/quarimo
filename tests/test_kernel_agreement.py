@@ -182,6 +182,25 @@ def all_quartets(grouped_forest):
 
 
 @pytest.fixture(scope="module")
+def random_quartets(grouped_forest):
+    """
+    140 random quartets over the 8-taxon namespace (~2× C(8,4)=70).
+
+    Uses ``Quartets.random`` so ``offset = n_seed = 1``.  For any batch,
+    ``batch_offset + bc > n_seed`` is immediately satisfied, meaning the CUDA
+    backend must materialise the full batch via the 1D generation kernel
+    (``batch_needs_rng=True``).  This is the code path where a CPU/GPU quartet
+    sequence mismatch would show up as count differences.
+
+    seed=42 gives a reproducible but arbitrary RNG sequence.  Count=140
+    ensures enough coverage that a systematic shift in the GPU sequence
+    produces count differences for the vast majority of positions.
+    """
+    with quiet():
+        return Quartets.random(grouped_forest, count=140, seed=42)
+
+
+@pytest.fixture(scope="module")
 def suchforest():
     """List of SuchTree objects, one per NEWICK string in TREES."""
     if not _SUCHTREE_AVAILABLE:
@@ -300,6 +319,67 @@ class TestBackendAgreement:
                 all_quartets, steiner=True
             ).counts
         np.testing.assert_array_equal(counts_only, counts_with_steiner)
+
+    # ------------------------------------------------------------------
+    # Random-quartet agreement (exercises batch_needs_rng=True path)
+    # ------------------------------------------------------------------
+    # The existing tests above use all_quartets, which are entirely explicit
+    # seed quartets (batch_needs_rng=False).  The tests below use
+    # Quartets.random so that offset >= n_seed from the very first batch,
+    # forcing the CUDA backend to materialise quartets via the 1D generation
+    # kernel.  A CPU/GPU quartet-sequence mismatch (e.g., the 2D kernel
+    # receiving n_seed=self.n_seed instead of n_seed=bc and therefore
+    # regenerating quartets from the RNG rather than reading the pre-built
+    # scratch array) would cause counts to differ between the python and CUDA
+    # backends.
+
+    @cpu_parallel_skip
+    def test_counts_python_vs_cpu_random_quartets(self, grouped_forest, random_quartets):
+        """python and cpu-parallel must agree for RNG-generated quartets."""
+        with silent_benchmark("python"):
+            counts_py = grouped_forest.quartet_topology(random_quartets).counts
+        with silent_benchmark("cpu-parallel"):
+            counts_cpu = grouped_forest.quartet_topology(random_quartets).counts
+        np.testing.assert_array_equal(counts_py, counts_cpu)
+
+    @cuda_skip
+    def test_counts_python_vs_cuda_random_quartets(self, grouped_forest, random_quartets):
+        """python and CUDA must agree for RNG-generated quartets.
+
+        With batch_needs_rng=True, the CUDA 2D kernel reads from a pre-built
+        scratch array of bc quartets.  The scratch array's n_seed must equal bc
+        so every thread qi < bc reads from the array.  If n_seed is wrong
+        (e.g., still set to self.n_seed=1), threads qi >= 1 re-run XorShift128
+        from the beginning and produce a shifted quartet sequence; counts then
+        disagree with the CPU for 139 of the 140 positions.
+        """
+        with silent_benchmark("python"):
+            counts_py = grouped_forest.quartet_topology(random_quartets).counts
+        with silent_benchmark("cuda"):
+            counts_cuda = grouped_forest.quartet_topology(random_quartets).counts
+        np.testing.assert_array_equal(
+            counts_py,
+            counts_cuda,
+            err_msg=(
+                "Python and CUDA counts disagree for random quartets. "
+                "Expected: 0 mismatched elements. "
+                "A non-zero count indicates a CPU/GPU quartet-sequence mismatch "
+                "on the batch_needs_rng=True code path."
+            ),
+        )
+
+    @cuda_skip
+    def test_steiner_python_vs_cuda_random_quartets(self, grouped_forest, random_quartets):
+        """CUDA Steiner sums must match python for RNG-generated quartets."""
+        with silent_benchmark("python"):
+            steiner_py = grouped_forest.quartet_topology(
+                random_quartets, steiner=True
+            ).steiner
+        with silent_benchmark("cuda"):
+            steiner_cuda = grouped_forest.quartet_topology(
+                random_quartets, steiner=True
+            ).steiner
+        np.testing.assert_allclose(steiner_py, steiner_cuda, rtol=1e-8, atol=1e-10)
 
 
 class TestFourPointCondition:
