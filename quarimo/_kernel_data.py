@@ -307,7 +307,7 @@ class QuartetKernelArgs:
             offset=quartets.offset,
         )
 
-    def cuda_batch_args(self, d_seed, proc_n_seed: int, batch_offset: int, bc: int) -> tuple:
+    def cuda_batch_args(self, d_seed, batch_offset: int, bc: int) -> tuple:
         """
         Quartet-generation argument block for one CUDA batch.
 
@@ -322,15 +322,9 @@ class QuartetKernelArgs:
             Device-resident seed array for this batch — either the original
             ``d_seed_quartets`` or a pre-generated scratch array from the
             1D generation kernel.
-        proc_n_seed : int
-            Effective seed count to pass to the kernel.  When ``d_seed`` is the
-            original seed array this equals ``self.n_seed``.  When ``d_seed``
-            is a pre-generated scratch array (``batch_needs_rng=True``) this
-            must equal ``bc`` so that every thread qi < bc reads from the
-            scratch array and never falls through to the on-kernel RNG.
         batch_offset : int
             Starting absolute index in the infinite sequence for this batch.
         bc : int
             Batch count (number of quartets in this batch).
         """
-        return (d_seed, proc_n_seed, batch_offset, bc, self.rng_seed)
+        return (d_seed, self.n_seed, batch_offset, bc, self.rng_seed)

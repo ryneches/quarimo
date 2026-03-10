@@ -1309,7 +1309,7 @@ class Forest:
                 proc_n_seed = q_args.n_seed
                 proc_offset = batch_offset
 
-            batch_args = q_args.cuda_batch_args(proc_seed, proc_n_seed, proc_offset, bc)
+            batch_args = q_args.cuda_batch_args(proc_seed, proc_offset, bc)
 
             # Zero-initialised counts and steiner (atomic.add requires it)
             d_counts_b = cuda.to_device(
