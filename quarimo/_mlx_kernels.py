@@ -47,6 +47,8 @@ kernel definitions; external callers should use ``backends.mlx`` instead.
 
 from __future__ import annotations
 
+import numpy as np
+
 _MLX_AVAILABLE = False
 
 try:
@@ -224,8 +226,6 @@ inline void sample_4_unique(
             Sorted quartet indices for each position.  On Apple Silicon (UMA)
             ``np.array(mlx_array)`` does not copy memory.
         """
-        import numpy as np
-
         # Grid rounded up to threadgroup boundary; out-of-bounds threads
         # return early via the `if qi >= count` guard in the kernel.
         tg_size = 256
@@ -569,8 +569,6 @@ inline int32_t rmq_msl(
         n_quartets : int
         n_groups : int
         """
-        import numpy as np
-
         poly_nodes = (
             kd.polytomy_nodes if len(kd.polytomy_nodes) > 0
             else np.array([-1], dtype=np.int32)
