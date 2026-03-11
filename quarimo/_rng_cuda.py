@@ -56,20 +56,20 @@ def xorshift128_next(state):
     -----
     Must match _quartets.py::_sample_quartet() XorShift step exactly.
     """
-    t = state[3]
-    s = state[0]
-    
+    t = numba.uint32(state[3])
+    s = numba.uint32(state[0])
+
     # Rotate state
     state[3] = state[2]
     state[2] = state[1]
     state[1] = s
-    
-    # XorShift operations
-    t ^= (t << numba.uint32(11))
-    t ^= (t >> numba.uint32(8))
-    state[0] = t ^ s ^ (s >> numba.uint32(19))
-    
-    return state[0]
+
+    # XorShift operations — explicit uint32 casts ensure logical (not arithmetic) right shifts
+    t = numba.uint32(t ^ numba.uint32(t << numba.uint32(11)))
+    t = numba.uint32(t ^ numba.uint32(t >> numba.uint32(8)))
+    state[0] = numba.uint32(t ^ s ^ numba.uint32(s >> numba.uint32(19)))
+
+    return numba.uint32(state[0])
 
 
 @cuda.jit(device=True)
