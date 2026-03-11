@@ -880,6 +880,21 @@ class Forest:
                     self._quartet_topology_cuda_unified(quartets, steiner)
                 )
 
+            elif resolved_backend == "mlx":
+                from quarimo._mlx_kernels import quartet_counts_mlx, quartet_steiner_mlx
+
+                sorted_ids = np.array(list(quartets), dtype=np.int32)
+                if steiner:
+                    counts_out, steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out = (
+                        quartet_steiner_mlx(
+                            self._kernel_data, sorted_ids, n_quartets, self.n_groups
+                        )
+                    )
+                else:
+                    counts_out = quartet_counts_mlx(
+                        self._kernel_data, sorted_ids, n_quartets, self.n_groups
+                    )
+
             else:
                 # CPU/Python backends: materialise quartets to array
                 sorted_ids = np.array(list(quartets), dtype=np.int32)

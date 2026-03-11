@@ -1,14 +1,26 @@
 """
 _mlx_kernels.py
 ===============
-MLX Metal quartet generation kernel for Apple Silicon.
+MLX Metal quartet generation and topology kernels for Apple Silicon.
 
-Prototype scope
----------------
-Exposes only ``generate_quartets_mlx`` — the direct equivalent of the CUDA
-``generate_quartets_cuda`` 1D kernel.  Full ``quartet_counts`` /
-``quartet_steiner`` Metal kernels are future work; the dispatch path in
-``_forest.py`` is not yet wired to this backend.
+Kernels
+-------
+``generate_quartets_mlx``
+    1D generation kernel — direct equivalent of ``generate_quartets_cuda``.
+    One thread per quartet; produces the deterministic XorShift128 sequence.
+
+``quartet_counts_mlx``
+    Full topology-counting kernel — counts how many trees in the forest
+    support each of the three unrooted quartet topologies (k=0,1,2) or are
+    unresolved (k=3) for each (quartet, group) pair.  Dispatches 1 thread
+    per quartet; each thread loops sequentially over all trees (no atomics
+    needed since each thread owns its entire output row).
+
+``quartet_steiner_mlx``
+    Same as ``quartet_counts_mlx`` plus accumulation of Steiner spanning
+    distances per (quartet, group, topology) cell.  Because Metal does not
+    support float64, root distances and Steiner outputs use float32; the
+    Python wrapper converts back to float64 before returning.
 
 Why Metal via MLX
 -----------------
@@ -235,3 +247,439 @@ inline void sample_4_unique(
         )
         mx.eval(out[0])
         return np.array(out[0], copy=False).reshape(count, 4)
+
+    # ====================================================================== #
+    # Topology kernels                                                        #
+    # ====================================================================== #
+    # MSL header: O(1) RMQ helper used by both quartet_counts and            #
+    # quartet_steiner kernels.  Does NOT include the RNG helpers — those     #
+    # are only needed by generate_quartets_mlx.                              #
+
+    _TOPOLOGY_HEADER = """
+#include <metal_stdlib>
+using namespace metal;
+
+// O(1) RMQ lookup over a CSR-packed sparse table for one tree.
+// Returns the local node ID of the LCA of any two positions l, r.
+// sp_base, lg_base, tour_base are int64 offsets into the flat CSR arrays.
+inline int32_t rmq_msl(
+    int32_t l, int32_t r,
+    long sp_base, int32_t sp_stride,
+    device const int32_t* sparse_table,
+    device const int32_t* euler_depth,
+    device const int32_t* log2_table,
+    long lg_base, long tour_base,
+    device const int32_t* euler_tour)
+{
+    int32_t length = r - l + 1;
+    int32_t k      = log2_table[lg_base + length];
+    int32_t half   = 1 << k;
+    int32_t li = sparse_table[sp_base + (long)k * sp_stride + l];
+    int32_t ri = sparse_table[sp_base + (long)k * sp_stride + (r - half + 1)];
+    int32_t lca_local =
+        (euler_depth[tour_base + ri] < euler_depth[tour_base + li]) ? ri : li;
+    return euler_tour[tour_base + lca_local];
+}
+"""
+
+    # ---------------------------------------------------------------------- #
+    # Counts kernel body                                                      #
+    # One thread per quartet (qi).  Sequential inner loop over trees.        #
+    # Each thread zero-initialises and owns its entire counts_out[qi] slice. #
+
+    _QUARTET_COUNTS_BODY = """
+    uint32_t qi      = thread_position_in_grid.x;
+    int32_t n_q      = n_quartets_arr[0];
+    if ((int32_t)qi >= n_q) return;
+
+    int32_t n_trees  = n_trees_arr[0];
+    int32_t n_groups = n_groups_arr[0];
+    int32_t n_gtaxa  = n_global_taxa_arr[0];
+
+    // Zero-initialise this thread's output slice
+    int32_t out_base = (int32_t)qi * n_groups * 4;
+    for (int32_t gi = 0; gi < n_groups; gi++)
+        for (int32_t k = 0; k < 4; k++)
+            counts_out[out_base + gi * 4 + k] = 0;
+
+    int32_t n0 = sorted_quartet_ids[(int32_t)qi * 4 + 0];
+    int32_t n1 = sorted_quartet_ids[(int32_t)qi * 4 + 1];
+    int32_t n2 = sorted_quartet_ids[(int32_t)qi * 4 + 2];
+    int32_t n3 = sorted_quartet_ids[(int32_t)qi * 4 + 3];
+
+    for (int32_t ti = 0; ti < n_trees; ti++) {
+        int32_t base_g2l = ti * n_gtaxa;
+        int32_t ln0 = global_to_local[base_g2l + n0];
+        int32_t ln1 = global_to_local[base_g2l + n1];
+        int32_t ln2 = global_to_local[base_g2l + n2];
+        int32_t ln3 = global_to_local[base_g2l + n3];
+        if (ln0 < 0 || ln1 < 0 || ln2 < 0 || ln3 < 0) continue;
+
+        long nb = node_offsets[ti];
+        long tb = tour_offsets[ti];
+        long sb = sp_offsets[ti];
+        long lb = lg_offsets[ti];
+        int32_t tw = sp_tour_widths[ti];
+
+        int32_t occ0 = all_first_occ[nb + ln0];
+        int32_t occ1 = all_first_occ[nb + ln1];
+        int32_t occ2 = all_first_occ[nb + ln2];
+        int32_t occ3 = all_first_occ[nb + ln3];
+
+        // 6 RMQ calls for all pairwise LCAs
+        int32_t l, r, tmp;
+        l = occ0; r = occ1; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca01 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+        l = occ0; r = occ2; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca02 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+        l = occ0; r = occ3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca03 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+        l = occ1; r = occ2; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca12 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+        l = occ1; r = occ3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca13 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+        l = occ2; r = occ3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca23 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+
+        // Four-point condition (float32 — Metal does not support float64)
+        float rd01 = all_root_distance[nb + lca01];
+        float rd02 = all_root_distance[nb + lca02];
+        float rd03 = all_root_distance[nb + lca03];
+        float rd12 = all_root_distance[nb + lca12];
+        float rd13 = all_root_distance[nb + lca13];
+        float rd23 = all_root_distance[nb + lca23];
+
+        float r0 = rd01 + rd23;   // topology 0: (n0,n1)|(n2,n3)
+        float r1 = rd02 + rd13;   // topology 1: (n0,n2)|(n1,n3)
+        float r2 = rd03 + rd12;   // topology 2: (n0,n3)|(n1,n2)
+
+        // Polytomy detection: CSR pre-filter + IEEE-754 tie check.
+        // Matches _quartet_topology_and_rd_nb exactly.
+        int32_t poly_start = polytomy_offsets[ti];
+        int32_t poly_end   = polytomy_offsets[ti + 1];
+
+        int32_t topo;
+        if (poly_end > poly_start) {
+            bool found_poly = false;
+            for (int32_t j = poly_start; j < poly_end; j++) {
+                int32_t pn = polytomy_nodes[j];
+                if (pn == lca01 || pn == lca02 || pn == lca03 ||
+                    pn == lca12 || pn == lca13 || pn == lca23) {
+                    found_poly = true;
+                    break;
+                }
+            }
+            if (found_poly && r0 == r1 && r1 == r2) {
+                topo = 3;
+            } else {
+                if      (r0 >= r1 && r0 >= r2) topo = 0;
+                else if (r1 >= r0 && r1 >= r2) topo = 1;
+                else                           topo = 2;
+            }
+        } else {
+            if      (r0 >= r1 && r0 >= r2) topo = 0;
+            else if (r1 >= r0 && r1 >= r2) topo = 1;
+            else                           topo = 2;
+        }
+
+        int32_t gi = tree_to_group_idx[ti];
+        counts_out[out_base + gi * 4 + topo] += 1;
+    }
+"""
+
+    # ---------------------------------------------------------------------- #
+    # Steiner kernel body                                                     #
+    # Identical to counts body, plus Steiner length accumulation.            #
+    # Outputs are float32 (Metal limitation); Python wrapper converts to f64. #
+
+    _QUARTET_STEINER_BODY = """
+    uint32_t qi      = thread_position_in_grid.x;
+    int32_t n_q      = n_quartets_arr[0];
+    if ((int32_t)qi >= n_q) return;
+
+    int32_t n_trees  = n_trees_arr[0];
+    int32_t n_groups = n_groups_arr[0];
+    int32_t n_gtaxa  = n_global_taxa_arr[0];
+
+    // Zero-initialise this thread's output slices
+    int32_t out_base = (int32_t)qi * n_groups * 4;
+    for (int32_t gi = 0; gi < n_groups; gi++) {
+        for (int32_t k = 0; k < 4; k++) {
+            int32_t idx = out_base + gi * 4 + k;
+            counts_out[idx]      = 0;
+            steiner_out[idx]     = 0.0f;
+            steiner_min_out[idx] = INFINITY;
+            steiner_max_out[idx] = -INFINITY;
+            steiner_ssq_out[idx] = 0.0f;
+        }
+    }
+
+    int32_t n0 = sorted_quartet_ids[(int32_t)qi * 4 + 0];
+    int32_t n1 = sorted_quartet_ids[(int32_t)qi * 4 + 1];
+    int32_t n2 = sorted_quartet_ids[(int32_t)qi * 4 + 2];
+    int32_t n3 = sorted_quartet_ids[(int32_t)qi * 4 + 3];
+
+    for (int32_t ti = 0; ti < n_trees; ti++) {
+        int32_t base_g2l = ti * n_gtaxa;
+        int32_t ln0 = global_to_local[base_g2l + n0];
+        int32_t ln1 = global_to_local[base_g2l + n1];
+        int32_t ln2 = global_to_local[base_g2l + n2];
+        int32_t ln3 = global_to_local[base_g2l + n3];
+        if (ln0 < 0 || ln1 < 0 || ln2 < 0 || ln3 < 0) continue;
+
+        long nb = node_offsets[ti];
+        long tb = tour_offsets[ti];
+        long sb = sp_offsets[ti];
+        long lb = lg_offsets[ti];
+        int32_t tw = sp_tour_widths[ti];
+
+        int32_t occ0 = all_first_occ[nb + ln0];
+        int32_t occ1 = all_first_occ[nb + ln1];
+        int32_t occ2 = all_first_occ[nb + ln2];
+        int32_t occ3 = all_first_occ[nb + ln3];
+
+        int32_t l, r, tmp;
+        l = occ0; r = occ1; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca01 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+        l = occ0; r = occ2; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca02 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+        l = occ0; r = occ3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca03 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+        l = occ1; r = occ2; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca12 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+        l = occ1; r = occ3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca13 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+        l = occ2; r = occ3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca23 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+
+        float rd01 = all_root_distance[nb + lca01];
+        float rd02 = all_root_distance[nb + lca02];
+        float rd03 = all_root_distance[nb + lca03];
+        float rd12 = all_root_distance[nb + lca12];
+        float rd13 = all_root_distance[nb + lca13];
+        float rd23 = all_root_distance[nb + lca23];
+
+        float r0 = rd01 + rd23;
+        float r1 = rd02 + rd13;
+        float r2 = rd03 + rd12;
+
+        int32_t poly_start = polytomy_offsets[ti];
+        int32_t poly_end   = polytomy_offsets[ti + 1];
+
+        int32_t topo;
+        float r_winner;
+        if (poly_end > poly_start) {
+            bool found_poly = false;
+            for (int32_t j = poly_start; j < poly_end; j++) {
+                int32_t pn = polytomy_nodes[j];
+                if (pn == lca01 || pn == lca02 || pn == lca03 ||
+                    pn == lca12 || pn == lca13 || pn == lca23) {
+                    found_poly = true;
+                    break;
+                }
+            }
+            if (found_poly && r0 == r1 && r1 == r2) {
+                topo = 3; r_winner = r0;
+            } else {
+                if      (r0 >= r1 && r0 >= r2) { topo = 0; r_winner = r0; }
+                else if (r1 >= r0 && r1 >= r2) { topo = 1; r_winner = r1; }
+                else                           { topo = 2; r_winner = r2; }
+            }
+        } else {
+            if      (r0 >= r1 && r0 >= r2) { topo = 0; r_winner = r0; }
+            else if (r1 >= r0 && r1 >= r2) { topo = 1; r_winner = r1; }
+            else                           { topo = 2; r_winner = r2; }
+        }
+
+        // Steiner spanning length: S = sum(rd[leaf_i]) - 0.5*(r_winner+r0+r1+r2)
+        float leaf_rd0 = all_root_distance[nb + ln0];
+        float leaf_rd1 = all_root_distance[nb + ln1];
+        float leaf_rd2 = all_root_distance[nb + ln2];
+        float leaf_rd3 = all_root_distance[nb + ln3];
+        float sl = (leaf_rd0 + leaf_rd1 + leaf_rd2 + leaf_rd3)
+                   - 0.5f * (r_winner + r0 + r1 + r2);
+
+        int32_t gi  = tree_to_group_idx[ti];
+        int32_t idx = out_base + gi * 4 + topo;
+        counts_out[idx]  += 1;
+        steiner_out[idx] += sl;
+        if (sl < steiner_min_out[idx]) steiner_min_out[idx] = sl;
+        if (sl > steiner_max_out[idx]) steiner_max_out[idx] = sl;
+        steiner_ssq_out[idx] += sl * sl;
+    }
+"""
+
+    # ---------------------------------------------------------------------- #
+    # Compile kernels once at import time (Metal JIT — fast, sub-ms)         #
+
+    # Shared input names for both topology kernels
+    _TOPOLOGY_INPUT_NAMES = [
+        "sorted_quartet_ids",   # int32[n_quartets * 4]
+        "global_to_local",      # int32[n_trees * n_global_taxa]
+        "all_first_occ",        # int32[total_nodes]
+        "all_root_distance",    # float32[total_nodes]  (converted from float64)
+        "all_euler_tour",       # int32[total_tour_len]
+        "all_euler_depth",      # int32[total_tour_len]
+        "all_sparse_table",     # int32[total_sp_size]
+        "all_log2_table",       # int32[total_log2_size]
+        "node_offsets",         # int64[n_trees + 1]
+        "tour_offsets",         # int64[n_trees + 1]
+        "sp_offsets",           # int64[n_trees + 1]
+        "lg_offsets",           # int64[n_trees + 1]
+        "sp_tour_widths",       # int32[n_trees]
+        "tree_to_group_idx",    # int32[n_trees]
+        "polytomy_offsets",     # int32[n_trees + 1]
+        "polytomy_nodes",       # int32[total_polytomy] (at least 1 element)
+        "n_quartets_arr",       # int32[1]
+        "n_trees_arr",          # int32[1]
+        "n_groups_arr",         # int32[1]
+        "n_global_taxa_arr",    # int32[1]
+    ]
+
+    _counts_topology_kernel = mx.fast.metal_kernel(
+        name="quartet_counts",
+        input_names=_TOPOLOGY_INPUT_NAMES,
+        output_names=["counts_out"],
+        header=_TOPOLOGY_HEADER,
+        source=_QUARTET_COUNTS_BODY,
+    )
+
+    _steiner_topology_kernel = mx.fast.metal_kernel(
+        name="quartet_steiner",
+        input_names=_TOPOLOGY_INPUT_NAMES,
+        output_names=["counts_out", "steiner_out", "steiner_min_out",
+                      "steiner_max_out", "steiner_ssq_out"],
+        header=_TOPOLOGY_HEADER,
+        source=_QUARTET_STEINER_BODY,
+    )
+
+    def _topology_inputs(kd, sorted_ids, n_quartets, n_groups):
+        """
+        Build the shared MLX input list for both topology kernels.
+
+        Converts ``all_root_distance`` from float64 to float32 (Metal
+        does not support float64).  An empty ``polytomy_nodes`` array is
+        replaced by a one-element sentinel ``[-1]`` so the buffer is never
+        zero-length.
+
+        Parameters
+        ----------
+        kd : ForestKernelData
+        sorted_ids : int32[n_quartets, 4]
+        n_quartets : int
+        n_groups : int
+        """
+        import numpy as np
+
+        poly_nodes = (
+            kd.polytomy_nodes if len(kd.polytomy_nodes) > 0
+            else np.array([-1], dtype=np.int32)
+        )
+        return [
+            mx.array(sorted_ids.reshape(-1),             dtype=mx.int32),
+            mx.array(kd.global_to_local.reshape(-1),     dtype=mx.int32),
+            mx.array(kd.all_first_occ,                   dtype=mx.int32),
+            mx.array(kd.all_root_distance.astype("f4"),  dtype=mx.float32),
+            mx.array(kd.all_euler_tour,                  dtype=mx.int32),
+            mx.array(kd.all_euler_depth,                 dtype=mx.int32),
+            mx.array(kd.all_sparse_table,               dtype=mx.int32),
+            mx.array(kd.all_log2_table,                  dtype=mx.int32),
+            mx.array(kd.node_offsets,                    dtype=mx.int64),
+            mx.array(kd.tour_offsets,                    dtype=mx.int64),
+            mx.array(kd.sp_offsets,                      dtype=mx.int64),
+            mx.array(kd.lg_offsets,                      dtype=mx.int64),
+            mx.array(kd.sp_tour_widths,                  dtype=mx.int32),
+            mx.array(kd.tree_to_group_idx,               dtype=mx.int32),
+            mx.array(kd.polytomy_offsets,                dtype=mx.int32),
+            mx.array(poly_nodes,                         dtype=mx.int32),
+            mx.array([n_quartets],                       dtype=mx.int32),
+            mx.array([kd.n_trees],                       dtype=mx.int32),
+            mx.array([n_groups],                         dtype=mx.int32),
+            mx.array([kd.n_global_taxa],                 dtype=mx.int32),
+        ]
+
+    def quartet_counts_mlx(kd, sorted_ids, n_quartets, n_groups):
+        """
+        Count quartet topologies for all (quartet, group) pairs using Metal.
+
+        One Metal thread per quartet; sequential inner loop over trees.
+        No atomics needed — each thread owns its entire ``counts_out[qi]``
+        slice.
+
+        Parameters
+        ----------
+        kd : ForestKernelData
+            Forest kernel data (CPU arrays; not device-uploaded).
+        sorted_ids : int32[n_quartets, 4]
+            Quartet taxa as sorted global IDs.
+        n_quartets : int
+        n_groups : int
+
+        Returns
+        -------
+        counts_out : int32[n_quartets, n_groups, 4]
+            Topology counts.  Last axis: k=0,1,2 resolved; k=3 unresolved.
+        """
+        tg_size = 256
+        grid_x = ((n_quartets + tg_size - 1) // tg_size) * tg_size
+
+        out = _counts_topology_kernel(
+            inputs=_topology_inputs(kd, sorted_ids, n_quartets, n_groups),
+            output_shapes=[(n_quartets * n_groups * 4,)],
+            output_dtypes=[mx.int32],
+            grid=(grid_x, 1, 1),
+            threadgroup=(tg_size, 1, 1),
+        )
+        mx.eval(out[0])
+        return np.array(out[0], copy=False).reshape(n_quartets, n_groups, 4)
+
+    def quartet_steiner_mlx(kd, sorted_ids, n_quartets, n_groups):
+        """
+        Count quartet topologies and accumulate Steiner distances using Metal.
+
+        Steiner accumulation runs in float32 (Metal limitation).  The Python
+        wrapper returns float64 arrays for compatibility with the rest of the
+        pipeline; the caller handles any precision differences.
+
+        Parameters
+        ----------
+        kd : ForestKernelData
+        sorted_ids : int32[n_quartets, 4]
+        n_quartets : int
+        n_groups : int
+
+        Returns
+        -------
+        counts_out : int32[n_quartets, n_groups, 4]
+        steiner_out : float64[n_quartets, n_groups, 4]
+            Sum of Steiner lengths per cell.
+        steiner_min_out : float64[n_quartets, n_groups, 4]
+            Per-cell minimum Steiner length; +inf for empty cells (count==0).
+        steiner_max_out : float64[n_quartets, n_groups, 4]
+            Per-cell maximum Steiner length; -inf for empty cells (count==0).
+        steiner_sum_sq_out : float64[n_quartets, n_groups, 4]
+            Sum of squared Steiner lengths per cell (for variance).
+        """
+        shape = (n_quartets * n_groups * 4,)
+        tg_size = 256
+        grid_x = ((n_quartets + tg_size - 1) // tg_size) * tg_size
+
+        out = _steiner_topology_kernel(
+            inputs=_topology_inputs(kd, sorted_ids, n_quartets, n_groups),
+            output_shapes=[shape, shape, shape, shape, shape],
+            output_dtypes=[mx.int32, mx.float32, mx.float32, mx.float32, mx.float32],
+            grid=(grid_x, 1, 1),
+            threadgroup=(tg_size, 1, 1),
+        )
+        mx.eval(*out)
+
+        def _f64(arr):
+            return np.array(arr, copy=False).reshape(n_quartets, n_groups, 4).astype(np.float64)
+
+        return (
+            np.array(out[0], copy=False).reshape(n_quartets, n_groups, 4),
+            _f64(out[1]),
+            _f64(out[2]),
+            _f64(out[3]),
+            _f64(out[4]),
+        )

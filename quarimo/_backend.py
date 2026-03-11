@@ -51,7 +51,7 @@ from typing import List, Optional, Tuple
 # Maps kernel name → frozenset of backends with a full implementation.
 # Update this as new backend kernels are added — nothing else needs changing.
 KERNEL_IMPLEMENTATIONS: dict[str, frozenset[str]] = {
-    "quartet_topology": frozenset({"python", "cpu-parallel", "cuda"}),
+    "quartet_topology": frozenset({"python", "cpu-parallel", "cuda", "mlx"}),
 }
 
 

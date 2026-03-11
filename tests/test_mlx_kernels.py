@@ -1,41 +1,45 @@
 """
 tests/test_mlx_kernels.py
 =========================
-Correctness tests for the MLX Metal quartet generation kernel.
+Correctness tests for the MLX Metal quartet kernels.
 
-Prototype scope
----------------
-Tests only ``generate_quartets_mlx`` (the 1D generation kernel).  Full
-``quartet_counts`` / ``quartet_steiner`` Metal kernels are not yet implemented,
-so end-to-end backend agreement tests are excluded.
-
-Test structure
---------------
+Test classes
+------------
 ``TestMLX1DKernel``
     Verifies that ``generate_quartets_mlx`` produces bit-identical output to
     the CPU iterator (``Quartets.__iter__``) for all relevant code paths:
 
     1. ``test_1d_kernel_vs_cpu_iterator``
        Main agreement test: 140 random quartets against the CPU sequence.
-       Mirrors ``TestBackendAgreement.test_cuda_1d_kernel_vs_cpu_iterator``.
 
     2. ``test_rejection_no_sequence_dup``
        5 quartets, all requiring rejection sampling, none a sequence duplicate.
-       Isolates the rejection-sampling RNG path.
-       Mirrors ``TestRNGDuplicates.test_rejection_no_sequence_dup``.
 
     3. ``test_rejection_with_sequence_duplicates``
-       10 quartets, all requiring rejection sampling; positions 2, 8, 9 are
-       sequence duplicates.  If test 2 passes but this fails only at 2/8/9,
-       the bug is in duplicate handling, not in rejection sampling.
-       Mirrors ``TestRNGDuplicates.test_rejection_with_sequence_duplicates``.
+       10 quartets with rejection sampling; positions 2, 8, 9 are duplicates.
 
     4. ``test_seed_isolation``
-       Sanity check: different rng_seed values produce different quartet
-       sequences (the Metal kernel is actually using the RNG, not returning
-       garbage or a constant).
+       Different rng_seed values produce different quartet sequences.
 
-All four tests are skipped if MLX is not available.
+``TestMLXQuartetTopology``
+    Verifies that the Metal quartet topology and Steiner kernels produce
+    results that agree with the Python fallback backend:
+
+    1. ``test_counts_match_python``
+       MLX counts must equal Python counts exactly (integer result).
+
+    2. ``test_counts_grouped_match_python``
+       Same agreement check over a grouped (one group per tree) forest.
+
+    3. ``test_steiner_match_python``
+       MLX Steiner sums must agree with Python within float32 tolerance
+       (rtol=1e-4); min/max/variance are sanity-checked for shape and sign.
+
+    4. ``test_forest_quartet_topology_mlx_backend``
+       End-to-end: ``forest.quartet_topology()`` via ``use_backend("mlx")``
+       produces a valid ``QuartetTopologyResult`` with correct shape.
+
+All tests are skipped if MLX is not available.
 
 Test forest
 -----------
@@ -48,7 +52,7 @@ for RNG agreement.
 import numpy as np
 import pytest
 
-from quarimo._context import quiet
+from quarimo._context import quiet, use_backend
 from quarimo._forest import Forest
 from quarimo._quartets import Quartets
 
@@ -286,3 +290,123 @@ class TestMLX1DKernel:
             "Different seeds produced identical quartet sequences — "
             "the Metal kernel is ignoring rng_seed."
         )
+
+
+# ===========================================================================
+# 2. Quartet topology — counts and Steiner
+# ===========================================================================
+
+# Flat (single-group) forest for topology tests
+@pytest.fixture(scope="module")
+def flat_forest():
+    """16-tree single-group forest."""
+    with quiet():
+        return Forest(TREES)
+
+
+@pytest.fixture(scope="module")
+def topology_quartets(flat_forest):
+    """70 random quartets over the 16-tree single-group forest."""
+    with quiet():
+        return Quartets.random(flat_forest, count=70, seed=7)
+
+
+@pytest.fixture(scope="module")
+def grouped_topology_quartets(grouped_forest):
+    """70 random quartets over the 16-tree grouped forest."""
+    with quiet():
+        return Quartets.random(grouped_forest, count=70, seed=7)
+
+
+class TestMLXQuartetTopology:
+    """
+    Verify that the Metal quartet topology and Steiner kernels produce results
+    that agree with the Python fallback backend.
+
+    All tests are hardware-gated by ``pytestmark = pytest.mark.requires_mlx``
+    at module level.
+    """
+
+    def test_counts_match_python(self, flat_forest, topology_quartets):
+        """
+        MLX counts must be identical to Python counts (integer result, no
+        rounding).  Uses a single-group forest so the shape is (n_q, 1, 4).
+        """
+        q = topology_quartets
+        with quiet():
+            with use_backend("python"):
+                ref = flat_forest.quartet_topology(q)
+            with use_backend("mlx"):
+                mlx = flat_forest.quartet_topology(q)
+
+        np.testing.assert_array_equal(
+            ref.counts, mlx.counts,
+            err_msg="MLX counts differ from Python counts (single-group forest)",
+        )
+
+    def test_counts_grouped_match_python(self, grouped_forest, grouped_topology_quartets):
+        """
+        MLX counts must match Python counts for a grouped (one-group-per-tree)
+        forest.  Shape: (n_q, 16, 4).
+        """
+        q = grouped_topology_quartets
+        with quiet():
+            with use_backend("python"):
+                ref = grouped_forest.quartet_topology(q)
+            with use_backend("mlx"):
+                mlx = grouped_forest.quartet_topology(q)
+
+        np.testing.assert_array_equal(
+            ref.counts, mlx.counts,
+            err_msg="MLX counts differ from Python counts (grouped forest)",
+        )
+
+    def test_steiner_match_python(self, flat_forest, topology_quartets):
+        """
+        MLX Steiner sums must agree with Python within float32 tolerance
+        (rtol=1e-4).  Min/max/variance are sanity-checked for shape and
+        non-negativity of the sum.
+        """
+        q = topology_quartets
+        with quiet():
+            with use_backend("python"):
+                ref = flat_forest.quartet_topology(q, steiner=True)
+            with use_backend("mlx"):
+                mlx = flat_forest.quartet_topology(q, steiner=True)
+
+        # Counts must match exactly
+        np.testing.assert_array_equal(
+            ref.counts, mlx.counts,
+            err_msg="MLX Steiner-mode counts differ from Python",
+        )
+
+        # Steiner sums: float32 precision loss is expected (rtol=1e-4)
+        np.testing.assert_allclose(
+            ref.steiner, mlx.steiner, rtol=1e-4, atol=0,
+            err_msg="MLX Steiner sums differ from Python beyond float32 tolerance",
+        )
+
+        # Shapes match
+        assert mlx.steiner_min.shape == ref.steiner_min.shape
+        assert mlx.steiner_max.shape == ref.steiner_max.shape
+
+        # All non-NaN Steiner values must be non-negative
+        steiner_vals = mlx.steiner[ref.counts > 0]
+        assert (steiner_vals >= 0).all(), "MLX Steiner values contain negatives"
+
+    def test_forest_quartet_topology_mlx_backend(self, flat_forest, topology_quartets):
+        """
+        End-to-end: Forest.quartet_topology() via use_backend("mlx") returns
+        a valid QuartetTopologyResult with the correct shape and dtype.
+        """
+        q = topology_quartets
+        with quiet():
+            with use_backend("mlx"):
+                result = flat_forest.quartet_topology(q)
+
+        assert result.counts.shape == (len(q), flat_forest.n_groups, 4)
+        assert result.counts.dtype == np.int32
+        assert (result.counts >= 0).all()
+        # Total count across topologies for each (qi, gi) must not exceed n_trees
+        totals = result.counts.sum(axis=-1)
+        assert (totals <= flat_forest.n_trees).all()
