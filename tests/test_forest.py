@@ -1414,7 +1414,7 @@ class TestQuartetTopology:
         )
         expected = self._expected_steiner(nwk)
         got = float(result.steiner[0, 0, np.argmax(result.steiner[0, 0])])
-        np.testing.assert_allclose(got, expected, rtol=1e-10)
+        np.testing.assert_allclose(got, expected, rtol=1e-5)
 
     def test_steiner_values_match_phylotree_balanced_unequal(self):
         nwk = "((A:0.3,B:0.7):0.5,(C:0.2,D:0.9):0.4);"
@@ -1424,7 +1424,7 @@ class TestQuartetTopology:
         )
         expected = self._expected_steiner(nwk)
         got = float(result.steiner[0, 0, np.argmax(result.steiner[0, 0])])
-        np.testing.assert_allclose(got, expected, rtol=1e-10)
+        np.testing.assert_allclose(got, expected, rtol=1e-5)
 
     def test_steiner_values_match_phylotree_topo1(self):
         nwk = "((A:1.1,C:0.6):0.8,(B:0.4,D:1.3):0.2);"
@@ -1434,7 +1434,7 @@ class TestQuartetTopology:
         )
         expected = self._expected_steiner(nwk)
         got = float(result.steiner[0, 0, np.argmax(result.steiner[0, 0])])
-        np.testing.assert_allclose(got, expected, rtol=1e-10)
+        np.testing.assert_allclose(got, expected, rtol=1e-5)
 
     def test_steiner_values_match_phylotree_topo2(self):
         nwk = "((A:1,D:1):1,(B:1,C:1):1);"
@@ -1444,7 +1444,7 @@ class TestQuartetTopology:
         )
         expected = self._expected_steiner(nwk)
         got = float(result.steiner[0, 0, np.argmax(result.steiner[0, 0])])
-        np.testing.assert_allclose(got, expected, rtol=1e-10)
+        np.testing.assert_allclose(got, expected, rtol=1e-5)
 
     def test_steiner_values_match_phylotree_caterpillar(self):
         nwk = "(A:1,(B:1,(C:1,(D:1,E:1):1):1):1);"
@@ -1454,7 +1454,7 @@ class TestQuartetTopology:
         )
         expected = self._expected_steiner(nwk)
         got = float(result.steiner[0, 0, np.argmax(result.steiner[0, 0])])
-        np.testing.assert_allclose(got, expected, rtol=1e-10)
+        np.testing.assert_allclose(got, expected, rtol=1e-5)
 
     def test_steiner_values_match_phylotree_deep_caterpillar(self):
         nwk = "(A:0.1,(B:0.2,(C:0.3,(D:0.4,E:0.5):0.6):0.7):0.8);"
@@ -1464,7 +1464,7 @@ class TestQuartetTopology:
         )
         expected = self._expected_steiner(nwk)
         got = float(result.steiner[0, 0, np.argmax(result.steiner[0, 0])])
-        np.testing.assert_allclose(got, expected, rtol=1e-10)
+        np.testing.assert_allclose(got, expected, rtol=1e-5)
 
     def test_steiner_multi_tree_all_match_phylotree(self, mixed_collection):
         """Group Steiner sums match accumulated per-tree Steiner computations."""

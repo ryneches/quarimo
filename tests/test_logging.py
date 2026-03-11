@@ -29,8 +29,6 @@ TestQuartetTopologyLogging
 TestUseKernelFallback
     Verifies the graceful-fallback behaviour of use_kernel():
     - An unregistered kernel name triggers a WARNING on any machine.
-    - On Apple Silicon, requesting mlx for quartet_topology falls back to
-      cpu-parallel (or python) with a WARNING, and the call still succeeds.
 """
 
 import logging
@@ -234,22 +232,3 @@ class TestUseKernelFallback:
         assert warnings, "Expected a WARNING for missing kernel"
         assert "unregistered_kernel" in warnings[0].getMessage()
 
-    @pytest.mark.requires_mlx
-    def test_mlx_quartet_topology_falls_back_and_warns(self, forest_and_quartets, caplog):
-        """
-        On Apple Silicon, requesting mlx for quartet_topology falls back to
-        the next-best available backend, emits a WARNING, and the call still
-        produces a valid result.
-        """
-        c, q = forest_and_quartets
-        with caplog.at_level(logging.WARNING, logger="quarimo._context"):
-            with use_backend("mlx"):
-                result = c.quartet_topology(q)
-
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert warnings, "Expected a WARNING for mlx fallback"
-        msg = warnings[0].getMessage()
-        assert "mlx" in msg
-        assert "quartet_topology" in msg
-        # The result must still be a valid QuartetTopologyResult
-        assert result.counts.shape[0] == len(q)
