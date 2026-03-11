@@ -61,6 +61,7 @@ import random
 
 import pytest
 
+from quarimo._context import use_backend
 from quarimo._forest import Forest
 
 
@@ -898,8 +899,9 @@ class TestBenchQuartetTopologyCountsCPU:
             }
         )
         # Warm up the JIT before the timed rounds.
-        c.quartet_topology(quartets, backend="cpu-parallel")
-        benchmark(c.quartet_topology, quartets, backend="cpu-parallel")
+        with use_backend("cpu-parallel"):
+            c.quartet_topology(quartets)
+            benchmark(c.quartet_topology, quartets)
 
     @pytest.mark.parametrize(
         "n_quartets_val,n_quartets_label",
@@ -932,8 +934,9 @@ class TestBenchQuartetTopologyCountsCPU:
                 "backend": "cpu-parallel",
             }
         )
-        c.quartet_topology(quartets, backend="cpu-parallel")
-        benchmark(c.quartet_topology, quartets, backend="cpu-parallel")
+        with use_backend("cpu-parallel"):
+            c.quartet_topology(quartets)
+            benchmark(c.quartet_topology, quartets)
 
 
 # ======================================================================== #
@@ -983,8 +986,9 @@ class TestBenchQuartetTopologySteinerCPU:
                 "backend": "cpu-parallel",
             }
         )
-        c.quartet_topology(quartets, steiner=True, backend="cpu-parallel")
-        benchmark(c.quartet_topology, quartets, steiner=True, backend="cpu-parallel")
+        with use_backend("cpu-parallel"):
+            c.quartet_topology(quartets, steiner=True)
+            benchmark(c.quartet_topology, quartets, steiner=True)
 
     @pytest.mark.parametrize(
         "n_quartets_val,n_quartets_label",
@@ -1019,8 +1023,9 @@ class TestBenchQuartetTopologySteinerCPU:
                 "backend": "cpu-parallel",
             }
         )
-        c.quartet_topology(quartets, steiner=True, backend="cpu-parallel")
-        benchmark(c.quartet_topology, quartets, steiner=True, backend="cpu-parallel")
+        with use_backend("cpu-parallel"):
+            c.quartet_topology(quartets, steiner=True)
+            benchmark(c.quartet_topology, quartets, steiner=True)
 
     @pytest.mark.parametrize(
         "n_quartets_val,n_quartets_label",
@@ -1054,8 +1059,9 @@ class TestBenchQuartetTopologySteinerCPU:
                 "backend": "cpu-parallel",
             }
         )
-        c.quartet_topology(quartets, steiner=True, backend="cpu-parallel")
-        benchmark(c.quartet_topology, quartets, steiner=True, backend="cpu-parallel")
+        with use_backend("cpu-parallel"):
+            c.quartet_topology(quartets, steiner=True)
+            benchmark(c.quartet_topology, quartets, steiner=True)
 
     @pytest.mark.parametrize(
         "n_quartets_val,n_quartets_label",
@@ -1089,5 +1095,6 @@ class TestBenchQuartetTopologySteinerCPU:
                 "backend": "cpu-parallel",
             }
         )
-        c.quartet_topology(quartets, backend="cpu-parallel")
-        benchmark(c.quartet_topology, quartets, backend="cpu-parallel")
+        with use_backend("cpu-parallel"):
+            c.quartet_topology(quartets)
+            benchmark(c.quartet_topology, quartets)

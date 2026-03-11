@@ -10,6 +10,7 @@ import logging
 
 import pytest
 
+from quarimo._context import use_backend
 from quarimo._forest import Forest
 from quarimo._quartets import Quartets
 
@@ -65,7 +66,8 @@ def _capture_cuda_log(forest, quartets, **kwargs):
     logger = logging.getLogger("phylo_tree_collection")
     logger.addHandler(handler)
     try:
-        forest.quartet_topology(quartets, backend="cuda", **kwargs)
+        with use_backend("cuda"):
+            forest.quartet_topology(quartets, **kwargs)
     finally:
         logger.removeHandler(handler)
     return buf.getvalue()

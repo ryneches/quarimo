@@ -7,7 +7,7 @@ quartet lists and random sampling, with optimized GPU generation.
 """
 
 import numpy as np
-from quarimo import Forest
+from quarimo import Forest, use_backend
 from quarimo._quartets import Quartets
 
 
@@ -68,7 +68,8 @@ def example_random_sampling():
     print(f"RNG seed: 0x{q.rng_seed:08x}")
     
     # Process on GPU (if available)
-    counts = forest.quartet_topology(q, backend='cuda')
+    with use_backend('cuda'):
+        counts = forest.quartet_topology(q)
     
     # Compute frequencies
     frequencies = counts.sum(axis=0) / counts.sum()
@@ -122,11 +123,13 @@ def example_verify_cpu_gpu():
     print(f"First 3: {cpu_quartets[:3]}")
     
     # Process on GPU (generates quartets internally)
-    gpu_counts = forest.quartet_topology(q, backend='cuda')
-    
+    with use_backend('cuda'):
+        gpu_counts = forest.quartet_topology(q)
+
     # Process CPU-generated quartets on CPU for verification
     q_explicit = Quartets.from_list(forest, cpu_quartets)
-    cpu_counts = forest.quartet_topology(q_explicit, backend='cpu-parallel')
+    with use_backend('cpu-parallel'):
+        cpu_counts = forest.quartet_topology(q_explicit)
     
     print(f"CPU and GPU match: {np.array_equal(cpu_counts, gpu_counts)}")
 
@@ -235,23 +238,22 @@ def example_performance_comparison():
     gen_time = time.time() - start
     
     start = time.time()
-    counts_old = forest.quartet_topology(
-        Quartets.from_list(forest, cpu_quartets),
-        backend='cuda'
-    )
+    with use_backend('cuda'):
+        counts_old = forest.quartet_topology(Quartets.from_list(forest, cpu_quartets))
     process_time = time.time() - start
     total_old = gen_time + process_time
-    
+
     print(f"  CPU generation: {gen_time:.3f}s")
     print(f"  GPU processing: {process_time:.3f}s")
     print(f"  Total: {total_old:.3f}s")
-    
+
     # New approach: Generate on GPU
     print("\nNew approach (GPU generation):")
     q = Quartets.random(forest, count=n_samples, seed=42)
-    
+
     start = time.time()
-    counts_new = forest.quartet_topology(q, backend='cuda')
+    with use_backend('cuda'):
+        counts_new = forest.quartet_topology(q)
     total_new = time.time() - start
     
     print(f"  Total: {total_new:.3f}s")
