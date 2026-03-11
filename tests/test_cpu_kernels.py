@@ -12,31 +12,15 @@ The actual kernel logic is thoroughly tested via integration tests in
 test_phylo_tree_collection.py which use real tree data from PhyloTreeCollection.
 """
 
-import sys
-from pathlib import Path
-
-# Add parent directory to path so we can import the kernel modules
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import pytest
 
-# Try to import the CPU kernels
-try:
-    from quarimo._cpu_kernels import (
-        _rmq_csr_nb,
-        _quartet_counts_njit,
-        _quartet_steiner_njit,
-        _NUMBA_AVAILABLE
-    )
-    KERNELS_AVAILABLE = True
-except ImportError:
-    KERNELS_AVAILABLE = False
-    _NUMBA_AVAILABLE = False
+pytestmark = pytest.mark.requires_cpu_parallel
 
-# Skip all tests if kernels not available
-pytestmark = pytest.mark.skipif(
-    not KERNELS_AVAILABLE,
-    reason="CPU kernels module not available"
+from quarimo._cpu_kernels import (
+    _rmq_csr_nb,
+    _quartet_counts_njit,
+    _quartet_steiner_njit,
+    _NUMBA_AVAILABLE,
 )
 
 

@@ -57,17 +57,11 @@ Running
 from __future__ import annotations
 
 import itertools
-import os
 import random
-import sys
 
 import pytest
 
-_HERE = os.path.dirname(__file__)
-_ROOT = os.path.dirname(_HERE)
-sys.path.insert(0, _ROOT)
-
-from forest import Forest, _NUMBA_AVAILABLE
+from quarimo._forest import Forest
 
 
 # ======================================================================== #
@@ -847,7 +841,7 @@ class TestBenchBranchDistance:
 # pytestmark so it appears cleanly in the benchmark report.
 
 
-@pytest.mark.skipif(not _NUMBA_AVAILABLE, reason="numba not installed")
+@pytest.mark.requires_cpu_parallel
 class TestBenchQuartetTopologyCountsCPU:
     """
     Measure quartet_topology(..., backend='cpu-parallel') in counts-only mode.
@@ -947,7 +941,7 @@ class TestBenchQuartetTopologyCountsCPU:
 # ======================================================================== #
 
 
-@pytest.mark.skipif(not _NUMBA_AVAILABLE, reason="numba not installed")
+@pytest.mark.requires_cpu_parallel
 class TestBenchQuartetTopologySteinerCPU:
     """
     Measure quartet_topology(..., steiner=True, backend='cpu-parallel').

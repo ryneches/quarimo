@@ -27,9 +27,10 @@ with unambiguous C integer semantics.
 
 Backend detection
 -----------------
-``check_mlx_available()`` is called by ``_backend.py`` and is safe to call
-on any platform — it imports MLX, runs a trivial Metal operation, and returns
-False if either step fails.
+MLX availability is detected once per session by ``quarimo._backend.backends.mlx``
+(a ``@cached_property`` on the ``_BackendCapabilities`` singleton).  This module
+uses its own ``_MLX_AVAILABLE`` flag — set at import time — solely to guard
+kernel definitions; external callers should use ``backends.mlx`` instead.
 """
 
 from __future__ import annotations
@@ -45,11 +46,6 @@ try:
     _MLX_AVAILABLE = True
 except Exception:
     pass
-
-
-def check_mlx_available() -> bool:
-    """Return True if MLX with Metal GPU compute is available on this machine."""
-    return _MLX_AVAILABLE
 
 
 if _MLX_AVAILABLE:

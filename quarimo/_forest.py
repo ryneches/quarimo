@@ -154,15 +154,7 @@ from quarimo._logging import (
 )
 
 # Import backend detection from separate module
-from quarimo._backend import (
-    check_numba_available,
-    check_cuda_available,
-    get_available_backends,
-    get_best_backend,
-    resolve_backend,
-    import_cpu_kernels,
-    import_cuda_kernels,
-)
+from quarimo._backend import backends
 
 # Import utilities from separate module
 from quarimo._utils import jaccard_similarity, validate_quartet, format_newick
@@ -179,18 +171,12 @@ from quarimo._kernel_data import ForestKernelData, QuartetKernelArgs
 # Backward compatibility alias for tests
 _jaccard = jaccard_similarity
 
-# ── Optional numba acceleration ──────────────────────────────────────────────
-# Import CPU kernels using backend module
-_NUMBA_AVAILABLE = check_numba_available()
-_cpu_import_ok, _rmq_csr_nb, _quartet_counts_njit, _quartet_steiner_njit = (
-    import_cpu_kernels()
-)
-
-# Fallback for prange if numba not available
-if _NUMBA_AVAILABLE:
-    from numba import prange
-else:
-    prange = range  # serial fallback
+if backends.numba:
+    from quarimo._cpu_kernels import (
+        _rmq_csr_nb,
+        _quartet_counts_njit,
+        _quartet_steiner_njit,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -231,12 +217,6 @@ def _resolve_n_threads(n_threads: Optional[int]) -> int:
 # These functions are now in _logging.py and imported above
 
 
-# ── Backend availability detection ──────────────────────────────────────────
-# Use backend module for detection
-_, _CUDA_AVAILABLE = check_cuda_available()
-_BACKENDS_AVAILABLE = get_available_backends()
-
-
 # Track first calls to kernels for compilation logging
 _kernel_first_call = {
     "cpu-parallel-counts": True,
@@ -245,51 +225,19 @@ _kernel_first_call = {
     "cuda-steiner": True,
 }
 
-
 # Log system info and backend availability on module import
-log_optimization_status(_NUMBA_AVAILABLE)
-log_backend_availability(_BACKENDS_AVAILABLE, _NUMBA_AVAILABLE)
-install_numba_warning_filter(_NUMBA_AVAILABLE)
+log_optimization_status(backends.numba)
+log_backend_availability(backends.available(), backends.numba)
+install_numba_warning_filter(backends.numba)
 
-
-# ======================================================================== #
-# CPU Kernels imported from _kernels_cpu.py                                #
-# ======================================================================== #
-# The following functions are imported from _kernels_cpu:                  #
-#   - _rmq_csr_nb: O(1) RMQ helper for CSR-packed arrays                  #
-#   - _quartet_counts_njit: Parallel counts-only kernel                   #
-#   - _quartet_steiner_njit: Parallel kernel with Steiner distances       #
-#                                                                           #
-# These are module-level numba-JIT functions, separated into their own     #
-# file to isolate numba dependencies and reduce import-time complexity.    #
-# ======================================================================== #
-
-
-# ======================================================================== #
-# CUDA kernels imported from _cuda_kernels.py                              #
-# ======================================================================== #
-# The following functions are imported from _cuda_kernels:                  #
-#   - _rmq_csr_cuda: Device function for GPU RMQ                           #
-#   - _quartet_counts_cuda: GPU counts-only kernel                         #
-#   - _quartet_steiner_cuda: GPU kernel with Steiner distances             #
-#   - _compute_cuda_grid: Helper for CUDA grid dimensions                  #
-#                                                                           #
-# These are cuda.jit functions, separated into their own file to isolate   #
-# CUDA dependencies and reduce import-time complexity.                      #
-# ======================================================================== #
-
-if _CUDA_AVAILABLE:
-    _cuda_import_ok, _quartet_counts_cuda, _quartet_steiner_cuda, _compute_cuda_grid = (
-        import_cuda_kernels()
+if backends.cuda:
+    from quarimo._cuda_kernels import (
+        _rmq_csr_cuda,
+        _quartet_counts_cuda,
+        _quartet_steiner_cuda,
+        _compute_cuda_grid,
     )
-    # Also need the device function for RMQ
-    if _cuda_import_ok:
-        from quarimo._cuda_kernels import _rmq_csr_cuda
-
-        # Import cuda module for device operations (cuda.to_device, cuda.device_array, etc.)
-        from numba import cuda
-    else:
-        _CUDA_AVAILABLE = False
+    from numba import cuda  # noqa: F401 — needed for device ops
 
 
 # ======================================================================== #
@@ -536,7 +484,7 @@ class Forest:
 
         # Upload tree structure to GPU once (if available)
         self._cuda_kernel_data: Optional[ForestKernelData] = None
-        if _CUDA_AVAILABLE:
+        if backends.cuda:
             self._upload_to_gpu()
 
         # Log group statistics and namespace coverage
@@ -914,17 +862,13 @@ class Forest:
             )
 
         # ── 2. Resolve backend and log execution mode ─────────────────────
-        # Check for backend override from context manager
+        # Context manager override takes precedence over caller's argument.
         backend_override = get_backend_override()
         if backend_override is not None:
             backend = backend_override
 
-        try:
-            resolved_backend = resolve_backend(backend)
-        except ValueError as e:
-            # Backend not available, fall back to best available
-            logger.warning(str(e))
-            resolved_backend = get_best_backend()
+        # Raises ValueError with a clear message if the backend is unavailable.
+        resolved_backend = backends.resolve(backend)
 
         # Log execution mode
         mode_str = "Steiner" if steiner else "counts-only"
@@ -1139,7 +1083,7 @@ class Forest:
                 global_names=_global_names,
             )
 
-        if _cpu_import_ok:
+        if backends.numba:
             from quarimo._cpu_kernels import _qed_njit
 
             _qed_njit(counts, group_pairs, n_quartets, n_pairs, out)

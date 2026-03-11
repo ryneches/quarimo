@@ -193,89 +193,81 @@ def suppress_warnings(category: Optional[Type[Warning]] = None):
 @contextmanager
 def use_backend(backend: str):
     """
-    Temporarily force a specific backend for quartet operations.
+    Temporarily force a specific backend for all quartet operations.
 
-    Useful for benchmarking, testing, or ensuring consistent behavior
-    regardless of available hardware.
+    Validates that the requested backend is available on entry and raises
+    ``ValueError`` immediately if it is not — so failures are explicit and
+    located at the context boundary rather than buried in kernel dispatch.
 
     Parameters
     ----------
     backend : str
-        Backend to use. Valid options:
-        - 'python': Pure Python (slow, always available)
-        - 'cpu-parallel': Numba parallel (requires numba)
-        - 'cuda': GPU acceleration (requires numba + CUDA)
-        - 'best': Use best available (default behavior)
+        Backend to use.  Valid values:
+
+        ``'python'``
+            Pure-Python fallback.  Always available.
+        ``'cpu-parallel'``
+            Numba-JIT parallel kernel.  Requires ``numba``.
+        ``'cuda'``
+            NVIDIA GPU kernel.  Requires ``numba`` and a CUDA-capable device.
+        ``'mlx'``
+            Apple Metal GPU kernel.  Requires ``mlx`` and an M-series chip.
+        ``'best'``
+            Resolve to the highest-priority available backend (default
+            behavior when no context is active).
 
     Yields
     ------
-    None
-        Control is yielded back to the with-block.
+    str
+        The resolved concrete backend name (never ``'best'``).
 
     Raises
     ------
     ValueError
-        If requested backend is not available.
+        Raised immediately on context entry if *backend* is unavailable.
+        The message names both the requested backend and the full list of
+        available ones, e.g.::
+
+            ValueError: Backend 'cuda' not available.
+            Available backends: python, cpu-parallel
 
     Examples
     --------
-    >>> # Force CPU-parallel backend for consistent timing
+    Force a specific backend for a single call:
+
     >>> with use_backend('cpu-parallel'):
-    ...     start = time.time()
-    ...     counts = c.quartet_topology(quartets)
-    ...     cpu_time = time.time() - start
+    ...     counts = forest.quartet_topology(quartets)
 
-    >>> # Compare backends
-    >>> backends = ['python', 'cpu-parallel', 'cuda']
-    >>> for backend_name in backends:
+    Compare backends (graceful skip when unavailable):
+
+    >>> for name in ['python', 'cpu-parallel', 'cuda']:
     ...     try:
-    ...         with use_backend(backend_name):
-    ...             start = time.time()
-    ...             counts = c.quartet_topology(quartets)
-    ...             print(f"{backend_name}: {time.time() - start:.3f}s")
-    ...     except ValueError:
-    ...         print(f"{backend_name}: not available")
-
-    >>> # Force Python backend for debugging
-    >>> with use_backend('python'):
-    ...     # No JIT compilation, easier to debug
-    ...     counts = c.quartet_topology(quartets)
+    ...         with use_backend(name) as b:
+    ...             counts = forest.quartet_topology(quartets)
+    ...             print(f"{b}: ok")
+    ...     except ValueError as e:
+    ...         print(f"skipped — {e}")
 
     Notes
     -----
-    - **Not thread-safe**: Uses module-level state
-    - Backend availability checked when context entered
-    - Raises ValueError immediately if backend unavailable
-    - Original 'best' behavior restored on exit
-
-    Thread Safety Warning
-    ---------------------
-    This context manager modifies module-level state and is NOT thread-safe.
-    If you need thread-safe backend selection, pass the backend parameter
-    directly to quartet_topology() instead:
-
-        # Thread-safe alternative:
-        counts = c.quartet_topology(quartets, backend='cpu-parallel')
+    - **Not thread-safe**: Uses module-level state.  For thread-safe backend
+      selection pass ``backend=`` directly to :meth:`Forest.quartet_topology`.
+    - The context manager stores the *resolved* concrete name, so
+      ``use_backend('best')`` inside the block reports the actual backend
+      that was selected.
+    - The original override (or absence of one) is always restored on exit,
+      even when an exception propagates out of the ``with`` block.
     """
     global _backend_override
 
-    # Validate backend is available
-    from ._backend import get_available_backends
+    from ._backend import backends as _backends
 
-    available = get_available_backends()
+    resolved = _backends.resolve(backend)  # raises ValueError if unavailable
 
-    if backend != "best" and backend not in available:
-        raise ValueError(
-            f"Backend '{backend}' not available. "
-            f"Available backends: {', '.join(available)}"
-        )
-
-    # Save original override state
     original_override = _backend_override
-
     try:
-        _backend_override = backend
-        yield
+        _backend_override = resolved
+        yield resolved
     finally:
         _backend_override = original_override
 

@@ -77,7 +77,6 @@ import itertools
 import numpy as np
 import pytest
 
-from quarimo._backend import get_available_backends
 from quarimo._context import quiet, silent_benchmark
 from quarimo._forest import Forest
 from quarimo._quartets import Quartets
@@ -139,16 +138,8 @@ TREES = [
 # Pytest markers
 # ---------------------------------------------------------------------------
 
-_AVAILABLE = get_available_backends()
-
-cpu_parallel_skip = pytest.mark.skipif(
-    "cpu-parallel" not in _AVAILABLE,
-    reason="cpu-parallel backend not available",
-)
-cuda_skip = pytest.mark.skipif(
-    "cuda" not in _AVAILABLE,
-    reason="cuda backend not available",
-)
+cpu_parallel_skip = pytest.mark.requires_cpu_parallel
+cuda_skip = pytest.mark.requires_cuda
 
 try:
     from SuchTree import SuchTree as _SuchTree  # noqa: F401

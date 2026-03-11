@@ -48,10 +48,11 @@ for RNG agreement.
 import numpy as np
 import pytest
 
-from quarimo._backend import check_mlx_available
 from quarimo._context import quiet
 from quarimo._forest import Forest
 from quarimo._quartets import Quartets
+
+pytestmark = pytest.mark.requires_mlx
 
 # ---------------------------------------------------------------------------
 # 16-tree test corpus (identical to test_kernel_agreement.py)
@@ -103,15 +104,6 @@ TREES = [
     "(((a:0.10,e:0.20):0.15,(b:0.30,f:0.40):0.25):0.50,"
     "((c:0.10,g:0.20):0.15,(d:0.30,h:0.40):0.25):0.50);",
 ]
-
-# ---------------------------------------------------------------------------
-# Skip marker
-# ---------------------------------------------------------------------------
-
-mlx_skip = pytest.mark.skipif(
-    not check_mlx_available(),
-    reason="MLX with Metal GPU not available",
-)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -209,7 +201,7 @@ class TestMLX1DKernel:
     Silicon machines and machines where MLX is not installed).
     """
 
-    @mlx_skip
+    @pytest.mark.requires_mlx
     def test_1d_kernel_vs_cpu_iterator(self, grouped_forest, random_quartets):
         """
         Metal kernel must produce the same 140 quartets as the CPU iterator.
@@ -230,7 +222,7 @@ class TestMLX1DKernel:
             ),
         )
 
-    @mlx_skip
+    @pytest.mark.requires_mlx
     def test_rejection_no_sequence_dup(self, grouped_forest):
         """
         Metal kernel must match CPU at rejection-sampling positions with no
@@ -251,7 +243,7 @@ class TestMLX1DKernel:
         gpu_quartets = _run_mlx_1d(grouped_forest, q)
         _assert_no_mismatch(cpu_quartets, gpu_quartets, info)
 
-    @mlx_skip
+    @pytest.mark.requires_mlx
     def test_rejection_with_sequence_duplicates(self, grouped_forest):
         """
         Metal kernel must match CPU when some positions repeat earlier quartets.
@@ -275,7 +267,7 @@ class TestMLX1DKernel:
         gpu_quartets = _run_mlx_1d(grouped_forest, q)
         _assert_no_mismatch(cpu_quartets, gpu_quartets, info)
 
-    @mlx_skip
+    @pytest.mark.requires_mlx
     def test_seed_isolation(self, grouped_forest):
         """
         Different rng_seed values must produce different quartet sequences.

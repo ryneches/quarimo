@@ -13,33 +13,19 @@ The actual kernel logic is thoroughly tested via integration tests in
 test_forest.py which use real tree data from Forest.
 """
 
-import sys
-from pathlib import Path
-
-# Add parent directory to path so we can import the kernel modules
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import pytest
 
-# Try to import the CUDA kernels
-try:
-    from quarimo._cuda_kernels import _compute_cuda_grid, _CUDA_AVAILABLE
+from quarimo._backend import backends
+from quarimo._cuda_kernels import _compute_cuda_grid
 
-    if _CUDA_AVAILABLE:
-        from quarimo._cuda_kernels import (
-            _rmq_csr_cuda,
-            _quartet_counts_cuda,
-            _quartet_steiner_cuda,
-        )
-    KERNELS_MODULE_AVAILABLE = True
-except ImportError:
-    KERNELS_MODULE_AVAILABLE = False
-    _CUDA_AVAILABLE = False
+if backends.cuda:
+    from quarimo._cuda_kernels import (
+        _rmq_csr_cuda,
+        _quartet_counts_cuda,
+        _quartet_steiner_cuda,
+    )
 
-# Skip all tests if module not available
-pytestmark = pytest.mark.skipif(
-    not KERNELS_MODULE_AVAILABLE, reason="CUDA kernels module not available"
-)
+_CUDA_AVAILABLE = backends.cuda
 
 
 class TestModuleImport:
@@ -109,7 +95,7 @@ class TestComputeCudaGrid:
         assert threads == (16, 16)
 
 
-@pytest.mark.skipif(not _CUDA_AVAILABLE, reason="Requires CUDA")
+@pytest.mark.requires_cuda
 class TestCUDAKernelStructure:
     """
     Tests for CUDA kernel structure (only run if CUDA available).

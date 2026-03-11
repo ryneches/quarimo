@@ -1,175 +1,89 @@
-#!/usr/bin/env python3
 """
 test_cuda_logging.py
 ====================
-Demonstrates and validates the CUDA data transfer logging.
-
-This script tests that all expected logging messages are emitted when using
-the CUDA backend, even when CUDA is unavailable (fallback case).
+Validates that expected logging messages are emitted when using the CUDA
+backend.  All tests in this module are skipped on machines without CUDA.
 """
 
-import sys
-import logging
 import io
+import logging
 
-sys.path.insert(0, ".")
+import pytest
 
-# Set up logging to capture all messages
-log_capture = io.StringIO()
-handler = logging.StreamHandler(log_capture)
-handler.setLevel(logging.INFO)
-formatter = logging.Formatter("%(levelname)s: %(message)s")
-handler.setFormatter(formatter)
-
-logger = logging.getLogger("forest")
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
-from quarimo._forest import Forest, _CUDA_AVAILABLE
+from quarimo._forest import Forest
 from quarimo._quartets import Quartets
 
-print("=" * 70)
-print("CUDA Data Transfer Logging Validation")
-print("=" * 70)
-print(f"\nCUDA Available: {_CUDA_AVAILABLE}")
+pytestmark = pytest.mark.requires_cuda
 
-# Create test collection
-newicks = [
+# ---------------------------------------------------------------------------
+# Shared test data
+# ---------------------------------------------------------------------------
+
+_NEWICKS = [
     "((A:1,B:1):1,(C:1,D:1):1);",
     "((A:1,C:1):1,(B:1,D:1):1);",
     "((A:1,D:1):1,(B:1,C:1):1);",
 ] * 10  # 30 trees
 
-c = Forest(newicks)
-quartets = [("A", "B", "C", "D"), ("A", "B", "D", "C")]
+_QUARTETS = [("A", "B", "C", "D"), ("A", "B", "D", "C")]
 
-print(f"\nCollection: {c.n_trees} trees, {c.n_global_taxa} taxa")
-print(f"Quartets: {len(quartets)}")
-print(
-    f"Problem size: {len(quartets)} quartets × {c.n_trees} trees = {len(quartets) * c.n_trees} pairs"
-)
+_EXPECTED_CUDA_MESSAGES = [
+    "Transferring data to GPU device:",
+    "Tree data:",
+    "global_to_local:",
+    "CSR packed arrays:",
+    "Query data:",
+    "sorted_quartet_ids:",
+    "Total H→D transfer:",
+    "Launching CUDA kernel:",
+    "Grid:",
+    "Total threads:",
+    "Transferring results from GPU device:",
+    "counts_out:",
+    "Total D→H transfer:",
+]
 
-# Clear the log capture from construction
-log_capture.truncate(0)
-log_capture.seek(0)
+_STEINER_MESSAGES = [
+    "Output arrays:",
+    "steiner_out",
+    "float64",
+]
 
-print("\n" + "=" * 70)
-print("Test 1: Counts-only mode")
-print("=" * 70)
 
-counts = c.quartet_topology(Quartets.from_list(c, quartets), backend="cuda")
+@pytest.fixture(scope="module")
+def forest_and_quartets():
+    c = Forest(_NEWICKS)
+    q = Quartets.from_list(c, _QUARTETS)
+    return c, q
 
-logs = log_capture.getvalue()
-print("\nLogging output:")
-print(logs)
 
-# Validate expected log messages are present
-if _CUDA_AVAILABLE:
-    expected_messages = [
-        "Transferring data to GPU device:",
-        "Tree data:",
-        "global_to_local:",
-        "CSR packed arrays:",
-        "Query data:",
-        "sorted_quartet_ids:",
-        "Total H→D transfer:",
-        "Launching CUDA kernel:",
-        "Grid:",
-        "Total threads:",
-        "Transferring results from GPU device:",
-        "counts_out:",
-        "Total D→H transfer:",
-    ]
+def _capture_cuda_log(forest, quartets, **kwargs):
+    """Run quartet_topology with CUDA backend and return captured log text."""
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setLevel(logging.INFO)
+    logger = logging.getLogger("phylo_tree_collection")
+    logger.addHandler(handler)
+    try:
+        forest.quartet_topology(quartets, backend="cuda", **kwargs)
+    finally:
+        logger.removeHandler(handler)
+    return buf.getvalue()
 
-    print("\nValidation:")
-    for msg in expected_messages:
-        if msg in logs:
-            print(f"  ✓ Found: {msg}")
-        else:
-            print(f"  ✗ Missing: {msg}")
-else:
-    print("\nNote: CUDA unavailable, so CUDA-specific logging not shown.")
-    print("Expected messages when CUDA is available:")
-    print("  - Transferring data to GPU device")
-    print("  - Tree data: N arrays, X.XX MB")
-    print("  - Query data: N arrays, X.XX MB")
-    print("  - Launching CUDA kernel")
-    print("  - Grid: NxM blocks, NxM threads/block")
-    print("  - Total threads: X,XXX (active: X,XXX, idle: XXX)")
-    print("  - Transferring results from GPU device")
-    print("  - counts_out: shape dtype, size")
 
-# Clear for next test
-log_capture.truncate(0)
-log_capture.seek(0)
+class TestCUDALogging:
+    def test_counts_mode_logs_expected_messages(self, forest_and_quartets):
+        """Counts-only CUDA call must log H→D transfer, kernel launch, D→H transfer."""
+        c, q = forest_and_quartets
+        logs = _capture_cuda_log(c, q)
+        missing = [msg for msg in _EXPECTED_CUDA_MESSAGES if msg not in logs]
+        assert not missing, f"Missing log messages: {missing}\n\nFull log:\n{logs}"
 
-print("\n" + "=" * 70)
-print("Test 2: Steiner mode")
-print("=" * 70)
-
-result = c.quartet_topology(Quartets.from_list(c, quartets), steiner=True, backend="cuda")
-counts, dists = result.counts, result.steiner
-
-logs = log_capture.getvalue()
-print("\nLogging output:")
-print(logs)
-
-if _CUDA_AVAILABLE:
-    steiner_messages = [
-        "Output arrays:",
-        "steiner_out",
-        "float64",
-    ]
-
-    print("\nValidation (Steiner-specific):")
-    for msg in steiner_messages:
-        if msg in logs:
-            print(f"  ✓ Found: {msg}")
-        else:
-            print(f"  ✗ Missing: {msg}")
-
-print("\n" + "=" * 70)
-print("Expected Logging Structure with CUDA")
-print("=" * 70)
-print("""
-When CUDA is available, each quartet_topology(..., backend='cuda') call logs:
-
-1. DATA TRANSFER TO GPU (Host → Device):
-   - Tree data summary:
-     • Number of arrays
-     • Total size in MB
-     • global_to_local shape and dtype
-     • CSR array statistics (n_trees, sparse table size)
-   
-   - Query data summary:
-     • Number of arrays
-     • sorted_quartet_ids shape and dtype
-     • Total size
-   
-   - Output arrays (Steiner mode only):
-     • steiner_out size in MB
-     • Array shape
-   
-   - Total H→D transfer size
-
-2. KERNEL LAUNCH CONFIGURATION:
-   - Grid dimensions (blocks in x and y)
-   - Threads per block
-   - Total threads allocated
-   - Active threads (n_quartets × n_trees)
-   - Idle threads (overhead from block rounding)
-
-3. RESULTS TRANSFER FROM GPU (Device → Host):
-   - counts_out: shape, dtype, size
-   - steiner_out: shape, dtype, size (if Steiner mode)
-   - Total D→H transfer size
-
-All sizes are formatted for readability:
-   - < 1 MB: shown in KB
-   - ≥ 1 MB: shown in MB with 2 decimal places
-   - Thread counts: comma-separated thousands
-""")
-
-print("=" * 70)
-print("Test Complete ✓")
-print("=" * 70)
+    def test_steiner_mode_logs_output_arrays(self, forest_and_quartets):
+        """Steiner CUDA call must additionally log steiner_out array info."""
+        c, q = forest_and_quartets
+        logs = _capture_cuda_log(c, q, steiner=True)
+        missing = [msg for msg in _STEINER_MESSAGES if msg not in logs]
+        assert not missing, (
+            f"Missing Steiner log messages: {missing}\n\nFull log:\n{logs}"
+        )
