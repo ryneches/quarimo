@@ -273,9 +273,9 @@ inline int32_t rmq_msl(
 {
     int32_t length = r - l + 1;
     int32_t k      = log2_table[lg_base + length];
-    int32_t half   = 1 << k;
+    int32_t span   = 1 << k;
     int32_t li = sparse_table[sp_base + (long)k * sp_stride + l];
-    int32_t ri = sparse_table[sp_base + (long)k * sp_stride + (r - half + 1)];
+    int32_t ri = sparse_table[sp_base + (long)k * sp_stride + (r - span + 1)];
     int32_t lca_local =
         (euler_depth[tour_base + ri] < euler_depth[tour_base + li]) ? ri : li;
     return euler_tour[tour_base + lca_local];
