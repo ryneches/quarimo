@@ -456,6 +456,149 @@ class TestBackendAgreement:
         )
 
 
+class TestRNGDuplicates:
+    """
+    Distinguishes two potential failure modes in GPU quartet generation:
+
+    A. Rejection-sampling divergence: the GPU XorShift128 produces a
+       different value when a taxon candidate must be retried, causing the
+       post-rejection state to diverge from the CPU.
+
+    B. Sequence-duplicate divergence: the GPU produces a different quartet
+       specifically at positions where the same 4-taxon set already appeared
+       earlier in the sequence (possibly via some de-duplication or cache
+       interaction in the kernel).
+
+    Methodology
+    -----------
+    - Scenario A  (seed=2, count=5): all 5 positions require rejection
+      sampling (RNG calls > 4), verified offline.  All 5 quartets are
+      *unique* — no quartet repeats.  Isolates rejection-sampling bugs.
+    - Scenario B  (seed=0, count=10): all 10 positions require rejection
+      sampling.  Positions 2, 8, 9 are sequence duplicates (same 4-taxon
+      set as an earlier position).  If scenario A passes but scenario B
+      fails only at positions 2/8/9, the bug is triggered by sequence
+      duplicates, not by rejection sampling per se.
+
+    Both scenarios use ``Quartets.random`` with integer seeds so that
+    ``rng_seed`` is set directly to the integer value (see
+    ``Quartets.random``), matching the offline trace.
+    """
+
+    @staticmethod
+    def _run_1d_kernel(grouped_forest, q):
+        """Return GPU quartet array from the 1D generation kernel."""
+        from numba import cuda as _cuda
+        from quarimo._cuda_kernels import generate_quartets_cuda
+
+        seed_array = np.array(q.seed, dtype=np.int32)
+        d_seed = _cuda.to_device(seed_array)
+        bc = len(q)
+        d_batch = _cuda.device_array((bc, 4), dtype=np.int32)
+        generate_quartets_cuda[(bc + 255) // 256, 256](
+            d_seed, len(q.seed), q.offset, bc, q.rng_seed,
+            grouped_forest.n_global_taxa, d_batch,
+        )
+        _cuda.synchronize()
+        return d_batch.copy_to_host()
+
+    @staticmethod
+    def _annotate_positions(cpu_quartets, rng_seed):
+        """Return per-position (n_rng_calls, is_sequence_dup) info."""
+        seen = {}
+        info = []
+        for i, row in enumerate(cpu_quartets):
+            tup = tuple(row)
+            is_dup = tup in seen
+            seen.setdefault(tup, i)
+            # Count RNG calls by replaying the CPU XorShift
+            state = np.array([
+                (rng_seed + i) & 0xFFFFFFFF,
+                ((rng_seed + i) >> 32) & 0xFFFFFFFF,
+                0x9e3779b9, 0x7f4a7c13,
+            ], dtype=np.uint32)
+            samples, calls = [], 0
+            while len(samples) < 4:
+                t = state[3]; s = state[0]
+                state[3] = state[2]; state[2] = state[1]; state[1] = s
+                t = (t ^ ((t << 11) & 0xFFFFFFFF)) & 0xFFFFFFFF
+                t = (t ^ (t >> 8)) & 0xFFFFFFFF
+                state[0] = (t ^ s ^ (s >> 19)) & 0xFFFFFFFF
+                calls += 1
+                c = int(state[0] % 8)
+                if c not in samples:
+                    samples.append(c)
+            info.append((calls, is_dup))
+        return info
+
+    @staticmethod
+    def _assert_no_mismatch(cpu_quartets, gpu_quartets, info):
+        mismatches = np.where(np.any(cpu_quartets != gpu_quartets, axis=1))[0].tolist()
+        if mismatches:
+            lines = []
+            for i in mismatches:
+                calls, is_dup = info[i]
+                lines.append(
+                    f"  qi={i}: cpu={tuple(cpu_quartets[i])} "
+                    f"gpu={tuple(gpu_quartets[i])} "
+                    f"rng_calls={calls} is_sequence_dup={is_dup}"
+                )
+            raise AssertionError(
+                f"GPU quartet sequence differs at {len(mismatches)} positions:\n"
+                + "\n".join(lines)
+            )
+
+    @cuda_skip
+    def test_rejection_no_sequence_dup(self, grouped_forest):
+        """
+        GPU must match CPU at positions that require rejection sampling but
+        produce a unique quartet (no sequence duplicate).
+
+        Seed 2, count 5 — verified offline:
+          calls=[6, 9, 5, 5, 5], all unique quartets.
+        All 5 positions exercise the rejection path; none is a duplicate of
+        another.  A failure here means rejection sampling diverges regardless
+        of sequence duplication.
+        """
+        with quiet():
+            q = Quartets.random(grouped_forest, count=5, seed=2)
+        cpu_quartets = np.array(list(q), dtype=np.int32)
+        info = self._annotate_positions(cpu_quartets, q.rng_seed)
+
+        assert all(c > 4 for c, _ in info), "Precondition: all positions must have rejections"
+        assert all(not d for _, d in info), "Precondition: no sequence duplicates expected"
+
+        gpu_quartets = self._run_1d_kernel(grouped_forest, q)
+        self._assert_no_mismatch(cpu_quartets, gpu_quartets, info)
+
+    @cuda_skip
+    def test_rejection_with_sequence_duplicates(self, grouped_forest):
+        """
+        GPU must match CPU at positions that are sequence duplicates (same
+        4-taxon set as an earlier position in the window).
+
+        Seed 0, count 10 — verified offline:
+          positions 2, 8, 9 are duplicates; all 10 positions have rejections.
+        If test_rejection_no_sequence_dup passes but this test fails only at
+        positions 2, 8, 9, the bug is triggered by sequence duplicates.
+        If both fail at the same rejection positions, rejection sampling is
+        the root cause.
+        """
+        with quiet():
+            q = Quartets.random(grouped_forest, count=10, seed=0)
+        cpu_quartets = np.array(list(q), dtype=np.int32)
+        info = self._annotate_positions(cpu_quartets, q.rng_seed)
+
+        dup_positions = [i for i, (_, is_dup) in enumerate(info) if is_dup]
+        assert dup_positions == [2, 8, 9], (
+            f"Precondition: expected duplicates at [2, 8, 9], got {dup_positions}"
+        )
+        assert all(c > 4 for c, _ in info), "Precondition: all positions must have rejections"
+
+        gpu_quartets = self._run_1d_kernel(grouped_forest, q)
+        self._assert_no_mismatch(cpu_quartets, gpu_quartets, info)
+
+
 class TestFourPointCondition:
     """Detected topology minimises the pairwise-distance pair-sum."""
 
