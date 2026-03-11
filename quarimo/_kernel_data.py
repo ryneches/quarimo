@@ -307,7 +307,8 @@ class QuartetKernelArgs:
             offset=quartets.offset,
         )
 
-    def cuda_batch_args(self, d_seed, batch_offset: int, bc: int) -> tuple:
+    def cuda_batch_args(self, d_seed, batch_offset: int, bc: int,
+                        n_seed: int | None = None) -> tuple:
         """
         Quartet-generation argument block for one CUDA batch.
 
@@ -326,5 +327,11 @@ class QuartetKernelArgs:
             Starting absolute index in the infinite sequence for this batch.
         bc : int
             Batch count (number of quartets in this batch).
+        n_seed : int, optional
+            Number of valid rows in ``d_seed``.  When ``d_seed`` is a
+            pre-generated batch (``batch_needs_rng=True``), this must be
+            ``bc`` so the 2D kernel reads all rows from the batch rather than
+            re-running the RNG.  Defaults to ``self.n_seed``.
         """
-        return (d_seed, self.n_seed, batch_offset, bc, self.rng_seed)
+        effective_n_seed = self.n_seed if n_seed is None else n_seed
+        return (d_seed, effective_n_seed, batch_offset, bc, self.rng_seed)
