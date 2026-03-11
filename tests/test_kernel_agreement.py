@@ -381,6 +381,80 @@ class TestBackendAgreement:
             ).steiner
         np.testing.assert_allclose(steiner_py, steiner_cuda, rtol=1e-8, atol=1e-10)
 
+    @cuda_skip
+    def test_cuda_1d_kernel_vs_cpu_iterator(self, grouped_forest, random_quartets):
+        """1D generation kernel must produce the same quartets as the CPU iterator.
+
+        This test isolates the generate_quartets_cuda kernel from the 2D
+        processing kernel.  If it fails, the bug is in generate_quartets_cuda
+        (or init_xorshift128 / sample_4_unique_cuda).  If it passes but
+        test_counts_cuda_explicit_vs_random fails, the bug is in how the 2D
+        kernel reads from the pre-built scratch array.
+        """
+        from numba import cuda as _cuda
+        from quarimo._cuda_kernels import generate_quartets_cuda
+
+        # CPU reference: quartets at absolute indices offset..offset+count-1
+        cpu_quartets = np.array(list(random_quartets), dtype=np.int32)  # (140, 4)
+
+        # Replicate exactly what _quartet_topology_cuda_unified does for the
+        # first (and only) batch when batch_needs_rng=True.
+        seed_array = np.array(random_quartets.seed, dtype=np.int32)
+        d_seed = _cuda.to_device(seed_array)
+        n_seed = len(random_quartets.seed)        # = 1
+        batch_offset = random_quartets.offset     # = 1 (offset + bs=0)
+        bc = len(random_quartets)                 # = 140
+        rng_seed = random_quartets.rng_seed       # = 42
+        n_taxa = grouped_forest.n_global_taxa     # = 8
+
+        d_batch = _cuda.device_array((bc, 4), dtype=np.int32)
+        gen_blocks = (bc + 255) // 256
+        generate_quartets_cuda[gen_blocks, 256](
+            d_seed, n_seed, batch_offset, bc, rng_seed, n_taxa, d_batch
+        )
+        _cuda.synchronize()
+
+        gpu_quartets = d_batch.copy_to_host()  # (140, 4)
+        np.testing.assert_array_equal(
+            cpu_quartets,
+            gpu_quartets,
+            err_msg=(
+                "generate_quartets_cuda produced different quartets than "
+                "the CPU iterator.  Bug is in the 1D generation kernel."
+            ),
+        )
+
+    @cuda_skip
+    def test_counts_cuda_explicit_vs_random(self, grouped_forest, random_quartets):
+        """CUDA counts must agree whether quartets are given explicitly or via RNG.
+
+        Materialises the same 140 quartets as a from_list Quartets object
+        (batch_needs_rng=False path) and as the random_quartets fixture
+        (batch_needs_rng=True path).  Any mismatch means the 2D kernel uses
+        different taxa on the RNG path than on the explicit path.
+
+        This test is independent of the Python backend and isolates the CUDA
+        batch_needs_rng=True code path from the quartet-generation kernel.
+        """
+        # Build explicit equivalent: same quartet taxa as random_quartets
+        cpu_quartets_list = list(random_quartets)  # list of (a,b,c,d) tuples
+        explicit_q = Quartets.from_list(grouped_forest, cpu_quartets_list)
+
+        with silent_benchmark("cuda"):
+            counts_explicit = grouped_forest.quartet_topology(explicit_q).counts
+        with silent_benchmark("cuda"):
+            counts_random = grouped_forest.quartet_topology(random_quartets).counts
+
+        np.testing.assert_array_equal(
+            counts_explicit,
+            counts_random,
+            err_msg=(
+                "CUDA counts differ between explicit and random quartet paths "
+                "for the same set of quartets.  The 2D kernel is processing "
+                "different taxa on the batch_needs_rng=True path."
+            ),
+        )
+
 
 class TestFourPointCondition:
     """Detected topology minimises the pairwise-distance pair-sum."""
