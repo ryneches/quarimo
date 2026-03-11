@@ -45,6 +45,15 @@ from __future__ import annotations
 from functools import cached_property
 from typing import List, Optional, Tuple
 
+# ---------------------------------------------------------------------------
+# Kernel implementation registry
+# ---------------------------------------------------------------------------
+# Maps kernel name → frozenset of backends with a full implementation.
+# Update this as new backend kernels are added — nothing else needs changing.
+KERNEL_IMPLEMENTATIONS: dict[str, frozenset[str]] = {
+    "quartet_topology": frozenset({"python", "cpu-parallel", "cuda"}),
+}
+
 
 # ============================================================================ #
 # Capability registry                                                           #
@@ -133,6 +142,37 @@ class _BackendCapabilities:
     def best(self) -> str:
         """Return the highest-priority available backend name."""
         return self.available()[-1]
+
+    def resolve_for_kernel(self, kernel: str, backend: str) -> Tuple[str, Optional[str]]:
+        """
+        Resolve a backend for a specific kernel, with graceful fallback.
+
+        If the resolved backend has no implementation for *kernel*, the
+        next-best available backend that does is returned instead.
+
+        Parameters
+        ----------
+        kernel : str
+            Key in ``KERNEL_IMPLEMENTATIONS`` (e.g. ``'quartet_topology'``).
+        backend : str
+            Requested backend name or ``'best'``.
+
+        Returns
+        -------
+        (effective, original)
+            *effective* is the backend to use.  *original* is the originally
+            requested backend when a fallback occurred, otherwise ``None``.
+        """
+        resolved = self.resolve(backend)  # raises ValueError if unavailable
+        supported = KERNEL_IMPLEMENTATIONS.get(kernel, frozenset())
+        if resolved in supported:
+            return resolved, None
+        # Fall back to the best available backend that has this kernel
+        fallback = next(
+            (b for b in reversed(self.available()) if b in supported),
+            "python",
+        )
+        return fallback, resolved
 
     def status(self) -> List[Tuple[str, bool]]:
         """

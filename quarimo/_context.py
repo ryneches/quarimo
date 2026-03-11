@@ -16,6 +16,7 @@ import warnings
 from contextlib import contextmanager
 from typing import Optional, Type
 
+_logger = logging.getLogger(__name__)
 
 # Module-level state for backend override
 _backend_override = None
@@ -270,6 +271,55 @@ def use_backend(backend: str):
         yield resolved
     finally:
         _backend_override = original_override
+
+
+@contextmanager
+def use_kernel(kernel: str, backend: str = "best"):
+    """
+    Resolve a backend for a specific kernel, with graceful fallback.
+
+    Unlike :func:`use_backend`, this context manager consults the kernel
+    implementation registry (``_backend.KERNEL_IMPLEMENTATIONS``) and
+    automatically falls back to the next-best available backend when the
+    requested one has no implementation for *kernel*.  A ``WARNING`` is
+    emitted when a fallback occurs.
+
+    Parameters
+    ----------
+    kernel : str
+        Kernel name (key in ``quarimo._backend.KERNEL_IMPLEMENTATIONS``).
+        Example: ``'quartet_topology'``.
+    backend : str, default ``'best'``
+        Requested backend, or ``'best'`` to let the registry pick the
+        highest-priority implemented backend.
+
+    Yields
+    ------
+    str
+        The concrete backend that will be used — either the one requested or
+        the fallback.
+
+    Examples
+    --------
+    >>> with use_kernel("quartet_topology", effective_backend) as b:
+    ...     if b == "cuda":
+    ...         # GPU path
+    ...     elif b == "cpu-parallel":
+    ...         # Numba path
+    """
+    from ._backend import backends as _backends
+
+    effective, fell_back_from = _backends.resolve_for_kernel(kernel, backend)
+
+    if fell_back_from is not None:
+        _logger.warning(
+            "Backend '%s' has no '%s' kernel; falling back to '%s'",
+            fell_back_from,
+            kernel,
+            effective,
+        )
+
+    yield effective
 
 
 def get_backend_override() -> Optional[str]:

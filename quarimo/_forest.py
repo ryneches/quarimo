@@ -160,7 +160,7 @@ from quarimo._backend import backends
 from quarimo._utils import jaccard_similarity, validate_quartet, format_newick
 
 # Import context managers from separate module
-from quarimo._context import suppress_logger, get_backend_override
+from quarimo._context import suppress_logger, get_backend_override, use_kernel
 
 # Import result dataclasses
 from quarimo._results import BranchDistanceResult, QEDResult, QuartetTopologyResult
@@ -861,81 +861,69 @@ class Forest:
                 global_names=self.global_names,
             )
 
-        # ── 2. Resolve backend and log execution mode ─────────────────────
+        # ── 2. Resolve backend and dispatch ──────────────────────────────
         # Context manager override takes precedence over caller's argument.
-        backend_override = get_backend_override()
-        if backend_override is not None:
-            backend = backend_override
+        effective = get_backend_override() or backend
 
-        # Raises ValueError with a clear message if the backend is unavailable.
-        resolved_backend = backends.resolve(backend)
+        with use_kernel("quartet_topology", effective) as resolved_backend:
+            mode_str = "Steiner" if steiner else "counts-only"
+            logger.info(f"🧬 quartet_topology({mode_str}, backend={resolved_backend!r})")
 
-        # Log execution mode
-        mode_str = "Steiner" if steiner else "counts-only"
-        logger.info(f"🧬 quartet_topology({mode_str}, backend={resolved_backend!r})")
+            # ── 3. Dispatch ───────────────────────────────────────────────
+            steiner_out = None
+            steiner_min_out = None
+            steiner_max_out = None
+            steiner_sum_sq_out = None
 
-        # ── 3. Dispatch to backend ────────────────────────────────────────
-        steiner_out = None
-        steiner_min_out = None
-        steiner_max_out = None
-        steiner_sum_sq_out = None
-
-        if resolved_backend == "cuda":
-            counts_out, steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out = (
-                self._quartet_topology_cuda_unified(quartets, steiner)
-            )
-
-        else:
-            # CPU/Python backends: materialise quartets to array
-            # Quartets iterator yields (a, b, c, d) as global IDs, already sorted
-            sorted_ids = np.array(list(quartets), dtype=np.int32)
-            common_args = self._kernel_data.cpu_common_args(sorted_ids, n_quartets)
-
-            counts_out = np.zeros((n_quartets, self.n_groups, 4), dtype=np.int32)
-
-            if steiner:
-                shape = (n_quartets, self.n_groups, 4)
-                steiner_out = np.zeros(shape, dtype=np.float64)
-                steiner_min_out = np.full(shape, np.inf, dtype=np.float64)
-                steiner_max_out = np.full(shape, -np.inf, dtype=np.float64)
-                steiner_sum_sq_out = np.zeros(shape, dtype=np.float64)
-
-            if resolved_backend == "cpu-parallel":
-                kernel_key = f"cpu-parallel-{'steiner' if steiner else 'counts'}"
-                if _kernel_first_call.get(kernel_key, False):
-                    logger.info(
-                        f"  Compiling {kernel_key} kernel (cached for future calls)"
-                    )
-                    _kernel_first_call[kernel_key] = False
-
-                if steiner:
-                    _quartet_steiner_njit(
-                        *common_args, counts_out,
-                        steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
-                    )
-                else:
-                    _quartet_counts_njit(*common_args, counts_out)
-
-            elif resolved_backend == "python":
-                if steiner:
-                    steiner_arg = steiner_out
-                    smin_arg = steiner_min_out
-                    smax_arg = steiner_max_out
-                    ssq_arg = steiner_sum_sq_out
-                else:
-                    steiner_arg = np.empty(0, dtype=np.float64)  # counts-only sentinel
-                    smin_arg = np.empty(0, dtype=np.float64)
-                    smax_arg = np.empty(0, dtype=np.float64)
-                    ssq_arg = np.empty(0, dtype=np.float64)
-                Forest._quartet_kernel(
-                    *common_args, counts_out, steiner_arg, smin_arg, smax_arg, ssq_arg,
+            if resolved_backend == "cuda":
+                counts_out, steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out = (
+                    self._quartet_topology_cuda_unified(quartets, steiner)
                 )
 
             else:
-                # This should never be reached due to validation above
-                raise RuntimeError(
-                    f"Internal error: unhandled backend {resolved_backend!r}"
-                )
+                # CPU/Python backends: materialise quartets to array
+                sorted_ids = np.array(list(quartets), dtype=np.int32)
+                common_args = self._kernel_data.cpu_common_args(sorted_ids, n_quartets)
+
+                counts_out = np.zeros((n_quartets, self.n_groups, 4), dtype=np.int32)
+
+                if steiner:
+                    shape = (n_quartets, self.n_groups, 4)
+                    steiner_out = np.zeros(shape, dtype=np.float64)
+                    steiner_min_out = np.full(shape, np.inf, dtype=np.float64)
+                    steiner_max_out = np.full(shape, -np.inf, dtype=np.float64)
+                    steiner_sum_sq_out = np.zeros(shape, dtype=np.float64)
+
+                if resolved_backend == "cpu-parallel":
+                    kernel_key = f"cpu-parallel-{'steiner' if steiner else 'counts'}"
+                    if _kernel_first_call.get(kernel_key, False):
+                        logger.info(
+                            f"  Compiling {kernel_key} kernel (cached for future calls)"
+                        )
+                        _kernel_first_call[kernel_key] = False
+
+                    if steiner:
+                        _quartet_steiner_njit(
+                            *common_args, counts_out,
+                            steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
+                        )
+                    else:
+                        _quartet_counts_njit(*common_args, counts_out)
+
+                else:  # python
+                    if steiner:
+                        steiner_arg = steiner_out
+                        smin_arg = steiner_min_out
+                        smax_arg = steiner_max_out
+                        ssq_arg = steiner_sum_sq_out
+                    else:
+                        steiner_arg = np.empty(0, dtype=np.float64)  # counts-only sentinel
+                        smin_arg = np.empty(0, dtype=np.float64)
+                        smax_arg = np.empty(0, dtype=np.float64)
+                        ssq_arg = np.empty(0, dtype=np.float64)
+                    Forest._quartet_kernel(
+                        *common_args, counts_out, steiner_arg, smin_arg, smax_arg, ssq_arg,
+                    )
 
         # ── Suture: assemble result ────────────────────────────────────────────
         # Compute variance from accumulated sum-of-squares.
