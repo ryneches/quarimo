@@ -50,6 +50,9 @@ gpu = [
 # CPU parallelization (without GPU)
 parallel = ["numba>=0.55.0"]
 
+# Apple Silicon Metal GPU (requires macOS + M-series chip)
+apple = ["mlx>=0.16.0"]
+
 # System information (for enhanced logging)
 system-info = ["psutil>=5.8.0"]
 

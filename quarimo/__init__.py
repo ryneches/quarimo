@@ -91,6 +91,7 @@ from ._backend import (
     get_backend_info,
     check_numba_available,
     check_cuda_available,
+    check_mlx_available,
 )
 
 # Backward compatibility aliases (deprecated)
@@ -117,6 +118,7 @@ __all__ = [
     "get_backend_info",
     "check_numba_available",
     "check_cuda_available",
+    "check_mlx_available",
     # Version info
     "__version__",
 ]

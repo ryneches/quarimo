@@ -35,6 +35,23 @@ def check_numba_available() -> bool:
         return False
 
 
+def check_mlx_available() -> bool:
+    """
+    Check if MLX with Metal GPU compute is available (Apple Silicon).
+
+    Returns
+    -------
+    bool
+        True if mlx is installed and a Metal device initialises successfully.
+    """
+    try:
+        from quarimo._mlx_kernels import check_mlx_available as _check
+
+        return _check()
+    except Exception:
+        return False
+
+
 def check_cuda_available() -> Tuple[bool, bool]:
     """
     Check if CUDA GPU acceleration is available.
@@ -87,7 +104,12 @@ def get_available_backends() -> List[str]:
     if numba_available:
         backends.append("cpu-parallel")
 
-        # Check CUDA (requires numba)
+    # MLX (Apple Silicon Metal) — mutually exclusive with CUDA in practice
+    if check_mlx_available():
+        backends.append("mlx")
+
+    # CUDA takes highest priority when available (dedicated NVIDIA GPU)
+    if numba_available:
         _, cuda_available = check_cuda_available()
         if cuda_available:
             backends.append("cuda")
