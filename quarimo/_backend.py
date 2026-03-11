@@ -134,6 +134,25 @@ class _BackendCapabilities:
         """Return the highest-priority available backend name."""
         return self.available()[-1]
 
+    def status(self) -> List[Tuple[str, bool]]:
+        """
+        Return all known backends in ascending priority order with availability.
+
+        Each entry is ``(name, is_available)``.  New backends must be added
+        here so that ``log_backend_availability`` reports them automatically.
+
+        Returns
+        -------
+        list[tuple[str, bool]]
+            e.g. ``[('python', True), ('cpu-parallel', True), ('mlx', False), ('cuda', False)]``
+        """
+        return [
+            ("python", True),
+            ("cpu-parallel", self.numba),
+            ("mlx", self.mlx),
+            ("cuda", self.cuda),
+        ]
+
     def resolve(self, backend: str) -> str:
         """
         Validate and return a concrete backend name.

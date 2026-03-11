@@ -157,36 +157,26 @@ def install_numba_warning_filter(numba_available: bool) -> None:
         pass  # NumbaPerformanceWarning not available in this numba version
 
 
-def log_backend_availability(
-    backends_available: List[str], numba_available: bool
-) -> None:
+def log_backend_availability(backends) -> None:
     """
     Log which execution backends are available for quartet kernels.
 
+    Iterates over ``backends.status()`` so no backend names are hard-coded
+    here — adding a new backend to ``_BackendCapabilities`` is sufficient.
+
     Parameters
     ----------
-    backends_available : List[str]
-        List of available backends (e.g., ['python', 'cpu-parallel', 'cuda'])
-    numba_available : bool
-        Whether numba was successfully imported.
+    backends : _BackendCapabilities
+        The module-level singleton from ``quarimo._backend``.
     """
-    logger.info(f"Available backends: {', '.join(backends_available)}")
-
-    if "cpu-parallel" in backends_available:
-        logger.info("  cpu-parallel: LLVM-compiled parallel code (numba.njit + prange)")
-
-    if "cuda" in backends_available:
-        logger.info("  cuda: GPU acceleration via CUDA")
-    else:
-        if numba_available:
-            logger.info("  cuda: unavailable (no compatible GPU detected)")
-
-    if "python" in backends_available:
-        logger.info("  python: unoptimized reference implementation")
-
-    # Log default behavior
-    best = backends_available[-1]  # Last in list is most optimized
-    logger.info(f"Default backend='best' will use: {best}")
+    available_mark = "✓"
+    unavailable_mark = "✗"
+    lines = []
+    for name, is_available in backends.status():
+        mark = available_mark if is_available else unavailable_mark
+        lines.append(f"  {mark} {name}")
+    logger.info("Backends:\n" + "\n".join(lines))
+    logger.info(f"  → best = {backends.best()}")
 
 
 # ============================================================================ #

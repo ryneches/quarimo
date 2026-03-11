@@ -227,7 +227,7 @@ _kernel_first_call = {
 
 # Log system info and backend availability on module import
 log_optimization_status(backends.numba)
-log_backend_availability(backends.available(), backends.numba)
+log_backend_availability(backends)
 install_numba_warning_filter(backends.numba)
 
 if backends.cuda:
