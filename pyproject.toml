@@ -96,8 +96,16 @@ Changelog = "https://github.com/ryneches/quarimo/docs/release_notes.md"
 packages = ["quarimo"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/*.py", "/tests", "README.md", "LICENSE"]
-exclude = ["/__pycache__", "/*.pyc", "/.pytest_cache", "/.mypy_cache"]
+include = ["quarimo/", "tests/", "README.md", "LICENSE", "pyproject.toml"]
+exclude = [
+  "data/",
+  "site/",
+  "docs/__marimo__/",
+  "__marimo__/",
+  "*.coverage",
+  "coverage.xml",
+  ".pytest_cache/",
+]
 
 # Black configuration
 [tool.black]
