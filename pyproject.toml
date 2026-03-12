@@ -1,10 +1,16 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs")
+
+[tool.hatch.build.hooks.vcs]
+version-file = "quarimo/_version.py"
 
 [project]
 name = "quarimo"
-version = "0.1.0"
+dynamic = ["version"]
 description = "High-performance phylogenetic tree analysis with bulk quartet topology queries"
 readme = "README.md"
 requires-python = ">=3.8"

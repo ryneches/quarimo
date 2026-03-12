@@ -31,7 +31,8 @@ validate_quartet   : Validate a four-taxon tuple
 format_newick      : Normalise a NEWICK string
 """
 
-__version__ = "0.1.0"
+from quarimo._version import __version__
+
 __author__ = "Russell Neches"
 __license__ = "BSD-3-Clause"
 

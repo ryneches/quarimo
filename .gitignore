@@ -1,0 +1,7 @@
+# .gitignore
+docs_build/
+*.pyc
+__pycache__/
+__marimo__/
+docs/__marimo__
+quarimo/_version.py
