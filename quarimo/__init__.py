@@ -41,6 +41,9 @@ from ._forest import Forest
 from ._tree import Tree
 from ._quartets import Quartets
 
+# Result dataclasses
+from ._results import QuartetTopologyResult, QEDResult
+
 # Context managers (user-facing utilities)
 from ._context import (
     suppress_logger,
@@ -72,6 +75,9 @@ __all__ = [
     "Forest",
     "Tree",
     "Quartets",
+    # Result dataclasses
+    "QuartetTopologyResult",
+    "QEDResult",
     # Context managers
     "suppress_logger",
     "quiet",
