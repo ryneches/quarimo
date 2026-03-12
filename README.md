@@ -5,7 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/quarimo)](https://pypi.org/project/quarimo/)
 [![Python](https://img.shields.io/pypi/pyversions/quarimo)](https://pypi.org/project/quarimo/)
 [![Downloads](https://img.shields.io/pypi/dm/quarimo)](https://pypi.org/project/quarimo/)
-[![License: BSD-3](https://img.shields.io/badge/License-BSD-blue.svg)](LICENSE)
+[![License: BSD-3](https://img.shields.io/badge/License-BSD--3-blue.svg)](LICENSE)
 [![Coverage](https://codecov.io/gh/rneches/quarimo/branch/main/graph/badge.svg)](https://codecov.io/gh/rneches/quarimo)
 
 **Quartet-based entropy analysis for detecting parallel evolution across phylogenetic tree ensembles.**
