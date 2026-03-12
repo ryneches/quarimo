@@ -13,10 +13,10 @@ Quarimo is a made up word formed by smashing "quartet" and "mori" (森, forest) 
 - **Polytomy-aware** : Multifurcating trees are automatically binarized; unresolvable quartets are tracked separately (topology k=3)
 - **Result dataclasses** : Structured return types with `.to_frame()` for Polars DataFrame output in long or wide form
 - **Deterministic and sampled quartets** : The `Quartets` class provides explicit lists, random sampling, and on-GPU generation from a shared infinite sequence
-- **Multiple backends** : Python, CPU-parallel (Numba), and CUDA GPU acceleration
+- **Multiple backends** : Python, CPU-parallel (Numba), CUDA GPU, and Apple Silicon Metal GPU
 - **Memory efficient** : CSR-like flat-packed layout; GPU arrays uploaded once at construction
 - **Clean API** : Context managers for logging and backend selection
-- **Well tested** : Comprehensive test suite with 488+ tests
+- **Well tested** : Comprehensive test suite with 520+ tests
 
 ## Installation
 
@@ -32,16 +32,23 @@ pip install quarimo
 pip install quarimo[parallel]
 ```
 
-### With GPU acceleration (requires CUDA)
+### With GPU acceleration (NVIDIA CUDA)
 
 ```bash
 pip install quarimo[gpu]
 ```
 
+### With Apple Silicon Metal GPU
+
+```bash
+pip install quarimo[apple]
+```
+
 ### Install all optional features
 
 ```bash
-pip install quarimo[all]
+pip install quarimo[all]          # numba (CPU + CUDA)
+pip install quarimo[all,apple]    # add Metal GPU for Apple Silicon
 ```
 
 ## Quick Start
@@ -66,7 +73,7 @@ q = Quartets.from_list(forest, [('A', 'B', 'C', 'D')])
 result = forest.quartet_topology(q)
 
 print(result.counts.shape)   # (1, 1, 4)
-print(result.counts[0, 0])   # [1 1 1 0]  — one tree for each of the three resolved topologies, zero unresolved
+print(result.counts[0, 0])   # [1 1 1 0]  — one tree for each resolved topology, zero unresolved
 ```
 
 ## The Quartets Class
@@ -80,7 +87,7 @@ from quarimo import Quartets
 # Explicit quartet list (by taxon name or by global ID)
 q = Quartets.from_list(forest, [('A', 'B', 'C', 'D'), ('A', 'B', 'C', 'E')])
 
-# Random sampling - reproducible with seed
+# Random sampling — reproducible with seed
 q = Quartets.random(forest, count=100_000, seed=42)
 
 # Full constructor: explicit seed + random tail starting at offset
@@ -161,8 +168,11 @@ underlying arrays and a `to_frame()` method for labelled DataFrame output.
 ```python
 result = forest.quartet_topology(q, steiner=True)
 
-result.counts          # int32  (n_quartets, n_groups, 4)
+result.counts          # int32   (n_quartets, n_groups, 4)
 result.steiner         # float64 (n_quartets, n_groups, 4), or None if steiner=False
+result.steiner_min     # float64 (n_quartets, n_groups, 4), NaN where count == 0
+result.steiner_max     # float64 (n_quartets, n_groups, 4), NaN where count == 0
+result.steiner_var     # float64 (n_quartets, n_groups, 4), NaN where count == 0
 result.groups          # ['gene_A', 'gene_B', ...]  — axis-1 labels
 result.quartets        # the Quartets object used to produce this result
 result.global_names    # taxon name lookup: global_names[gid] = name
@@ -176,11 +186,11 @@ mean_steiner = result.steiner / result.counts.clip(min=1)
 ```python
 # Long form — one row per (quartet, group, topology)
 df = result.to_frame('long')
-# Columns: quartet_idx, a, b, c, d, group, topology, count[, steiner_sum]
+# Columns: quartet_idx, a, b, c, d, group, topology, count[, steiner_sum, steiner_min, steiner_max, steiner_var]
 
 # Wide form — one row per quartet
 df = result.to_frame('wide')
-# Columns: quartet_idx, a, b, c, d, {group}_t{k}[, {group}_steiner_t{k}]
+# Columns: quartet_idx, a, b, c, d, {group}_t{k}[, {group}_steiner_t{k}, ...]
 ```
 
 `quartet_idx` is a combinadic integer that uniquely identifies the quartet by its
@@ -196,10 +206,6 @@ to keep all rows and preserve the correspondence between row position and `qi` i
 topo_df = counts.to_frame('wide')
 qed_df  = forest.qed(counts).to_frame('wide')
 joined  = qed_df.join(topo_df, on='quartet_idx', how='left')
-
-# Or in long form (1-to-n_groups×4); filter by group/topology after joining
-topo_long = counts.to_frame('long')
-qed_long  = forest.qed(counts).to_frame('long')
 ```
 
 ### QED (Quartet Ensemble Discordance)
@@ -241,18 +247,6 @@ logging.getLogger('quarimo').setLevel(logging.CRITICAL)
 logging.getLogger('quarimo').setLevel(logging.NOTSET)
 ```
 
-To format quarimo messages alongside your own application logging:
-
-```python
-import logging
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s  %(name)s  %(levelname)s  %(message)s',
-)
-# quarimo messages now appear through your handler with timestamps
-```
-
 #### Logging context managers
 
 ```python
@@ -271,48 +265,93 @@ with suppress_logger('quarimo._forest'):
     forest = Forest(large_tree_list)
 ```
 
-### Context Managers
-
-```python
-from quarimo import quiet, use_backend, silent_benchmark
-
-# Force a specific backend for one block
-with use_backend('cpu-parallel'):
-    counts = forest.quartet_topology(q)
-
-# Silent benchmarking — suppresses quarimo logging and forces backend
-with silent_benchmark('cuda'):
-    counts = forest.quartet_topology(q)
-```
-
 ### Backend Selection
 
+Quarimo selects the fastest available backend automatically.  The priority order is:
+
+```
+python  <  cpu-parallel  <  mlx  <  cuda
+```
+
+On any given machine, `cuda` and `mlx` are mutually exclusive in practice (Apple Silicon
+cannot run CUDA).
+
+Use `use_backend()` to force a specific backend for a block of code:
+
 ```python
-from quarimo import get_available_backends
+from quarimo import use_backend
 
-print(get_available_backends())   # e.g. ['python', 'cpu-parallel', 'cuda']
+with use_backend('cpu-parallel'):
+    result = forest.quartet_topology(q)
 
-# Per-call backend selection
-counts = forest.quartet_topology(q)                         # 'best' (default)
-counts = forest.quartet_topology(q, backend='python')       # pure Python
-counts = forest.quartet_topology(q, backend='cpu-parallel') # Numba JIT
-counts = forest.quartet_topology(q, backend='cuda')         # GPU
+with use_backend('cuda'):          # raises ValueError if CUDA is unavailable
+    result = forest.quartet_topology(q)
+
+with use_backend('mlx'):           # raises ValueError if MLX is unavailable
+    result = forest.quartet_topology(q)
+```
+
+`use_backend()` yields the resolved backend name, which is useful for logging:
+
+```python
+with use_backend('best') as b:
+    print(f"using {b}")            # e.g. "using cuda"
+    result = forest.quartet_topology(q)
+```
+
+You can also pass `backend=` directly to `quartet_topology()`:
+
+```python
+result = forest.quartet_topology(q)                         # 'best' (default)
+result = forest.quartet_topology(q, backend='python')       # pure Python
+result = forest.quartet_topology(q, backend='cpu-parallel') # Numba JIT
+result = forest.quartet_topology(q, backend='cuda')         # NVIDIA GPU
+result = forest.quartet_topology(q, backend='mlx')          # Apple Silicon GPU
+```
+
+To inspect what is available on the current machine:
+
+```python
+from quarimo import get_available_backends, get_backend_info
+
+print(get_available_backends())   # e.g. ['python', 'cpu-parallel', 'mlx']
+print(get_backend_info())
+```
+
+#### Silent benchmarking
+
+```python
+from quarimo import silent_benchmark
+
+# Suppresses quarimo logging and forces backend
+with silent_benchmark('cuda'):
+    result = forest.quartet_topology(q)
 ```
 
 ## Performance
 
-The package supports three computational backends:
+Quarimo supports four computational backends:
 
-- **Python**: Pure Python fallback, always available, useful for debugging
-- **CPU-parallel**: Numba JIT compilation with `prange` parallelism across quartets; compiles on first call
-- **CUDA**: GPU acceleration; quartet generation runs on-device via `Quartets.random()`, eliminating host-to-device quartet transfer for large random samples
+| Backend | Hardware | Relative speed |
+|---------|----------|----------------|
+| `python` | Any CPU | 1× (baseline) |
+| `cpu-parallel` | Any CPU (Numba JIT + prange) | 10–100× |
+| `mlx` | Apple Silicon M-series (Metal GPU) | 50–500× |
+| `cuda` | NVIDIA GPU (Numba CUDA) | 100–1000× |
 
-Typical speedups relative to pure Python for large quartet counts (≥10k):
+Speedup estimates are for large quartet counts (≥10k quartets) relative to pure Python.
+Actual performance depends on core/GPU count, memory bandwidth, and dataset size.
 
-- CPU-parallel: 10–100× depending on core count
-- CUDA: 100–1000× depending on dataset size and GPU memory bandwidth
+Scaling is dominated by the number of (quartet, tree) pairs evaluated —
+effectively `n_quartets × n_trees`.  The CSR flat-packed layout keeps all tree arrays
+contiguous in memory.
 
-Scaling is dominated by the number of (quartet, tree) pairs evaluated — effectively `n_quartets × n_trees`.  The CSR flat-packed layout keeps all tree arrays contiguous in memory, and GPU arrays are uploaded once at `Forest` construction rather than per query.
+**Apple Silicon note:** the `mlx` backend benefits from Apple's Unified Memory Architecture
+(UMA) — CPU and GPU share the same physical memory, so there is no host-to-device copy
+cost when uploading forest arrays.
+
+**CUDA note:** when using `Quartets.random()`, quartet generation runs on-device,
+eliminating host-to-device quartet transfer for large random samples.
 
 ## Documentation
 
@@ -332,7 +371,7 @@ help(Quartets)
 ### Setup development environment
 
 ```bash
-git clone https://github.com/yourusername/quarimo.git
+git clone https://github.com/rneches/quarimo.git
 cd quarimo
 pip install -e .[dev]
 ```
@@ -369,9 +408,3 @@ MIT License — see LICENSE file for details.
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Support
-
-<!-- TODO: Add support links when available -->
-- Issues: [GitHub Issues](https://github.com/yourusername/quarimo/issues)
-- Discussions: [GitHub Discussions](https://github.com/yourusername/quarimo/discussions)
