@@ -6,12 +6,12 @@ icon: material/code-block-braces
 
 # quarimo (クアリモ)
 
-[![Tests](https://github.com/rneches/quarimo/actions/workflows/tests.yml/badge.svg)](https://github.com/rneches/quarimo/actions/workflows/tests.yml)
-[![Build](https://github.com/rneches/quarimo/actions/workflows/build.yml/badge.svg)](https://github.com/rneches/quarimo/actions/workflows/build.yml)
+[![Tests](https://github.com/ryneches/quarimo/actions/workflows/tests.yml/badge.svg)](https://github.com/ryneches/quarimo/actions/workflows/tests.yml)
+[![Build](https://github.com/ryneches/quarimo/actions/workflows/build.yml/badge.svg)](https://github.com/ryneches/quarimo/actions/workflows/build.yml)
 [![PyPI](https://img.shields.io/pypi/v/quarimo)](https://pypi.org/project/quarimo/)
 [![Python](https://img.shields.io/pypi/pyversions/quarimo)](https://pypi.org/project/quarimo/)
 [![Downloads](https://img.shields.io/pypi/dm/quarimo)](https://pypi.org/project/quarimo/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: BSD-3](https://img.shields.io/badge/License-BSD-blue.svg)](LICENSE)
 [![Coverage](https://codecov.io/gh/rneches/quarimo/branch/main/graph/badge.svg)](https://codecov.io/gh/rneches/quarimo)
 
 **Quartet-based entropy analysis for detecting parallel evolution across phylogenetic tree ensembles.**
