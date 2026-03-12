@@ -51,6 +51,7 @@ from ._context import (
     suppress_warnings,
     use_backend,
     silent_benchmark,
+    use_kernel,
 )
 
 # Utilities (generally useful functions)
@@ -84,6 +85,7 @@ __all__ = [
     "suppress_warnings",
     "use_backend",
     "silent_benchmark",
+    "use_kernel",
     # Utilities
     "jaccard_similarity",
     "validate_quartet",
