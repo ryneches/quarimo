@@ -1,0 +1,104 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*" # Run on version tags
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  build:
+    name: Build distribution packages
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build source distribution and wheel
+        run: |
+          python -m build
+
+      - name: Check distribution packages
+        run: |
+          twine check dist/*
+
+      - name: List distribution contents
+        run: |
+          ls -lh dist/
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-packages
+          path: dist/
+          retention-days: 30
+
+      - name: Store distribution packages for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: dist/
+          retention-days: 90
+
+  verify-install:
+    name: Verify package installation
+    needs: build
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download distribution packages
+        uses: actions/download-artifact@v4
+        with:
+          name: distribution-packages
+          path: dist/
+
+      - name: Install wheel package
+        run: |
+          python -m pip install --upgrade pip
+          pip install dist/*.whl
+
+      - name: Verify package imports
+        run: |
+          python -c "import quarimo; print(f'Version: {quarimo.__version__}')"
+          python -c "from quarimo import Tree, Forest, Quartets"
+          python -c "from quarimo import quiet, use_backend"
+          python -c "from quarimo import get_available_backends; print(f'Backends: {get_available_backends()}')"
+
+      - name: Test basic functionality
+        run: |
+          python -c "
+          from quarimo import Forest, Quartets
+          trees = { 'X' : [ '((A:1,B:1):1,(C:1,D:1):1);', '((A:1,C:1):1,(B:1,D:1):1);'],
+                    'Y' : [ '((A:1,B:1):1,(C:1,D:1):1);', '((A:1,C:1):1,(B:1,D:1):1);'], }
+          forest = Forest(trees)
+          quartets = Quartets( count=10 )
+          result = forest.quartet_topology( quartets )
+          assert result.counts.shape == (10, 2, 4), 'Unexpected output shape'
+          print('✓ Basic functionality works')
+          "
