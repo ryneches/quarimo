@@ -78,16 +78,15 @@ dev = [
 # All optional dependencies
 all = ["numba>=0.55.0", "psutil>=5.8.0"]
 
-# TODO: Add project URLs when repository is public
-# [project.urls]
-# Homepage = "https://github.com/yourusername/phylo-tree-analysis"
-# Documentation = "https://phylo-tree-analysis.readthedocs.io"
-# Repository = "https://github.com/yourusername/phylo-tree-analysis"
-# Issues = "https://github.com/yourusername/phylo-tree-analysis/issues"
-# Changelog = "https://github.com/yourusername/phylo-tree-analysis/blob/main/CHANGELOG.md"
+[project.urls]
+Homepage = "https://github.com/ryneches/quarimo"
+Documentation = "https://github.com/ryneches/quarimo"
+Repository = "https://github.com/ryneches/quarimo"
+Issues = "https://github.com/ryneches/quarimo"
+Changelog = "https://github.com/ryneches/quarimo/docs/release_notes.md"
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
+packages = ["quarimo"]
 
 [tool.hatch.build.targets.sdist]
 include = ["/*.py", "/tests", "README.md", "LICENSE"]

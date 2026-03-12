@@ -1,68 +1,39 @@
 """
-quarimo (クアリモ)
-==================
+Public API for quarimo.
 
-Quartet-based entropy analysis for detecting parallel evolution across
-phylogenetic tree ensembles.
+Core classes  (_forest, _tree, _quartets)
+-----------------------------------------
+Forest    : Collection of trees; dispatches quartet topology queries to backends
+Tree      : Single phylogenetic tree; NEWICK parsing, LCA via RMQ, Steiner lengths
+Quartets  : Deterministic quartet sequence; explicit lists, random sampling, on-GPU generation
 
-*Quarimo* (from "quartet" + "mori" 森 = forest) uses cross-entropy products
-of quartet frequencies to estimate the likelihood of parallel evolution.
+Context managers  (_context)
+-----------------------------
+use_backend       : Force a specific computational backend for a block of code
+use_kernel        : Force a backend for a named kernel; falls back with a warning
+quiet             : Temporarily suppress quarimo logging
+suppress_logger   : Suppress a single named logger
+suppress_warnings : Suppress specific warning categories
+silent_benchmark  : Combines quiet + use_backend + suppress_warnings
 
-Main Classes
-------------
-Forest : Collection of phylogenetic trees with efficient quartet queries
-Tree : Single phylogenetic tree with NEWICK parsing and algorithms
+Backend inspection  (_backend)
+-------------------------------
+get_available_backends : List backends available on this machine, in priority order
+get_backend_info       : Human-readable backend status summary
+check_numba_available  : True if numba is importable
+check_cuda_available   : True if a CUDA-capable GPU is present
+check_mlx_available    : True if mlx (Apple Silicon Metal) is available
 
-Context Managers
-----------------
-quiet : Suppress logging during operations
-suppress_logger : Suppress specific logger
-suppress_warnings : Suppress specific warnings
-use_backend : Force specific computational backend
-silent_benchmark : Combine quiet + backend selection + warning suppression
-
-Utilities
----------
-jaccard_similarity : Compute Jaccard similarity between sets
-validate_quartet : Validate quartet specification
-format_newick : Format NEWICK strings consistently
-
-Backend Information
--------------------
-get_available_backends : Query available computational backends
-get_backend_info : Get comprehensive backend status
-check_numba_available : Check if numba is available
-check_cuda_available : Check if CUDA GPU is available
-
-Examples
---------
-Basic usage:
-
->>> from quarimo import Forest
->>> trees = ['((A:1,B:1):1,(C:1,D:1):1);', '((A:1,C:1):1,(B:1,D:1):1);']
->>> forest = Forest(trees)
->>> counts = forest.quartet_topology([('A', 'B', 'C', 'D')])
->>> print(counts)
-[[1 1 0]]
-
-With context managers:
-
->>> from quarimo import Forest, quiet, use_backend
->>> with quiet():
-...     forest = Forest(large_tree_list)
->>> with use_backend('cpu-parallel'):
-...     counts = forest.quartet_topology(quartets)
-
-Benchmarking:
-
->>> from quarimo import silent_benchmark
->>> with silent_benchmark('cuda'):
-...     counts = forest.quartet_topology(quartets)
+Utilities  (_utils)
+--------------------
+jaccard_similarity : Jaccard similarity between two sets
+validate_quartet   : Validate a four-taxon tuple
+format_newick      : Normalise a NEWICK string
 """
 
 __version__ = "0.1.0"
-__author__ = "Your Name"
-__license__ = "MIT"
+__author__ = "Russell Neches"
+__license__ = "BSD-3-Clause"
 
 # Main classes
 from ._forest import Forest
@@ -93,9 +64,6 @@ from ._backend import (
     check_cuda_available,
     check_mlx_available,
 )
-
-# Backward compatibility aliases (deprecated)
-import warnings
 
 # Public API
 __all__ = [
