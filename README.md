@@ -1,5 +1,13 @@
 # quarimo (クアリモ)
 
+[![Tests](https://github.com/rneches/quarimo/actions/workflows/tests.yml/badge.svg)](https://github.com/rneches/quarimo/actions/workflows/tests.yml)
+[![Build](https://github.com/rneches/quarimo/actions/workflows/build.yml/badge.svg)](https://github.com/rneches/quarimo/actions/workflows/build.yml)
+[![PyPI](https://img.shields.io/pypi/v/quarimo)](https://pypi.org/project/quarimo/)
+[![Python](https://img.shields.io/pypi/pyversions/quarimo)](https://pypi.org/project/quarimo/)
+[![Downloads](https://img.shields.io/pypi/dm/quarimo)](https://pypi.org/project/quarimo/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Coverage](https://codecov.io/gh/rneches/quarimo/branch/main/graph/badge.svg)](https://codecov.io/gh/rneches/quarimo)
+
 **Quartet-based entropy analysis for detecting parallel evolution across phylogenetic tree ensembles.**
 
 *Quarimo* uses cross-entropy products of quartet frequencies across bootstrap ensembles to estimate the likelihood of parallel evolution.
@@ -142,6 +150,7 @@ Multifurcating trees are automatically binarized by inserting zero-length intern
 Quarimo tracks these inserted nodes using a CSR sparse list and uses them to detect unresolvable quartets.
 
 A quartet is classified as **unresolved** (k=3) only when:
+
 1. At least one of its six pairwise LCA nodes is a polytomy-inserted node, **and**
 2. All three four-point pair-sums are exactly equal (an unambiguous signal from the zero-length sentinel branch)
 

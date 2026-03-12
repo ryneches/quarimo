@@ -6,6 +6,14 @@ icon: material/code-block-braces
 
 # quarimo (クアリモ)
 
+[![Tests](https://github.com/rneches/quarimo/actions/workflows/tests.yml/badge.svg)](https://github.com/rneches/quarimo/actions/workflows/tests.yml)
+[![Build](https://github.com/rneches/quarimo/actions/workflows/build.yml/badge.svg)](https://github.com/rneches/quarimo/actions/workflows/build.yml)
+[![PyPI](https://img.shields.io/pypi/v/quarimo)](https://pypi.org/project/quarimo/)
+[![Python](https://img.shields.io/pypi/pyversions/quarimo)](https://pypi.org/project/quarimo/)
+[![Downloads](https://img.shields.io/pypi/dm/quarimo)](https://pypi.org/project/quarimo/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Coverage](https://codecov.io/gh/rneches/quarimo/branch/main/graph/badge.svg)](https://codecov.io/gh/rneches/quarimo)
+
 **Quartet-based entropy analysis for detecting parallel evolution across phylogenetic tree ensembles.**
 
 *Quarimo* (from "quartet" + "mori" 森 = forest) uses cross-entropy products of quartet frequencies across bootstrap ensembles to estimate the likelihood of parallel evolution in phylogenetic analyses.
@@ -168,6 +176,7 @@ The package supports three computational backends:
 - **CUDA**: GPU acceleration for large-scale analyses
 
 Typical speedups with numba:
+
 - CPU-parallel: 10-100x faster than Python
 - CUDA: 100-1000x faster than Python (depending on dataset size)
 
