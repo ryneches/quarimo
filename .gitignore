@@ -1,7 +1,35 @@
-# .gitignore
-docs_build/
-*.pyc
-__pycache__/
-__marimo__/
-docs/__marimo__
+# Build artifacts
+dist/
+build/
+*.egg-info/
 quarimo/_version.py
+
+# Docs
+site/
+docs_build/
+
+# Marimo session caches
+__marimo__/
+docs/__marimo__/
+
+# Test and coverage
+.coverage
+coverage.xml
+.pytest_cache/
+.mypy_cache/
+
+# Python
+*.pyc
+*.pyo
+__pycache__/
+
+# Environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
