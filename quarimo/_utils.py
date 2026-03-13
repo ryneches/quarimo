@@ -371,7 +371,7 @@ def _normalize_group_value(value, group_name: str) -> list:
             item_ctx = f"{ctx}[{i}]"
             trees.extend(_normalize_atom(item, context=item_ctx))
         if not trees:
-            raise ValueError(f"{ctx}: no NEWICK trees found")
+            raise ValueError(f"Group '{group_name}' is empty")
         return trees
     raise TypeError(
         f"{ctx}: expected str, Path, list, or tuple; "

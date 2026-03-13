@@ -6,9 +6,198 @@ Tests for tree group labels functionality in PhyloTreeCollection.
 
 import pytest
 import numpy as np
+from pathlib import Path
 from quarimo._forest import Forest, _jaccard
 from quarimo._quartets import Quartets
 from quarimo._results import QuartetTopologyResult
+
+TREES_DIR = Path(__file__).parent / "trees"
+
+# Single-tree files (one NEWICK per file)
+ASYMMETRIC = TREES_DIR / "asymmetric_4leaf.tree"   # ((A:1,(B:1,C:1):1):1,D:1);
+BALANCED   = TREES_DIR / "balanced_4leaf.tree"     # ((A:0.1,B:0.2)..., (C:0.3,D:0.4)...);
+
+# Multi-tree file (3 NEWICK on separate lines, taxa A-E and X,Y)
+COLLECTION = TREES_DIR / "basic_collection.trees"  # 3 trees
+
+
+class TestForestInputNormalization:
+    """Tests covering all supported Forest input forms and their combinations."""
+
+    # ── single multiline string ─────────────────────────────────────────── #
+
+    def test_multiline_string_creates_single_group(self):
+        """A newline-separated block of NEWICK trees is treated as one group."""
+        block = (
+            "((A:1,B:1):1,(C:1,D:1):1);\n"
+            "((A:1,C:1):1,(B:1,D:1):1);\n"
+            "((A:1,D:1):1,(B:1,C:1):1);\n"
+        )
+        f = Forest(block)
+        assert f.n_trees == 3
+        assert f.n_groups == 1
+
+    def test_multiline_string_blank_lines_ignored(self):
+        """Blank lines and comment lines in a block are silently skipped."""
+        block = (
+            "\n"
+            "((A:1,B:1):1,(C:1,D:1):1);\n"
+            "\n"
+            "((A:1,C:1):1,(B:1,D:1):1);\n"
+            "\n"
+        )
+        f = Forest(block)
+        assert f.n_trees == 2
+
+    # ── single NEWICK string ────────────────────────────────────────────── #
+
+    def test_single_newick_string(self):
+        """A string starting with '(' is treated as a single tree."""
+        f = Forest("((A:1,B:1):1,(C:1,D:1):1);")
+        assert f.n_trees == 1
+        assert f.n_groups == 1
+
+    # ── str / Path file paths ───────────────────────────────────────────── #
+
+    def test_path_object_to_single_tree_file(self):
+        """A Path to a single-tree file produces a 1-tree forest."""
+        f = Forest(ASYMMETRIC)
+        assert f.n_trees == 1
+        assert f.n_groups == 1
+
+    def test_str_path_to_single_tree_file(self):
+        """A string that resolves to a file is read as a NEWICK file."""
+        f = Forest(str(ASYMMETRIC))
+        assert f.n_trees == 1
+
+    def test_path_to_multitree_file(self):
+        """A Path to a multi-tree file loads all trees in the file."""
+        f = Forest(COLLECTION)
+        assert f.n_trees == 3
+        assert f.n_groups == 1
+
+    # ── list inputs ─────────────────────────────────────────────────────── #
+
+    def test_list_of_path_objects_single_tree_files(self):
+        """A list of Paths to single-tree files loads one tree per file."""
+        f = Forest([ASYMMETRIC, BALANCED])
+        assert f.n_trees == 2
+        assert f.n_groups == 1
+
+    def test_list_of_str_paths_single_tree_files(self):
+        """A list of string paths to single-tree files."""
+        f = Forest([str(ASYMMETRIC), str(BALANCED)])
+        assert f.n_trees == 2
+
+    def test_list_of_paths_to_multitree_files(self):
+        """Each Path in the list may point to a multi-tree file; trees are concatenated."""
+        f = Forest([COLLECTION, COLLECTION])
+        assert f.n_trees == 6  # 3 trees × 2 files
+        assert f.n_groups == 1
+
+    def test_list_mixing_strings_and_paths(self):
+        """A list may mix inline NEWICK strings and file Paths."""
+        inline = "((A:1,B:1):1,(C:1,D:1):1);"
+        f = Forest([inline, ASYMMETRIC])
+        assert f.n_trees == 2
+
+    # ── dict with multiline string values ───────────────────────────────── #
+
+    def test_dict_multiline_string_value(self):
+        """Dict values may be multiline strings instead of lists of strings."""
+        block = "((A:1,B:1):1,(C:1,D:1):1);\n((A:1,C:1):1,(B:1,D:1):1);\n"
+        f = Forest({"grp": block})
+        assert f.n_trees == 2
+        assert f.n_groups == 1
+        assert f.unique_groups == ["grp"]
+
+    def test_dict_multiline_string_value_multiple_groups(self):
+        """Multiple groups, each given as a multiline string."""
+        block_a = "((A:1,B:1):1,(C:1,D:1):1);\n((A:1,C:1):1,(B:1,D:1):1);\n"
+        block_b = "((A:1,D:1):1,(B:1,C:1):1);\n"
+        f = Forest({"A": block_a, "B": block_b})
+        assert f.n_groups == 2
+        assert f.n_trees == 3
+        assert f.unique_groups == ["A", "B"]
+
+    # ── dict with Path values ────────────────────────────────────────────── #
+
+    def test_dict_single_path_value(self):
+        """A dict value may be a single Path to a single-tree file."""
+        f = Forest({"grp": ASYMMETRIC})
+        assert f.n_trees == 1
+        assert f.unique_groups == ["grp"]
+
+    def test_dict_path_to_multitree_file(self):
+        """A dict value may be a Path to a multi-tree file."""
+        f = Forest({"grp": COLLECTION})
+        assert f.n_trees == 3
+        assert f.unique_groups == ["grp"]
+
+    def test_dict_multiple_groups_path_values(self):
+        """Multiple groups, each given as a Path to a (possibly multi-tree) file."""
+        f = Forest({"short": ASYMMETRIC, "long": COLLECTION})
+        assert f.n_groups == 2
+        assert f.n_trees == 4  # 1 + 3
+        assert f.unique_groups == ["long", "short"]  # sorted
+
+    # ── dict with list-of-Paths values ──────────────────────────────────── #
+
+    def test_dict_list_of_paths_single_tree_files(self):
+        """A dict value may be a list of Paths to individual single-tree files."""
+        f = Forest({"grp": [ASYMMETRIC, BALANCED]})
+        assert f.n_trees == 2
+        assert f.unique_groups == ["grp"]
+
+    def test_dict_list_of_paths_multitree_files(self):
+        """A dict value may be a list of Paths each containing multiple trees."""
+        f = Forest({"grp": [COLLECTION, COLLECTION]})
+        assert f.n_trees == 6
+
+    def test_dict_multiple_groups_list_of_paths(self):
+        """Multiple groups, each given as a list of Paths."""
+        f = Forest({
+            "A": [ASYMMETRIC, BALANCED],
+            "B": [COLLECTION],
+        })
+        assert f.n_groups == 2
+        assert f.n_trees == 5  # 2 + 3
+        assert f.unique_groups == ["A", "B"]
+
+    def test_dict_mixed_value_types(self):
+        """Dict values may mix inline strings, Paths, and multiline blocks."""
+        inline = "((A:1,B:1):1,(C:1,D:1):1);"
+        f = Forest({
+            "inline": inline,
+            "file":   ASYMMETRIC,
+            "multi":  [ASYMMETRIC, BALANCED],
+        })
+        assert f.n_groups == 3
+        assert f.n_trees == 4
+
+    # ── error cases ─────────────────────────────────────────────────────── #
+
+    def test_multitree_string_not_accepted_as_single_tree(self):
+        """A string containing multiple semicolons is rejected by validate_newick."""
+        from quarimo._utils import validate_newick
+        with pytest.raises(ValueError, match="semicolons"):
+            validate_newick("((A:1,B:1):1,(C:1,D:1):1);((A:1,C:1):1,(B:1,D:1):1);")
+
+    def test_nonexistent_file_raises(self):
+        """A Path that does not exist raises ValueError."""
+        with pytest.raises(ValueError, match="cannot read file"):
+            Forest(Path("/nonexistent/path/to/trees.nwk"))
+
+    def test_dict_empty_list_value_raises(self):
+        """A dict group with an empty list raises ValueError."""
+        with pytest.raises(ValueError, match="Group 'B' is empty"):
+            Forest({"A": ["((A:1,B:1):1,(C:1,D:1):1);"], "B": []})
+
+    def test_unbalanced_parens_raises(self):
+        """A NEWICK string with unbalanced parentheses raises ValueError."""
+        from quarimo._utils import validate_newick
+        with pytest.raises(ValueError, match="parentheses"):
+            validate_newick("((A:1,B:1):1,(C:1,D:1):1;")  # missing closing paren
 
 
 class TestGroupLabels:
@@ -122,12 +311,17 @@ class TestGroupLabels:
         assert c.unique_groups == ["my_group"]
 
     def test_invalid_input_type(self):
-        """Test that invalid input types raise TypeError."""
-        with pytest.raises(TypeError, match="must be list or dict"):
-            Forest("not a list or dict")
-
-        with pytest.raises(TypeError, match="must be list or dict"):
+        """Test that unsupported input types raise TypeError, and unrecognised
+        strings raise ValueError (strings are a valid input form — they are
+        treated as a NEWICK tree, a multiline block, or a file path)."""
+        # Bare integers are not a supported input type
+        with pytest.raises(TypeError, match="must be dict, list, tuple, str, or Path"):
             Forest(12345)
+
+        # A string that is not a valid NEWICK tree and not an existing file
+        # raises ValueError, not TypeError
+        with pytest.raises(ValueError):
+            Forest("not a valid newick string")
 
 
 class TestJaccardSimilarity:
