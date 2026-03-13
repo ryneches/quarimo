@@ -29,6 +29,8 @@ Utilities  (_utils)
 jaccard_similarity : Jaccard similarity between two sets
 validate_quartet   : Validate a four-taxon tuple
 format_newick      : Normalise a NEWICK string
+validate_newick    : Structural check on a single NEWICK tree string
+normalize_input    : Normalize any supported input form to dict[str, list[str]]
 """
 
 try:
@@ -62,6 +64,8 @@ from ._utils import (
     jaccard_similarity,
     validate_quartet,
     format_newick,
+    validate_newick,
+    normalize_input,
 )
 
 # Backend information (useful for checking capabilities)
@@ -93,6 +97,8 @@ __all__ = [
     "jaccard_similarity",
     "validate_quartet",
     "format_newick",
+    "validate_newick",
+    "normalize_input",
     # Backend information
     "get_available_backends",
     "get_backend_info",

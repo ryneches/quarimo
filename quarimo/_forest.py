@@ -126,7 +126,6 @@ objects.  The _rmq_csr() static method is the primary candidate for
 arrays.
 """
 
-import hashlib
 import logging
 import multiprocessing
 import os
@@ -157,7 +156,7 @@ from quarimo._logging import (
 from quarimo._backend import backends
 
 # Import utilities from separate module
-from quarimo._utils import jaccard_similarity, validate_quartet, format_newick
+from quarimo._utils import jaccard_similarity, validate_quartet, format_newick, normalize_input
 
 # Import context managers from separate module
 from quarimo._context import suppress_logger, get_backend_override, use_kernel
@@ -430,22 +429,10 @@ class Forest:
     def __init__(self, newick_input) -> None:
         """Initialize collection from NEWICK strings with optional group labels."""
 
-        # Convert list input to dict with auto-generated hash key
-        if isinstance(newick_input, (list, tuple)):
-            # Generate deterministic label from input NEWICK strings
-            sorted_newicks = sorted(newick_input)
-            combined = "".join(sorted_newicks)
-            h = hashlib.blake2b(combined.encode("utf-8"), digest_size=5)
-            auto_label = h.hexdigest()
-
-            logger.info("Auto-generated group label: %s", auto_label)
-
-            # Convert to dict format
-            newick_input = {auto_label: list(newick_input)}
-        elif not isinstance(newick_input, dict):
-            raise TypeError(
-                f"newick_input must be list or dict, got {type(newick_input).__name__}"
-            )
+        # Normalize all supported input forms to dict[str, list[str]].
+        # Accepts: dict, list/tuple of NEWICK strings or paths, a single
+        # multiline string, or a path (str or Path) to a NEWICK file.
+        newick_input = normalize_input(newick_input)
 
         # Parse groups
         self.unique_groups = sorted(newick_input.keys())
