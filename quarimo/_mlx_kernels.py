@@ -302,56 +302,56 @@ inline int32_t rmq_msl(
         for (int32_t k = 0; k < 4; k++)
             counts_out[out_base + gi * 4 + k] = 0;
 
-    int32_t n0 = sorted_quartet_ids[(int32_t)qi * 4 + 0];
-    int32_t n1 = sorted_quartet_ids[(int32_t)qi * 4 + 1];
-    int32_t n2 = sorted_quartet_ids[(int32_t)qi * 4 + 2];
-    int32_t n3 = sorted_quartet_ids[(int32_t)qi * 4 + 3];
+    int32_t t0 = sorted_quartet_ids[(int32_t)qi * 4 + 0];
+    int32_t t1 = sorted_quartet_ids[(int32_t)qi * 4 + 1];
+    int32_t t2 = sorted_quartet_ids[(int32_t)qi * 4 + 2];
+    int32_t t3 = sorted_quartet_ids[(int32_t)qi * 4 + 3];
 
     for (int32_t ti = 0; ti < n_trees; ti++) {
         int32_t base_g2l = ti * n_gtaxa;
-        int32_t ln0 = global_to_local[base_g2l + n0];
-        int32_t ln1 = global_to_local[base_g2l + n1];
-        int32_t ln2 = global_to_local[base_g2l + n2];
-        int32_t ln3 = global_to_local[base_g2l + n3];
+        int32_t ln0 = global_to_local[base_g2l + t0];
+        int32_t ln1 = global_to_local[base_g2l + t1];
+        int32_t ln2 = global_to_local[base_g2l + t2];
+        int32_t ln3 = global_to_local[base_g2l + t3];
         if (ln0 < 0 || ln1 < 0 || ln2 < 0 || ln3 < 0) continue;
 
-        long nb = node_offsets[ti];
-        long tb = tour_offsets[ti];
-        long sb = sp_offsets[ti];
-        long lb = lg_offsets[ti];
-        int32_t tw = sp_tour_widths[ti];
+        long node_base = node_offsets[ti];
+        long tour_base = tour_offsets[ti];
+        long sp_base   = sp_offsets[ti];
+        long lg_base   = lg_offsets[ti];
+        int32_t sp_stride = sp_tour_widths[ti];
 
-        int32_t occ0 = all_first_occ[nb + ln0];
-        int32_t occ1 = all_first_occ[nb + ln1];
-        int32_t occ2 = all_first_occ[nb + ln2];
-        int32_t occ3 = all_first_occ[nb + ln3];
+        int32_t fo0 = all_first_occ[node_base + ln0];
+        int32_t fo1 = all_first_occ[node_base + ln1];
+        int32_t fo2 = all_first_occ[node_base + ln2];
+        int32_t fo3 = all_first_occ[node_base + ln3];
 
         // 6 RMQ calls for all pairwise LCAs
         int32_t l, r, tmp;
-        l = occ0; r = occ1; if (l > r) { tmp = l; l = r; r = tmp; }
-        int32_t lca01 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
-        l = occ0; r = occ2; if (l > r) { tmp = l; l = r; r = tmp; }
-        int32_t lca02 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
-        l = occ0; r = occ3; if (l > r) { tmp = l; l = r; r = tmp; }
-        int32_t lca03 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
-        l = occ1; r = occ2; if (l > r) { tmp = l; l = r; r = tmp; }
-        int32_t lca12 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
-        l = occ1; r = occ3; if (l > r) { tmp = l; l = r; r = tmp; }
-        int32_t lca13 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
-        l = occ2; r = occ3; if (l > r) { tmp = l; l = r; r = tmp; }
-        int32_t lca23 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+        l = fo0; r = fo1; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca01 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo0; r = fo2; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca02 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo0; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca03 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo1; r = fo2; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca12 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo1; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca13 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo2; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca23 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
 
         // Four-point condition (float32 — Metal does not support float64)
-        float rd01 = all_root_distance[nb + lca01];
-        float rd02 = all_root_distance[nb + lca02];
-        float rd03 = all_root_distance[nb + lca03];
-        float rd12 = all_root_distance[nb + lca12];
-        float rd13 = all_root_distance[nb + lca13];
-        float rd23 = all_root_distance[nb + lca23];
+        float rd01 = all_root_distance[node_base + lca01];
+        float rd02 = all_root_distance[node_base + lca02];
+        float rd03 = all_root_distance[node_base + lca03];
+        float rd12 = all_root_distance[node_base + lca12];
+        float rd13 = all_root_distance[node_base + lca13];
+        float rd23 = all_root_distance[node_base + lca23];
 
-        float r0 = rd01 + rd23;   // topology 0: (n0,n1)|(n2,n3)
-        float r1 = rd02 + rd13;   // topology 1: (n0,n2)|(n1,n3)
-        float r2 = rd03 + rd12;   // topology 2: (n0,n3)|(n1,n2)
+        float r0 = rd01 + rd23;   // topology 0: (t0,t1)|(t2,t3)
+        float r1 = rd02 + rd13;   // topology 1: (t0,t2)|(t1,t3)
+        float r2 = rd03 + rd12;   // topology 2: (t0,t3)|(t1,t2)
 
         // Polytomy detection: CSR pre-filter + IEEE-754 tie check.
         // Matches _quartet_topology_and_rd_nb exactly.
@@ -414,50 +414,50 @@ inline int32_t rmq_msl(
         }
     }
 
-    int32_t n0 = sorted_quartet_ids[(int32_t)qi * 4 + 0];
-    int32_t n1 = sorted_quartet_ids[(int32_t)qi * 4 + 1];
-    int32_t n2 = sorted_quartet_ids[(int32_t)qi * 4 + 2];
-    int32_t n3 = sorted_quartet_ids[(int32_t)qi * 4 + 3];
+    int32_t t0 = sorted_quartet_ids[(int32_t)qi * 4 + 0];
+    int32_t t1 = sorted_quartet_ids[(int32_t)qi * 4 + 1];
+    int32_t t2 = sorted_quartet_ids[(int32_t)qi * 4 + 2];
+    int32_t t3 = sorted_quartet_ids[(int32_t)qi * 4 + 3];
 
     for (int32_t ti = 0; ti < n_trees; ti++) {
         int32_t base_g2l = ti * n_gtaxa;
-        int32_t ln0 = global_to_local[base_g2l + n0];
-        int32_t ln1 = global_to_local[base_g2l + n1];
-        int32_t ln2 = global_to_local[base_g2l + n2];
-        int32_t ln3 = global_to_local[base_g2l + n3];
+        int32_t ln0 = global_to_local[base_g2l + t0];
+        int32_t ln1 = global_to_local[base_g2l + t1];
+        int32_t ln2 = global_to_local[base_g2l + t2];
+        int32_t ln3 = global_to_local[base_g2l + t3];
         if (ln0 < 0 || ln1 < 0 || ln2 < 0 || ln3 < 0) continue;
 
-        long nb = node_offsets[ti];
-        long tb = tour_offsets[ti];
-        long sb = sp_offsets[ti];
-        long lb = lg_offsets[ti];
-        int32_t tw = sp_tour_widths[ti];
+        long node_base = node_offsets[ti];
+        long tour_base = tour_offsets[ti];
+        long sp_base   = sp_offsets[ti];
+        long lg_base   = lg_offsets[ti];
+        int32_t sp_stride = sp_tour_widths[ti];
 
-        int32_t occ0 = all_first_occ[nb + ln0];
-        int32_t occ1 = all_first_occ[nb + ln1];
-        int32_t occ2 = all_first_occ[nb + ln2];
-        int32_t occ3 = all_first_occ[nb + ln3];
+        int32_t fo0 = all_first_occ[node_base + ln0];
+        int32_t fo1 = all_first_occ[node_base + ln1];
+        int32_t fo2 = all_first_occ[node_base + ln2];
+        int32_t fo3 = all_first_occ[node_base + ln3];
 
         int32_t l, r, tmp;
-        l = occ0; r = occ1; if (l > r) { tmp = l; l = r; r = tmp; }
-        int32_t lca01 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
-        l = occ0; r = occ2; if (l > r) { tmp = l; l = r; r = tmp; }
-        int32_t lca02 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
-        l = occ0; r = occ3; if (l > r) { tmp = l; l = r; r = tmp; }
-        int32_t lca03 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
-        l = occ1; r = occ2; if (l > r) { tmp = l; l = r; r = tmp; }
-        int32_t lca12 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
-        l = occ1; r = occ3; if (l > r) { tmp = l; l = r; r = tmp; }
-        int32_t lca13 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
-        l = occ2; r = occ3; if (l > r) { tmp = l; l = r; r = tmp; }
-        int32_t lca23 = rmq_msl(l, r, sb, tw, all_sparse_table, all_euler_depth, all_log2_table, lb, tb, all_euler_tour);
+        l = fo0; r = fo1; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca01 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo0; r = fo2; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca02 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo0; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca03 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo1; r = fo2; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca12 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo1; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca13 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo2; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca23 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
 
-        float rd01 = all_root_distance[nb + lca01];
-        float rd02 = all_root_distance[nb + lca02];
-        float rd03 = all_root_distance[nb + lca03];
-        float rd12 = all_root_distance[nb + lca12];
-        float rd13 = all_root_distance[nb + lca13];
-        float rd23 = all_root_distance[nb + lca23];
+        float rd01 = all_root_distance[node_base + lca01];
+        float rd02 = all_root_distance[node_base + lca02];
+        float rd03 = all_root_distance[node_base + lca03];
+        float rd12 = all_root_distance[node_base + lca12];
+        float rd13 = all_root_distance[node_base + lca13];
+        float rd23 = all_root_distance[node_base + lca23];
 
         float r0 = rd01 + rd23;
         float r1 = rd02 + rd13;
@@ -492,10 +492,10 @@ inline int32_t rmq_msl(
         }
 
         // Steiner spanning length: S = sum(rd[leaf_i]) - 0.5*(r_winner+r0+r1+r2)
-        float leaf_rd0 = all_root_distance[nb + ln0];
-        float leaf_rd1 = all_root_distance[nb + ln1];
-        float leaf_rd2 = all_root_distance[nb + ln2];
-        float leaf_rd3 = all_root_distance[nb + ln3];
+        float leaf_rd0 = all_root_distance[node_base + ln0];
+        float leaf_rd1 = all_root_distance[node_base + ln1];
+        float leaf_rd2 = all_root_distance[node_base + ln2];
+        float leaf_rd3 = all_root_distance[node_base + ln3];
         float sl = (leaf_rd0 + leaf_rd1 + leaf_rd2 + leaf_rd3)
                    - 0.5f * (r_winner + r0 + r1 + r2);
 

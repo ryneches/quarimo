@@ -114,51 +114,53 @@ def _rmq_csr_nb(l, r,
 
 
 @njit(cache=True)
-def _resolve_quartet_nb(n0, n1, n2, n3, ti,
+def _resolve_quartet_nb(t0, t1, t2, t3, ti,
                         global_to_local,
                         node_offsets, tour_offsets, sp_offsets, lg_offsets,
                         sp_tour_widths):
     """
     Map four global taxon IDs to tree-local positions for tree *ti*.
 
-    Returns a 9-tuple ``(ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw)`` where:
+    Returns a 9-tuple
+    ``(ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride)``
+    where:
 
     ln0..ln3 : int32
         Local leaf IDs in tree *ti* (-1 if the taxon is absent).
-    nb : int64
+    node_base : int64
         Node-array CSR offset for tree *ti*.
-    tb : int64
+    tour_base : int64
         Euler-tour CSR offset for tree *ti*.
-    sb : int64
+    sp_base : int64
         Sparse-table CSR offset for tree *ti*.
-    lb : int64
+    lg_base : int64
         Log2-table CSR offset for tree *ti*.
-    tw : int32
+    sp_stride : int32
         Sparse-table column stride (= tour length) for tree *ti*.
 
-    The CSR offsets ``nb..tw`` are always valid; they do not depend on taxon
-    presence.  The caller is responsible for checking::
+    The CSR offsets are always valid; they do not depend on taxon presence.
+    The caller is responsible for checking::
 
         if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             continue  # skip this (qi, ti) pair
 
-    before accessing ``all_first_occ[nb + ln0]`` etc.
+    before accessing ``all_first_occ[node_base + ln0]`` etc.
     """
-    ln0 = global_to_local[ti, n0]
-    ln1 = global_to_local[ti, n1]
-    ln2 = global_to_local[ti, n2]
-    ln3 = global_to_local[ti, n3]
-    nb  = node_offsets[ti]
-    tb  = tour_offsets[ti]
-    sb  = sp_offsets[ti]
-    lb  = lg_offsets[ti]
-    tw  = sp_tour_widths[ti]
-    return ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw
+    ln0       = global_to_local[ti, t0]
+    ln1       = global_to_local[ti, t1]
+    ln2       = global_to_local[ti, t2]
+    ln3       = global_to_local[ti, t3]
+    node_base = node_offsets[ti]
+    tour_base = tour_offsets[ti]
+    sp_base   = sp_offsets[ti]
+    lg_base   = lg_offsets[ti]
+    sp_stride = sp_tour_widths[ti]
+    return ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride
 
 
 @njit(cache=True)
-def _quartet_topology_and_rd_nb(occ0, occ1, occ2, occ3,
-                                 nb, tb, sb, lb, tw,
+def _quartet_topology_and_rd_nb(fo0, fo1, fo2, fo3,
+                                 node_base, tour_base, sp_base, lg_base, sp_stride,
                                  all_root_distance,
                                  all_sparse_table, all_euler_depth,
                                  all_log2_table, all_euler_tour,
@@ -173,11 +175,11 @@ def _quartet_topology_and_rd_nb(occ0, occ1, occ2, occ3,
 
     Parameters
     ----------
-    occ0..occ3 : int
+    fo0..fo3 : int
         First Euler-tour occurrences for the four taxa in tree *ti*.
         All must be valid — the caller has already checked ``ln0..ln3 >= 0``
         before computing these.
-    nb, tb, sb, lb, tw : int
+    node_base, tour_base, sp_base, lg_base, sp_stride : int
         CSR offsets and sparse-table stride for tree *ti*
         (from ``_resolve_quartet_nb``).
     all_root_distance : float64[:]
@@ -195,46 +197,46 @@ def _quartet_topology_and_rd_nb(occ0, occ1, occ2, occ3,
     Returns
     -------
     topo : int
-        Winning topology index: 0 = (n0,n1)|(n2,n3),
-                                1 = (n0,n2)|(n1,n3),
-                                2 = (n0,n3)|(n1,n2),
+        Winning topology index: 0 = (t0,t1)|(t2,t3),
+                                1 = (t0,t2)|(t1,t3),
+                                2 = (t0,t3)|(t1,t2),
                                 3 = unresolved (polytomy-inserted LCA detected).
     r0, r1, r2 : float64
         Pair-sums for each of the three topologies; all 0.0 when topo==3.
     r_winner : float64
         Score of the winning topology; 0.0 when topo==3.
     """
-    l = occ0; r = occ1
+    l = fo0; r = fo1
     if l > r: l, r = r, l
-    lca01 = _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
-                         all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-    l = occ0; r = occ2
+    lca01 = _rmq_csr_nb(l, r, sp_base, sp_stride, all_sparse_table,
+                         all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+    l = fo0; r = fo2
     if l > r: l, r = r, l
-    lca02 = _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
-                         all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-    l = occ0; r = occ3
+    lca02 = _rmq_csr_nb(l, r, sp_base, sp_stride, all_sparse_table,
+                         all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+    l = fo0; r = fo3
     if l > r: l, r = r, l
-    lca03 = _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
-                         all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-    l = occ1; r = occ2
+    lca03 = _rmq_csr_nb(l, r, sp_base, sp_stride, all_sparse_table,
+                         all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+    l = fo1; r = fo2
     if l > r: l, r = r, l
-    lca12 = _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
-                         all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-    l = occ1; r = occ3
+    lca12 = _rmq_csr_nb(l, r, sp_base, sp_stride, all_sparse_table,
+                         all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+    l = fo1; r = fo3
     if l > r: l, r = r, l
-    lca13 = _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
-                         all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
-    l = occ2; r = occ3
+    lca13 = _rmq_csr_nb(l, r, sp_base, sp_stride, all_sparse_table,
+                         all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+    l = fo2; r = fo3
     if l > r: l, r = r, l
-    lca23 = _rmq_csr_nb(l, r, sb, tw, all_sparse_table,
-                         all_euler_depth, all_log2_table, lb, tb, all_euler_tour)
+    lca23 = _rmq_csr_nb(l, r, sp_base, sp_stride, all_sparse_table,
+                         all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
 
-    rd01 = all_root_distance[nb + lca01]
-    rd02 = all_root_distance[nb + lca02]
-    rd03 = all_root_distance[nb + lca03]
-    rd12 = all_root_distance[nb + lca12]
-    rd13 = all_root_distance[nb + lca13]
-    rd23 = all_root_distance[nb + lca23]
+    rd01 = all_root_distance[node_base + lca01]
+    rd02 = all_root_distance[node_base + lca02]
+    rd03 = all_root_distance[node_base + lca03]
+    rd12 = all_root_distance[node_base + lca12]
+    rd13 = all_root_distance[node_base + lca13]
+    rd23 = all_root_distance[node_base + lca23]
 
     r0 = rd01 + rd23  # topology 0: (n0,n1)|(n2,n3)
     r1 = rd02 + rd13  # topology 1: (n0,n2)|(n1,n3)
@@ -266,7 +268,7 @@ def _quartet_topology_and_rd_nb(occ0, occ1, occ2, occ3,
 
 
 @njit(cache=True)
-def _steiner_length_nb(ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance):
+def _steiner_length_nb(ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance):
     """
     Steiner spanning length of the winning quartet topology.
 
@@ -278,7 +280,7 @@ def _steiner_length_nb(ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_di
     ----------
     ln0..ln3 : int
         Local leaf IDs in tree *ti* (all must be >= 0; caller has checked).
-    nb : int
+    node_base : int
         Node-array CSR offset for tree *ti*.
     r0, r1, r2 : float64
         Pair-sums for each of the three topologies (from
@@ -297,10 +299,10 @@ def _steiner_length_nb(ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_di
     -----
     Formula: S = Σ rd(leaf_i) − 0.5 * (r_winner + r0 + r1 + r2)
     """
-    leaf_sum = (all_root_distance[nb + ln0]
-              + all_root_distance[nb + ln1]
-              + all_root_distance[nb + ln2]
-              + all_root_distance[nb + ln3])
+    leaf_sum = (all_root_distance[node_base + ln0]
+              + all_root_distance[node_base + ln1]
+              + all_root_distance[node_base + ln2]
+              + all_root_distance[node_base + ln3])
     return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
 
 
@@ -388,28 +390,29 @@ def _quartet_counts_njit(
         Last axis: k=0,1,2 resolved topologies; k=3 unresolved (polytomy).
     """
     for qi in prange(n_quartets):
-        n0 = sorted_quartet_ids[qi, 0]
-        n1 = sorted_quartet_ids[qi, 1]
-        n2 = sorted_quartet_ids[qi, 2]
-        n3 = sorted_quartet_ids[qi, 3]
+        t0 = sorted_quartet_ids[qi, 0]
+        t1 = sorted_quartet_ids[qi, 1]
+        t2 = sorted_quartet_ids[qi, 2]
+        t3 = sorted_quartet_ids[qi, 3]
 
         for ti in range(n_trees):
-            ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = _resolve_quartet_nb(
-                n0, n1, n2, n3, ti,
-                global_to_local, node_offsets, tour_offsets, sp_offsets,
-                lg_offsets, sp_tour_widths,
-            )
+            ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride = \
+                _resolve_quartet_nb(
+                    t0, t1, t2, t3, ti,
+                    global_to_local, node_offsets, tour_offsets, sp_offsets,
+                    lg_offsets, sp_tour_widths,
+                )
             if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
                 continue
 
-            occ0 = all_first_occ[nb + ln0]
-            occ1 = all_first_occ[nb + ln1]
-            occ2 = all_first_occ[nb + ln2]
-            occ3 = all_first_occ[nb + ln3]
+            fo0 = all_first_occ[node_base + ln0]
+            fo1 = all_first_occ[node_base + ln1]
+            fo2 = all_first_occ[node_base + ln2]
+            fo3 = all_first_occ[node_base + ln3]
             poly_start = polytomy_offsets[ti]
             poly_end = polytomy_offsets[ti + 1]
             topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_nb(
-                occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+                fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
                 all_root_distance, all_sparse_table, all_euler_depth,
                 all_log2_table, all_euler_tour,
                 poly_start, poly_end, polytomy_nodes,
@@ -474,35 +477,36 @@ def _quartet_steiner_njit(
         Pre-filled with zeros by caller.
     """
     for qi in prange(n_quartets):
-        n0 = sorted_quartet_ids[qi, 0]
-        n1 = sorted_quartet_ids[qi, 1]
-        n2 = sorted_quartet_ids[qi, 2]
-        n3 = sorted_quartet_ids[qi, 3]
+        t0 = sorted_quartet_ids[qi, 0]
+        t1 = sorted_quartet_ids[qi, 1]
+        t2 = sorted_quartet_ids[qi, 2]
+        t3 = sorted_quartet_ids[qi, 3]
 
         for ti in range(n_trees):
-            ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = _resolve_quartet_nb(
-                n0, n1, n2, n3, ti,
-                global_to_local, node_offsets, tour_offsets, sp_offsets,
-                lg_offsets, sp_tour_widths,
-            )
+            ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride = \
+                _resolve_quartet_nb(
+                    t0, t1, t2, t3, ti,
+                    global_to_local, node_offsets, tour_offsets, sp_offsets,
+                    lg_offsets, sp_tour_widths,
+                )
             if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
                 continue
 
-            occ0 = all_first_occ[nb + ln0]
-            occ1 = all_first_occ[nb + ln1]
-            occ2 = all_first_occ[nb + ln2]
-            occ3 = all_first_occ[nb + ln3]
+            fo0 = all_first_occ[node_base + ln0]
+            fo1 = all_first_occ[node_base + ln1]
+            fo2 = all_first_occ[node_base + ln2]
+            fo3 = all_first_occ[node_base + ln3]
             poly_start = polytomy_offsets[ti]
             poly_end = polytomy_offsets[ti + 1]
             topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_nb(
-                occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+                fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
                 all_root_distance, all_sparse_table, all_euler_depth,
                 all_log2_table, all_euler_tour,
                 poly_start, poly_end, polytomy_nodes,
             )
             gi = tree_to_group_idx[ti]
             sl = _steiner_length_nb(
-                ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance,
+                ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance,
             )
             counts_out[qi, gi, topo] += 1
             _accumulate_steiner_nb(

@@ -102,7 +102,7 @@ if _CUDA_AVAILABLE:
     )
 
     @cuda.jit(device=True)
-    def _resolve_quartet_cuda(n0, n1, n2, n3, ti,
+    def _resolve_quartet_cuda(t0, t1, t2, t3, ti,
                               global_to_local,
                               node_offsets, tour_offsets, sp_offsets, lg_offsets,
                               sp_tour_widths):
@@ -113,20 +113,20 @@ if _CUDA_AVAILABLE:
         docstring for the full return-value description and caller contract.
         All arrays are device-resident.
         """
-        ln0 = global_to_local[ti, n0]
-        ln1 = global_to_local[ti, n1]
-        ln2 = global_to_local[ti, n2]
-        ln3 = global_to_local[ti, n3]
-        nb  = node_offsets[ti]
-        tb  = tour_offsets[ti]
-        sb  = sp_offsets[ti]
-        lb  = lg_offsets[ti]
-        tw  = sp_tour_widths[ti]
-        return ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw
+        ln0       = global_to_local[ti, t0]
+        ln1       = global_to_local[ti, t1]
+        ln2       = global_to_local[ti, t2]
+        ln3       = global_to_local[ti, t3]
+        node_base = node_offsets[ti]
+        tour_base = tour_offsets[ti]
+        sp_base   = sp_offsets[ti]
+        lg_base   = lg_offsets[ti]
+        sp_stride = sp_tour_widths[ti]
+        return ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride
 
     @cuda.jit(device=True)
-    def _quartet_topology_and_rd_cuda(occ0, occ1, occ2, occ3,
-                                       nb, tb, sb, lb, tw,
+    def _quartet_topology_and_rd_cuda(fo0, fo1, fo2, fo3,
+                                       node_base, tour_base, sp_base, lg_base, sp_stride,
                                        all_root_distance,
                                        all_sparse_table, all_euler_depth,
                                        all_log2_table, all_euler_tour):
@@ -137,40 +137,46 @@ if _CUDA_AVAILABLE:
         function's docstring for parameter and return-value descriptions.
         All arrays are device-resident.
         """
-        l = occ0; r = occ1
+        l = fo0; r = fo1
         if l > r: l, r = r, l
-        rd01 = all_root_distance[nb + _rmq_csr_cuda(l, r, sb, tw, all_sparse_table,
-                                                      all_euler_depth, all_log2_table,
-                                                      lb, tb, all_euler_tour)]
-        l = occ0; r = occ2
+        rd01 = all_root_distance[node_base + _rmq_csr_cuda(l, r, sp_base, sp_stride,
+                                                             all_sparse_table,
+                                                             all_euler_depth, all_log2_table,
+                                                             lg_base, tour_base, all_euler_tour)]
+        l = fo0; r = fo2
         if l > r: l, r = r, l
-        rd02 = all_root_distance[nb + _rmq_csr_cuda(l, r, sb, tw, all_sparse_table,
-                                                      all_euler_depth, all_log2_table,
-                                                      lb, tb, all_euler_tour)]
-        l = occ0; r = occ3
+        rd02 = all_root_distance[node_base + _rmq_csr_cuda(l, r, sp_base, sp_stride,
+                                                             all_sparse_table,
+                                                             all_euler_depth, all_log2_table,
+                                                             lg_base, tour_base, all_euler_tour)]
+        l = fo0; r = fo3
         if l > r: l, r = r, l
-        rd03 = all_root_distance[nb + _rmq_csr_cuda(l, r, sb, tw, all_sparse_table,
-                                                      all_euler_depth, all_log2_table,
-                                                      lb, tb, all_euler_tour)]
-        l = occ1; r = occ2
+        rd03 = all_root_distance[node_base + _rmq_csr_cuda(l, r, sp_base, sp_stride,
+                                                             all_sparse_table,
+                                                             all_euler_depth, all_log2_table,
+                                                             lg_base, tour_base, all_euler_tour)]
+        l = fo1; r = fo2
         if l > r: l, r = r, l
-        rd12 = all_root_distance[nb + _rmq_csr_cuda(l, r, sb, tw, all_sparse_table,
-                                                      all_euler_depth, all_log2_table,
-                                                      lb, tb, all_euler_tour)]
-        l = occ1; r = occ3
+        rd12 = all_root_distance[node_base + _rmq_csr_cuda(l, r, sp_base, sp_stride,
+                                                             all_sparse_table,
+                                                             all_euler_depth, all_log2_table,
+                                                             lg_base, tour_base, all_euler_tour)]
+        l = fo1; r = fo3
         if l > r: l, r = r, l
-        rd13 = all_root_distance[nb + _rmq_csr_cuda(l, r, sb, tw, all_sparse_table,
-                                                      all_euler_depth, all_log2_table,
-                                                      lb, tb, all_euler_tour)]
-        l = occ2; r = occ3
+        rd13 = all_root_distance[node_base + _rmq_csr_cuda(l, r, sp_base, sp_stride,
+                                                             all_sparse_table,
+                                                             all_euler_depth, all_log2_table,
+                                                             lg_base, tour_base, all_euler_tour)]
+        l = fo2; r = fo3
         if l > r: l, r = r, l
-        rd23 = all_root_distance[nb + _rmq_csr_cuda(l, r, sb, tw, all_sparse_table,
-                                                      all_euler_depth, all_log2_table,
-                                                      lb, tb, all_euler_tour)]
+        rd23 = all_root_distance[node_base + _rmq_csr_cuda(l, r, sp_base, sp_stride,
+                                                             all_sparse_table,
+                                                             all_euler_depth, all_log2_table,
+                                                             lg_base, tour_base, all_euler_tour)]
 
-        r0 = rd01 + rd23  # topology 0: (n0,n1)|(n2,n3)
-        r1 = rd02 + rd13  # topology 1: (n0,n2)|(n1,n3)
-        r2 = rd03 + rd12  # topology 2: (n0,n3)|(n1,n2)
+        r0 = rd01 + rd23  # topology 0: (t0,t1)|(t2,t3)
+        r1 = rd02 + rd13  # topology 1: (t0,t2)|(t1,t3)
+        r2 = rd03 + rd12  # topology 2: (t0,t3)|(t1,t2)
 
         if r0 >= r1 and r0 >= r2:
             topo = 0; r_winner = r0
@@ -182,7 +188,8 @@ if _CUDA_AVAILABLE:
         return topo, r0, r1, r2, r_winner
 
     @cuda.jit(device=True)
-    def _steiner_length_cuda(ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance):
+    def _steiner_length_cuda(ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner,
+                              all_root_distance):
         """
         Steiner spanning length of the winning quartet topology.
 
@@ -190,10 +197,10 @@ if _CUDA_AVAILABLE:
         docstring for parameter and return-value descriptions.
         ``all_root_distance`` is device-resident.
         """
-        leaf_sum = (all_root_distance[nb + ln0]
-                  + all_root_distance[nb + ln1]
-                  + all_root_distance[nb + ln2]
-                  + all_root_distance[nb + ln3])
+        leaf_sum = (all_root_distance[node_base + ln0]
+                  + all_root_distance[node_base + ln1]
+                  + all_root_distance[node_base + ln2]
+                  + all_root_distance[node_base + ln3])
         return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
 
     @cuda.jit(device=True)
@@ -225,8 +232,8 @@ if _CUDA_AVAILABLE:
         cuda.atomic.add(steiner_sum_sq_out, (qi, gi, topo), sl * sl)
 
     @cuda.jit(device=True)
-    def _polytomy_check_cuda(occ0, occ1, occ2, occ3,
-                              nb, tb, sb, lb, tw,
+    def _polytomy_check_cuda(fo0, fo1, fo2, fo3,
+                              node_base, tour_base, sp_base, lg_base, sp_stride,
                               poly_start, poly_end, polytomy_nodes,
                               all_sparse_table, all_euler_depth, all_log2_table,
                               all_euler_tour, all_root_distance):
@@ -253,38 +260,41 @@ if _CUDA_AVAILABLE:
         if poly_end <= poly_start:
             return False, 0, 0.0, 0.0, 0.0, 0.0
 
-        l = occ0; r = occ1
+        l = fo0; r = fo1
         if l > r: l, r = r, l
-        lca01 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                               all_log2_table, lb, tb, all_euler_tour)
-        l = occ0; r = occ2
+        lca01 = _rmq_csr_cuda(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth,
+                               all_log2_table, lg_base, tour_base, all_euler_tour)
+        l = fo0; r = fo2
         if l > r: l, r = r, l
-        lca02 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                               all_log2_table, lb, tb, all_euler_tour)
-        l = occ0; r = occ3
+        lca02 = _rmq_csr_cuda(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth,
+                               all_log2_table, lg_base, tour_base, all_euler_tour)
+        l = fo0; r = fo3
         if l > r: l, r = r, l
-        lca03 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                               all_log2_table, lb, tb, all_euler_tour)
-        l = occ1; r = occ2
+        lca03 = _rmq_csr_cuda(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth,
+                               all_log2_table, lg_base, tour_base, all_euler_tour)
+        l = fo1; r = fo2
         if l > r: l, r = r, l
-        lca12 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                               all_log2_table, lb, tb, all_euler_tour)
-        l = occ1; r = occ3
+        lca12 = _rmq_csr_cuda(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth,
+                               all_log2_table, lg_base, tour_base, all_euler_tour)
+        l = fo1; r = fo3
         if l > r: l, r = r, l
-        lca13 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                               all_log2_table, lb, tb, all_euler_tour)
-        l = occ2; r = occ3
+        lca13 = _rmq_csr_cuda(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth,
+                               all_log2_table, lg_base, tour_base, all_euler_tour)
+        l = fo2; r = fo3
         if l > r: l, r = r, l
-        lca23 = _rmq_csr_cuda(l, r, sb, tw, all_sparse_table, all_euler_depth,
-                               all_log2_table, lb, tb, all_euler_tour)
+        lca23 = _rmq_csr_cuda(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth,
+                               all_log2_table, lg_base, tour_base, all_euler_tour)
 
         for j in range(poly_start, poly_end):
             pn = polytomy_nodes[j]
             if (pn == lca01 or pn == lca02 or pn == lca03
                     or pn == lca12 or pn == lca13 or pn == lca23):
-                rd01 = all_root_distance[nb + lca01]; rd23 = all_root_distance[nb + lca23]
-                rd02 = all_root_distance[nb + lca02]; rd13 = all_root_distance[nb + lca13]
-                rd03 = all_root_distance[nb + lca03]; rd12 = all_root_distance[nb + lca12]
+                rd01 = all_root_distance[node_base + lca01]
+                rd23 = all_root_distance[node_base + lca23]
+                rd02 = all_root_distance[node_base + lca02]
+                rd13 = all_root_distance[node_base + lca13]
+                rd03 = all_root_distance[node_base + lca03]
+                rd12 = all_root_distance[node_base + lca12]
                 r0 = rd01 + rd23; r1 = rd02 + rd13; r2 = rd03 + rd12
                 if r0 == r1 and r1 == r2:
                     return True, 3, r0, r1, r2, r0
@@ -331,24 +341,25 @@ if _CUDA_AVAILABLE:
             return
 
         # Get quartet taxa and resolve to tree-local positions
-        n0 = sorted_quartet_ids[qi, 0]
-        n1 = sorted_quartet_ids[qi, 1]
-        n2 = sorted_quartet_ids[qi, 2]
-        n3 = sorted_quartet_ids[qi, 3]
-        ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = _resolve_quartet_cuda(
-            n0, n1, n2, n3, ti,
-            global_to_local, node_offsets, tour_offsets, sp_offsets,
-            lg_offsets, sp_tour_widths,
-        )
+        t0 = sorted_quartet_ids[qi, 0]
+        t1 = sorted_quartet_ids[qi, 1]
+        t2 = sorted_quartet_ids[qi, 2]
+        t3 = sorted_quartet_ids[qi, 3]
+        ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride = \
+            _resolve_quartet_cuda(
+                t0, t1, t2, t3, ti,
+                global_to_local, node_offsets, tour_offsets, sp_offsets,
+                lg_offsets, sp_tour_widths,
+            )
         if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             return
 
-        occ0 = all_first_occ[nb + ln0]
-        occ1 = all_first_occ[nb + ln1]
-        occ2 = all_first_occ[nb + ln2]
-        occ3 = all_first_occ[nb + ln3]
+        fo0 = all_first_occ[node_base + ln0]
+        fo1 = all_first_occ[node_base + ln1]
+        fo2 = all_first_occ[node_base + ln2]
+        fo3 = all_first_occ[node_base + ln3]
         topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
-            occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+            fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
             all_root_distance, all_sparse_table, all_euler_depth,
             all_log2_table, all_euler_tour,
         )
@@ -391,24 +402,25 @@ if _CUDA_AVAILABLE:
             return
 
         # Get quartet taxa and resolve to tree-local positions
-        n0 = sorted_quartet_ids[qi, 0]
-        n1 = sorted_quartet_ids[qi, 1]
-        n2 = sorted_quartet_ids[qi, 2]
-        n3 = sorted_quartet_ids[qi, 3]
-        ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = _resolve_quartet_cuda(
-            n0, n1, n2, n3, ti,
-            global_to_local, node_offsets, tour_offsets, sp_offsets,
-            lg_offsets, sp_tour_widths,
-        )
+        t0 = sorted_quartet_ids[qi, 0]
+        t1 = sorted_quartet_ids[qi, 1]
+        t2 = sorted_quartet_ids[qi, 2]
+        t3 = sorted_quartet_ids[qi, 3]
+        ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride = \
+            _resolve_quartet_cuda(
+                t0, t1, t2, t3, ti,
+                global_to_local, node_offsets, tour_offsets, sp_offsets,
+                lg_offsets, sp_tour_widths,
+            )
         if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             return
 
-        occ0 = all_first_occ[nb + ln0]
-        occ1 = all_first_occ[nb + ln1]
-        occ2 = all_first_occ[nb + ln2]
-        occ3 = all_first_occ[nb + ln3]
+        fo0 = all_first_occ[node_base + ln0]
+        fo1 = all_first_occ[node_base + ln1]
+        fo2 = all_first_occ[node_base + ln2]
+        fo3 = all_first_occ[node_base + ln3]
         topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
-            occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+            fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
             all_root_distance, all_sparse_table, all_euler_depth,
             all_log2_table, all_euler_tour,
         )
@@ -418,7 +430,7 @@ if _CUDA_AVAILABLE:
 
         # Compute and store Steiner distance (conflict-free write)
         steiner_out[qi, ti, topo] = _steiner_length_cuda(
-            ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance,
+            ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance,
         )
 
 
@@ -518,24 +530,25 @@ if _CUDA_AVAILABLE:
         )
 
         # Resolve global IDs to tree-local positions
-        ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = _resolve_quartet_cuda(
-            a, b, c, d, ti,
-            global_to_local, node_offsets, tour_offsets, sp_offsets,
-            lg_offsets, sp_tour_widths,
-        )
+        ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride = \
+            _resolve_quartet_cuda(
+                a, b, c, d, ti,
+                global_to_local, node_offsets, tour_offsets, sp_offsets,
+                lg_offsets, sp_tour_widths,
+            )
         if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             return
 
-        occ0 = all_first_occ[nb + ln0]
-        occ1 = all_first_occ[nb + ln1]
-        occ2 = all_first_occ[nb + ln2]
-        occ3 = all_first_occ[nb + ln3]
+        fo0 = all_first_occ[node_base + ln0]
+        fo1 = all_first_occ[node_base + ln1]
+        fo2 = all_first_occ[node_base + ln2]
+        fo3 = all_first_occ[node_base + ln3]
 
         # CSR-based polytomy detection (zero overhead for trees without polytomies)
         poly_start = polytomy_offsets[ti]
         poly_end = polytomy_offsets[ti + 1]
         found, topo, r0, r1, r2, rw = _polytomy_check_cuda(
-            occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+            fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
             poly_start, poly_end, polytomy_nodes,
             all_sparse_table, all_euler_depth, all_log2_table,
             all_euler_tour, all_root_distance,
@@ -545,7 +558,7 @@ if _CUDA_AVAILABLE:
             return
 
         topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
-            occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+            fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
             all_root_distance, all_sparse_table, all_euler_depth,
             all_log2_table, all_euler_tour,
         )
@@ -605,32 +618,35 @@ if _CUDA_AVAILABLE:
         )
 
         # Resolve global IDs to tree-local positions
-        ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = _resolve_quartet_cuda(
-            a, b, c, d, ti,
-            global_to_local, node_offsets, tour_offsets, sp_offsets,
-            lg_offsets, sp_tour_widths,
-        )
+        ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride = \
+            _resolve_quartet_cuda(
+                a, b, c, d, ti,
+                global_to_local, node_offsets, tour_offsets, sp_offsets,
+                lg_offsets, sp_tour_widths,
+            )
         # Skip if any taxon absent — steiner_out is pre-initialised to 0 by host.
         if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
             return
 
-        occ0 = all_first_occ[nb + ln0]
-        occ1 = all_first_occ[nb + ln1]
-        occ2 = all_first_occ[nb + ln2]
-        occ3 = all_first_occ[nb + ln3]
+        fo0 = all_first_occ[node_base + ln0]
+        fo1 = all_first_occ[node_base + ln1]
+        fo2 = all_first_occ[node_base + ln2]
+        fo3 = all_first_occ[node_base + ln3]
 
         # CSR-based polytomy detection (zero overhead for trees without polytomies)
         poly_start = polytomy_offsets[ti]
         poly_end = polytomy_offsets[ti + 1]
         found, topo, r0, r1, r2, rw = _polytomy_check_cuda(
-            occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+            fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
             poly_start, poly_end, polytomy_nodes,
             all_sparse_table, all_euler_depth, all_log2_table,
             all_euler_tour, all_root_distance,
         )
         if found:
             gi = tree_to_group_idx[ti]
-            sl = _steiner_length_cuda(ln0, ln1, ln2, ln3, nb, r0, r1, r2, rw, all_root_distance)
+            sl = _steiner_length_cuda(
+                ln0, ln1, ln2, ln3, node_base, r0, r1, r2, rw, all_root_distance,
+            )
             cuda.atomic.add(counts, (qi, gi, topo), 1)
             _accumulate_steiner_cuda(
                 qi, gi, topo, sl,
@@ -639,13 +655,15 @@ if _CUDA_AVAILABLE:
             return
 
         topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
-            occ0, occ1, occ2, occ3, nb, tb, sb, lb, tw,
+            fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
             all_root_distance, all_sparse_table, all_euler_depth,
             all_log2_table, all_euler_tour,
         )
 
         gi = tree_to_group_idx[ti]
-        sl = _steiner_length_cuda(ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance)
+        sl = _steiner_length_cuda(
+            ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance,
+        )
         cuda.atomic.add(counts, (qi, gi, topo), 1)
         _accumulate_steiner_cuda(
             qi, gi, topo, sl,

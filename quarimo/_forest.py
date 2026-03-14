@@ -1597,44 +1597,45 @@ class Forest:
         compute_steiner = steiner_out.size > 0
 
         for qi in range(n_quartets):
-            n0 = int(sorted_quartet_ids[qi, 0])
-            n1 = int(sorted_quartet_ids[qi, 1])
-            n2 = int(sorted_quartet_ids[qi, 2])
-            n3 = int(sorted_quartet_ids[qi, 3])
+            t0 = int(sorted_quartet_ids[qi, 0])
+            t1 = int(sorted_quartet_ids[qi, 1])
+            t2 = int(sorted_quartet_ids[qi, 2])
+            t3 = int(sorted_quartet_ids[qi, 3])
 
             for ti in range(n_trees):
-                ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw = Forest._resolve_quartet(
-                    n0,
-                    n1,
-                    n2,
-                    n3,
-                    ti,
-                    global_to_local,
-                    node_offsets,
-                    tour_offsets,
-                    sp_offsets,
-                    lg_offsets,
-                    sp_tour_widths,
-                )
+                ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride = \
+                    Forest._resolve_quartet(
+                        t0,
+                        t1,
+                        t2,
+                        t3,
+                        ti,
+                        global_to_local,
+                        node_offsets,
+                        tour_offsets,
+                        sp_offsets,
+                        lg_offsets,
+                        sp_tour_widths,
+                    )
                 if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
                     continue
 
-                occ0 = int(all_first_occ[nb + ln0])
-                occ1 = int(all_first_occ[nb + ln1])
-                occ2 = int(all_first_occ[nb + ln2])
-                occ3 = int(all_first_occ[nb + ln3])
+                fo0 = int(all_first_occ[node_base + ln0])
+                fo1 = int(all_first_occ[node_base + ln1])
+                fo2 = int(all_first_occ[node_base + ln2])
+                fo3 = int(all_first_occ[node_base + ln3])
                 poly_start = int(polytomy_offsets[ti])
                 poly_end = int(polytomy_offsets[ti + 1])
                 topo, r0, r1, r2, r_winner = Forest._quartet_topology_and_rd(
-                    occ0,
-                    occ1,
-                    occ2,
-                    occ3,
-                    nb,
-                    tb,
-                    sb,
-                    lb,
-                    tw,
+                    fo0,
+                    fo1,
+                    fo2,
+                    fo3,
+                    node_base,
+                    tour_base,
+                    sp_base,
+                    lg_base,
+                    sp_stride,
                     all_root_distance,
                     all_sparse_table,
                     all_euler_depth,
@@ -1650,7 +1651,7 @@ class Forest:
 
                 if compute_steiner:
                     sl = Forest._steiner_length(
-                        ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance,
+                        ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance,
                     )
                     Forest._accumulate_steiner(
                         qi, gi, topo, sl,
@@ -1724,10 +1725,10 @@ class Forest:
 
     @staticmethod
     def _resolve_quartet(
-        n0,
-        n1,
-        n2,
-        n3,
+        t0,
+        t1,
+        t2,
+        t3,
         ti,
         global_to_local,
         node_offsets,
@@ -1740,13 +1741,15 @@ class Forest:
         **Private static.**  Map four global taxon IDs to tree-local positions
         for tree *ti*.
 
-        Returns a 9-tuple ``(ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw)`` where:
+        Returns a 9-tuple
+        ``(ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride)``
+        where:
 
         ln0..ln3 : int
             Local leaf IDs in tree *ti* (-1 if the taxon is absent).
-        nb, tb, sb, lb : int
+        node_base, tour_base, sp_base, lg_base : int
             Node / tour / sparse-table / log2-table CSR offsets for tree *ti*.
-        tw : int
+        sp_stride : int
             Sparse-table column stride for tree *ti*.
 
         The caller is responsible for checking::
@@ -1754,33 +1757,33 @@ class Forest:
             if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
                 continue  # skip this (qi, ti) pair
 
-        before accessing ``all_first_occ[nb + ln0]`` etc.
+        before accessing ``all_first_occ[node_base + ln0]`` etc.
 
         Pure-Python counterpart of ``_resolve_quartet_nb`` and
         ``_resolve_quartet_cuda``.
         """
-        ln0 = int(global_to_local[ti, n0])
-        ln1 = int(global_to_local[ti, n1])
-        ln2 = int(global_to_local[ti, n2])
-        ln3 = int(global_to_local[ti, n3])
-        nb = int(node_offsets[ti])
-        tb = int(tour_offsets[ti])
-        sb = int(sp_offsets[ti])
-        lb = int(lg_offsets[ti])
-        tw = int(sp_tour_widths[ti])
-        return ln0, ln1, ln2, ln3, nb, tb, sb, lb, tw
+        ln0       = int(global_to_local[ti, t0])
+        ln1       = int(global_to_local[ti, t1])
+        ln2       = int(global_to_local[ti, t2])
+        ln3       = int(global_to_local[ti, t3])
+        node_base = int(node_offsets[ti])
+        tour_base = int(tour_offsets[ti])
+        sp_base   = int(sp_offsets[ti])
+        lg_base   = int(lg_offsets[ti])
+        sp_stride = int(sp_tour_widths[ti])
+        return ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride
 
     @staticmethod
     def _quartet_topology_and_rd(
-        occ0,
-        occ1,
-        occ2,
-        occ3,
-        nb,
-        tb,
-        sb,
-        lb,
-        tw,
+        fo0,
+        fo1,
+        fo2,
+        fo3,
+        node_base,
+        tour_base,
+        sp_base,
+        lg_base,
+        sp_stride,
         all_root_distance,
         all_sparse_table,
         all_euler_depth,
@@ -1795,17 +1798,17 @@ class Forest:
         and pair-sums.
 
         Computes all six pairwise LCA root-distances for four taxa (whose first
-        Euler-tour occurrences are ``occ0..occ3``), applies the four-point
+        Euler-tour occurrences are ``fo0..fo3``), applies the four-point
         condition to determine the winning unrooted split, and returns the
         topology index alongside all three pair-sums and the winning pair-sum.
 
         Parameters
         ----------
-        occ0..occ3 : int
+        fo0..fo3 : int
             First Euler-tour occurrences for the four taxa in tree *ti*.
             All must be valid — the caller has already checked ``ln0..ln3 >= 0``
             before computing these.
-        nb, tb, sb, lb, tw : int
+        node_base, tour_base, sp_base, lg_base, sp_stride : int
             CSR offsets and sparse-table stride for tree *ti*
             (from ``Forest._resolve_quartet``).
         all_root_distance, all_sparse_table, all_euler_depth,
@@ -1815,9 +1818,9 @@ class Forest:
         Returns
         -------
         topo : int
-            Winning topology index: 0 = (n0,n1)|(n2,n3),
-                                    1 = (n0,n2)|(n1,n3),
-                                    2 = (n0,n3)|(n1,n2).
+            Winning topology index: 0 = (t0,t1)|(t2,t3),
+                                    1 = (t0,t2)|(t1,t3),
+                                    2 = (t0,t3)|(t1,t2).
         r0, r1, r2 : float
             Pair-sums for each of the three topologies.
         r_winner : float
@@ -1830,27 +1833,27 @@ class Forest:
         def lca_id(oa, ob):
             l, r = (oa, ob) if oa <= ob else (ob, oa)
             return Forest._rmq_csr(
-                l, r, sb, tw, all_sparse_table, all_euler_depth,
-                all_log2_table, lb, tb, all_euler_tour,
+                l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth,
+                all_log2_table, lg_base, tour_base, all_euler_tour,
             )
 
-        lid01 = lca_id(occ0, occ1)
-        lid02 = lca_id(occ0, occ2)
-        lid03 = lca_id(occ0, occ3)
-        lid12 = lca_id(occ1, occ2)
-        lid13 = lca_id(occ1, occ3)
-        lid23 = lca_id(occ2, occ3)
+        lid01 = lca_id(fo0, fo1)
+        lid02 = lca_id(fo0, fo2)
+        lid03 = lca_id(fo0, fo3)
+        lid12 = lca_id(fo1, fo2)
+        lid13 = lca_id(fo1, fo3)
+        lid23 = lca_id(fo2, fo3)
 
-        rd01 = float(all_root_distance[nb + lid01])
-        rd02 = float(all_root_distance[nb + lid02])
-        rd03 = float(all_root_distance[nb + lid03])
-        rd12 = float(all_root_distance[nb + lid12])
-        rd13 = float(all_root_distance[nb + lid13])
-        rd23 = float(all_root_distance[nb + lid23])
+        rd01 = float(all_root_distance[node_base + lid01])
+        rd02 = float(all_root_distance[node_base + lid02])
+        rd03 = float(all_root_distance[node_base + lid03])
+        rd12 = float(all_root_distance[node_base + lid12])
+        rd13 = float(all_root_distance[node_base + lid13])
+        rd23 = float(all_root_distance[node_base + lid23])
 
-        r0 = rd01 + rd23  # topology 0: (n0,n1)|(n2,n3)
-        r1 = rd02 + rd13  # topology 1: (n0,n2)|(n1,n3)
-        r2 = rd03 + rd12  # topology 2: (n0,n3)|(n1,n2)
+        r0 = rd01 + rd23  # topology 0: (t0,t1)|(t2,t3)
+        r1 = rd02 + rd13  # topology 1: (t0,t2)|(t1,t3)
+        r2 = rd03 + rd12  # topology 2: (t0,t3)|(t1,t2)
 
         # CSR-based polytomy detection (zero overhead for trees without polytomies).
         # CSR is the pre-filter; numerical tie r0==r1==r2 confirms an unresolvable
@@ -1879,7 +1882,7 @@ class Forest:
 
     @staticmethod
     def _steiner_length(
-        ln0, ln1, ln2, ln3, nb, r0, r1, r2, r_winner, all_root_distance
+        ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance
     ):
         """
         **Private static.**  Steiner spanning length of the winning quartet
@@ -1893,7 +1896,7 @@ class Forest:
         ----------
         ln0..ln3 : int
             Local leaf IDs in tree *ti* (all must be >= 0).
-        nb : int
+        node_base : int
             Node-array CSR offset for tree *ti*.
         r0, r1, r2 : float
             Pair-sums for the three topologies.
@@ -1915,10 +1918,10 @@ class Forest:
         ``_steiner_length_cuda``.
         """
         leaf_sum = (
-            float(all_root_distance[nb + ln0])
-            + float(all_root_distance[nb + ln1])
-            + float(all_root_distance[nb + ln2])
-            + float(all_root_distance[nb + ln3])
+            float(all_root_distance[node_base + ln0])
+            + float(all_root_distance[node_base + ln1])
+            + float(all_root_distance[node_base + ln2])
+            + float(all_root_distance[node_base + ln3])
         )
         return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
 
