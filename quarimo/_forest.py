@@ -477,6 +477,7 @@ class Forest:
         # Build namespace and CSR layout
         logger.info("🔖 Building global taxon namespace...")
         self._build_global_namespace()
+        self._build_paralog_csr()
 
         logger.info("📦 Packing arrays into CSR flat layout...")
         self._pack_csr()
@@ -1473,6 +1474,101 @@ class Forest:
 
         # Convenience presence mask
         self.taxa_present = self.global_to_local >= 0
+
+    def _build_paralog_csr(self) -> None:
+        """
+        **Private.**  Build per-genome per-tree leaf CSR tables and the
+        copy-slot assignment table.  Must be called after
+        ``_build_global_namespace`` (requires ``global_to_local``,
+        ``paralog_genome_names``, ``paralog_copy_offsets``,
+        ``paralog_copy_global_ids``).
+
+        Builds
+        ------
+        paralog_leaf_offsets : int32 [n_paralog_genomes * (n_trees + 1)]
+            Packed CSR: for genome ``li``, the sub-array
+            ``[li*(n_trees+1) : (li+1)*(n_trees+1)]`` is a standard CSR
+            offset vector (length n_trees+1) mapping each tree index to a
+            range in ``paralog_leaf_nodes``.
+
+        paralog_leaf_nodes : int32 [total_paralog_leaves]
+            Local leaf node IDs for all (genome, tree) combinations,
+            in the order encoded by ``paralog_leaf_offsets``.
+
+        paralog_assignments : int32 [n_paralog_genomes, max_copies, n_trees]
+            ``paralog_assignments[li, ci, ti]`` = local leaf node ID assigned
+            to copy slot ``ci`` of genome ``li`` in tree ``ti``, or ``-1`` if
+            that genome has fewer than ``max_copies`` copies in tree ``ti``.
+        """
+        n_paralog = len(self.paralog_genome_names)
+        NT = self.n_trees
+
+        if n_paralog == 0:
+            # No paralogs — build empty sentinel arrays so downstream code
+            # can always reference these attributes without guarding.
+            self.paralog_leaf_offsets = np.zeros(0, dtype=np.int32)
+            self.paralog_leaf_nodes = np.empty(0, dtype=np.int32)
+            self.paralog_assignments = np.empty((0, 0, NT), dtype=np.int32)
+            return
+
+        # ---- Determine max copies across all paralog genomes ------------ #
+        copy_counts = np.diff(self.paralog_copy_offsets)  # length n_paralog
+        max_copies = int(copy_counts.max())
+
+        # ---- Build leaf CSR + assignment table in one pass -------------- #
+        # We accumulate (genome, tree) → list[leaf_id] before flattening.
+
+        # paralog_leaf_offsets: shape (n_paralog * (NT + 1),)
+        # We fill it incrementally as we count leaves per (genome, tree).
+        leaf_counts = np.zeros((n_paralog, NT), dtype=np.int32)
+
+        # assignment table — initialise to -1 (absent)
+        assignments = np.full((n_paralog, max_copies, NT), -1, dtype=np.int32)
+
+        for li in range(n_paralog):
+            first_gid = int(self.paralog_copy_offsets[li])
+            k = int(copy_counts[li])  # actual copy count for this genome
+            for ti in range(NT):
+                cnt = 0
+                for ci in range(k):
+                    gid = int(self.paralog_copy_global_ids[first_gid + ci])
+                    local_id = int(self.global_to_local[ti, gid])
+                    if local_id >= 0:
+                        assignments[li, ci, ti] = local_id
+                        cnt += 1
+                leaf_counts[li, ti] = cnt
+
+        # Build paralog_leaf_offsets CSR.
+        # Offsets are *global* into paralog_leaf_nodes — each genome's sub-array
+        # continues from where the previous genome ended.
+        offsets = np.zeros(n_paralog * (NT + 1), dtype=np.int32)
+        running = 0
+        for li in range(n_paralog):
+            base = li * (NT + 1)
+            offsets[base] = running
+            for ti in range(NT):
+                offsets[base + ti + 1] = offsets[base + ti] + leaf_counts[li, ti]
+            running = int(offsets[base + NT])
+        total_leaves = running
+
+        # Build paralog_leaf_nodes (flat leaf IDs in CSR order)
+        leaf_nodes = np.full(total_leaves, -1, dtype=np.int32)
+        for li in range(n_paralog):
+            base = li * (NT + 1)
+            first_gid = int(self.paralog_copy_offsets[li])
+            k = int(copy_counts[li])
+            for ti in range(NT):
+                pos = int(offsets[base + ti])
+                for ci in range(k):
+                    gid = int(self.paralog_copy_global_ids[first_gid + ci])
+                    local_id = int(self.global_to_local[ti, gid])
+                    if local_id >= 0:
+                        leaf_nodes[pos] = local_id
+                        pos += 1
+
+        self.paralog_leaf_offsets = offsets
+        self.paralog_leaf_nodes = leaf_nodes
+        self.paralog_assignments = assignments
 
     def _pack_csr(self) -> None:
         """
