@@ -105,6 +105,44 @@ class Tree:
         # Name index: built lazily on first name-based query.
         self._name_index: dict = None  # type: ignore[assignment]
 
+        # Paralog groups: populated by Forest after taxon_map is applied.
+        # Maps genome_name -> list of local leaf IDs for all remapped leaves.
+        # Empty for trees where no taxon_map was applied.
+        self.paralog_groups: dict = {}
+
+    def _apply_taxon_map(self, taxon_map: dict) -> None:
+        """
+        **Private.**  Rename leaves according to *taxon_map* (leaf_name →
+        genome_name) and build ``self.paralog_groups``.
+
+        Called by ``Forest.__init__`` after all trees are parsed, so that
+        ``_parse_newick_worker`` (the subprocess entry-point) does not need
+        to serialise the map.
+
+        Leaves whose name is not in *taxon_map* are left unchanged.
+        Leaves that map to the same genome name form a paralog group; their
+        original per-leaf names are replaced by the shared genome name in
+        ``self.names``.  ``self._name_index`` is invalidated so that it will
+        be rebuilt (with duplicate-name detection bypassed) on the next call
+        to ``_build_name_index``.
+
+        Parameters
+        ----------
+        taxon_map : dict[str, str]
+            Mapping from leaf name (as it appears in the NEWICK string) to
+            genome name (the identifier used in the global namespace).
+        """
+        n_leaves = self.n_leaves
+        genome_to_leaves: dict = {}
+        for leaf_id in range(n_leaves):
+            name = self.names[leaf_id]
+            if name in taxon_map:
+                genome_name = taxon_map[name]
+                self.names[leaf_id] = genome_name
+                genome_to_leaves.setdefault(genome_name, []).append(leaf_id)
+        self.paralog_groups = genome_to_leaves
+        self._name_index = None  # type: ignore[assignment]  # invalidate cache
+
     # ================================================================== #
     # Public methods                                                       #
     # ================================================================== #

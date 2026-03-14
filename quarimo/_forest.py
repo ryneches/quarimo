@@ -426,8 +426,22 @@ class Forest:
     # Construction                                                         #
     # ================================================================== #
 
-    def __init__(self, newick_input) -> None:
-        """Initialize collection from NEWICK strings with optional group labels."""
+    def __init__(self, newick_input, taxon_map: Optional[Dict[str, str]] = None) -> None:
+        """Initialize collection from NEWICK strings with optional group labels.
+
+        Parameters
+        ----------
+        newick_input
+            NEWICK strings in any supported form: a list of strings, a dict
+            mapping group labels to lists of strings, a single multi-line
+            string, or a file path.
+        taxon_map : dict[str, str] | None
+            Optional mapping from leaf name (as it appears in the NEWICK) to
+            genome name.  Leaves that map to the same genome name form a
+            paralog group (MUL-tree support).  When *None* (default),
+            duplicate leaf names across all trees raise ``ValueError`` as
+            before.
+        """
 
         # Normalize all supported input forms to dict[str, list[str]].
         # Accepts: dict, list/tuple of NEWICK strings or paths, a single
@@ -449,6 +463,13 @@ class Forest:
         # Parse NEWICK strings into Tree objects (parallel when dataset is large)
         self._trees, self.group_labels = _load_tree_data(newick_input, self.unique_groups)
         self.n_trees = len(self._trees)
+
+        # Apply taxon_map (paralog renaming) after parsing so the subprocess
+        # worker does not need to serialise the map.
+        self._taxon_map: Optional[Dict[str, str]] = taxon_map
+        if taxon_map is not None:
+            for t in self._trees:
+                t._apply_taxon_map(taxon_map)
 
         # Build group mappings
         self._build_group_mappings()
@@ -1324,40 +1345,131 @@ class Forest:
         """
         **Private.**  Collect all unique taxon names across all trees, assign
         sorted global IDs, and build the global↔local mapping arrays.
+
+        When a ``taxon_map`` was provided at construction time, leaves with the
+        same genome name form paralog groups.  Each genome that appears with
+        k > 1 copies in any tree receives k global IDs named
+        ``"{genome}_copy0"`` … ``"{genome}_copy{k-1}"``.  Genomes that appear
+        at most once across all trees receive a single global ID (plain name).
+
+        Without ``taxon_map``, duplicate leaf names across any tree raise
+        ``ValueError`` (existing behaviour).
         """
-        name_set: set = set()
-        for t in self._trees:
-            for i in range(t.n_leaves):
-                if t.names[i]:
-                    name_set.add(t.names[i])
-
-        self.global_names = sorted(name_set)
-        self.n_global_taxa = len(self.global_names)
-        self._name_to_global: dict = {n: i for i, n in enumerate(self.global_names)}
-
-        G = self.n_global_taxa
         NT = self.n_trees
 
-        # Leaf offset array
+        # ---- Count max copies per genome name across all trees ----------- #
+        # For non-paralog forests this is trivially 1 everywhere.
+        name_max_copies: Dict[str, int] = {}
+        for t in self._trees:
+            # Count occurrences of each name within this tree
+            tree_counts: Dict[str, int] = {}
+            for i in range(t.n_leaves):
+                name = t.names[i]
+                if name:
+                    tree_counts[name] = tree_counts.get(name, 0) + 1
+            for name, cnt in tree_counts.items():
+                if name_max_copies.get(name, 0) < cnt:
+                    name_max_copies[name] = cnt
+
+        # ---- Guard: duplicates without taxon_map are an error ------------ #
+        if self._taxon_map is None:
+            for name, copies in name_max_copies.items():
+                if copies > 1:
+                    raise ValueError(
+                        f"Duplicate taxon name '{name}' found in a tree. "
+                        "Pass taxon_map to enable MUL-tree (paralog) support."
+                    )
+
+        # ---- Separate singleton vs paralog genomes ----------------------- #
+        # paralog = any genome that appears >1 time in at least one tree.
+        paralog_genome_names = sorted(n for n, k in name_max_copies.items() if k > 1)
+        singleton_names = sorted(n for n, k in name_max_copies.items() if k == 1)
+        self.paralog_genome_names: List[str] = paralog_genome_names
+        n_paralog_genomes = len(paralog_genome_names)
+
+        # ---- Build global_names ------------------------------------------ #
+        # Layout: all singleton names (sorted) first, then copy slots for
+        # each paralog genome in sorted order.
+        global_names: List[str] = list(singleton_names)
+        paralog_genome_to_first_gid: Dict[str, int] = {}
+        for genome in paralog_genome_names:
+            k = name_max_copies[genome]
+            paralog_genome_to_first_gid[genome] = len(global_names)
+            for ci in range(k):
+                global_names.append(f"{genome}_copy{ci}")
+
+        self.global_names = global_names
+        self.n_global_taxa = len(global_names)
+        self._name_to_global: Dict[str, int] = {n: i for i, n in enumerate(global_names)}
+
+        G = self.n_global_taxa
+
+        # ---- Leaf offset array ------------------------------------------- #
         leaf_sizes = np.array([t.n_leaves for t in self._trees], dtype=np.int64)
         self.leaf_offsets = np.zeros(NT + 1, dtype=np.int64)
         self.leaf_offsets[1:] = np.cumsum(leaf_sizes)
         total_leaves = int(self.leaf_offsets[-1])
 
-        # Dense global→local map and flat local→global map
+        # ---- Dense global→local map and flat local→global map ------------ #
         self.global_to_local = np.full((NT, G), -1, dtype=np.int32)
         self.local_to_global = np.full(total_leaves, -1, dtype=np.int32)
 
         for ti, t in enumerate(self._trees):
             lo = int(self.leaf_offsets[ti])
-            # Ensure name index is built
-            if t._name_index is None:
-                t._build_name_index()
-            for name, local_id in t._name_index.items():
-                if name in self._name_to_global:
-                    gid = self._name_to_global[name]
-                    self.global_to_local[ti, gid] = local_id
-                    self.local_to_global[lo + local_id] = gid
+
+            if not paralog_genome_names:
+                # Fast path: no paralogs — use name index directly.
+                if t._name_index is None:
+                    t._build_name_index()
+                for name, local_id in t._name_index.items():
+                    if name in self._name_to_global:
+                        gid = self._name_to_global[name]
+                        self.global_to_local[ti, gid] = local_id
+                        self.local_to_global[lo + local_id] = gid
+            else:
+                # Paralog path: iterate leaves directly.
+                # For singleton names, assign normally.
+                # For paralog genomes, group leaves by genome name then
+                # assign copy slots in ascending leaf-ID order.
+                genome_leaf_lists: Dict[str, List[int]] = {}
+                for leaf_id in range(t.n_leaves):
+                    name = t.names[leaf_id]
+                    if not name:
+                        continue
+                    if name in paralog_genome_to_first_gid:
+                        genome_leaf_lists.setdefault(name, []).append(leaf_id)
+                    elif name in self._name_to_global:
+                        gid = self._name_to_global[name]
+                        self.global_to_local[ti, gid] = leaf_id
+                        self.local_to_global[lo + leaf_id] = gid
+
+                for genome, leaf_ids in genome_leaf_lists.items():
+                    first_gid = paralog_genome_to_first_gid[genome]
+                    for ci, leaf_id in enumerate(sorted(leaf_ids)):
+                        gid = first_gid + ci
+                        self.global_to_local[ti, gid] = leaf_id
+                        self.local_to_global[lo + leaf_id] = gid
+
+        # ---- Paralog CSR arrays ------------------------------------------ #
+        # paralog_copy_offsets[li] .. [li+1] gives the global IDs for genome li.
+        if n_paralog_genomes > 0:
+            copy_counts = np.array(
+                [name_max_copies[g] for g in paralog_genome_names], dtype=np.int32
+            )
+            self.paralog_copy_offsets = np.zeros(n_paralog_genomes + 1, dtype=np.int32)
+            self.paralog_copy_offsets[1:] = np.cumsum(copy_counts)
+            total_copies = int(self.paralog_copy_offsets[-1])
+            self.paralog_copy_global_ids = np.empty(total_copies, dtype=np.int32)
+            for li, genome in enumerate(paralog_genome_names):
+                first_gid = paralog_genome_to_first_gid[genome]
+                k = name_max_copies[genome]
+                start = int(self.paralog_copy_offsets[li])
+                self.paralog_copy_global_ids[start : start + k] = np.arange(
+                    first_gid, first_gid + k, dtype=np.int32
+                )
+        else:
+            self.paralog_copy_offsets = np.zeros(1, dtype=np.int32)
+            self.paralog_copy_global_ids = np.empty(0, dtype=np.int32)
 
         # Convenience presence mask
         self.taxa_present = self.global_to_local >= 0
