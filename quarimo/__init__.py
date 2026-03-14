@@ -50,7 +50,8 @@ from ._quartets import Quartets
 from ._results import QuartetTopologyResult, QEDResult
 
 # Paralog support
-from ._paralog import ParalogData, build_paralog_data
+from ._paralog import ParalogData, build_paralog_data, ParalogOptimizer
+from ._results import OptimizationResult
 
 # Context managers (user-facing utilities)
 from ._context import (
@@ -92,6 +93,8 @@ __all__ = [
     # Paralog support
     "ParalogData",
     "build_paralog_data",
+    "ParalogOptimizer",
+    "OptimizationResult",
     # Context managers
     "suppress_logger",
     "quiet",

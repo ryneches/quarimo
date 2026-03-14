@@ -276,6 +276,36 @@ class QuartetTopologyResult:
 
 
 @dataclass
+class OptimizationResult:
+    """
+    Return value of ``Forest.resolve_paralogs()``.
+
+    Attributes
+    ----------
+    assignments : np.ndarray, int32, shape (n_paralog_genomes, max_copies, n_trees)
+        Final copy-slot → local-leaf assignment.
+        ``assignments[li, ci, ti]`` = local leaf node ID for copy slot *ci*
+        of genome *li* in tree *ti*, or ``-1`` if absent.
+    qed_history : list[float]
+        Mean QED recorded once before optimisation begins and then after each
+        complete sweep across all paralog genomes.  Monotonically
+        non-decreasing (the optimiser only accepts improvements).
+    converged : bool
+        True when a complete sweep produced no improvement.
+    n_iterations : int
+        Number of complete sweeps executed.
+    genome_names : list[str]
+        Genome labels indexed by the first axis of *assignments*.
+    """
+
+    assignments: np.ndarray   # int32 [n_paralog_genomes, max_copies, n_trees]
+    qed_history: List[float]
+    converged: bool
+    n_iterations: int
+    genome_names: List[str]
+
+
+@dataclass
 class QEDResult:
     """
     Return value of ``Forest.qed()``.

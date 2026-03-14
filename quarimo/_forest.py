@@ -974,6 +974,80 @@ class Forest:
             global_names=self.global_names,
         )
 
+    def resolve_paralogs(
+        self,
+        quartets,
+        max_iter: int = 100,
+        rng_seed=None,
+        backend: str = "best",
+    ):
+        """
+        Run the full paralog copy-slot optimisation pipeline.
+
+        Executes the full quartet topology pass to get initial counts, then
+        runs coordinate-descent optimisation via :class:`ParalogOptimizer`
+        to find the copy-slot assignment that maximises mean QED.
+
+        After this call ``self.global_to_local`` reflects the optimal
+        assignment.  Run ``quartet_topology(quartets, steiner=True)`` again
+        with the updated mapping if you need accurate Steiner statistics for
+        the optimal assignment.
+
+        Parameters
+        ----------
+        quartets : Quartets
+            Quartet sequence for the analysis.
+        max_iter : int
+            Maximum number of coordinate-descent sweeps (default 100).
+        rng_seed : optional
+            Reserved for future stochastic tie-breaking; ignored for now.
+        backend : str
+            Computational backend for both the full pass and delta kernel.
+
+        Returns
+        -------
+        (QuartetTopologyResult, OptimizationResult)
+            The topology counts after optimisation (steiner=None) and the
+            full optimisation record including assignment history and QED
+            trajectory.
+
+        Raises
+        ------
+        ValueError
+            If the forest has no paralog genomes.
+        """
+        from quarimo._paralog import build_paralog_data as _bpd, ParalogOptimizer
+        from quarimo._results import QuartetTopologyResult
+
+        if not self.paralog_genome_names:
+            raise ValueError(
+                "Forest has no paralog genomes. "
+                "Provide taxon_map with at least one genome appearing > 1 time."
+            )
+
+        # Full pass with the current (default) assignment
+        initial = self.quartet_topology(quartets, backend=backend)
+
+        # Build the inverted quartet index and paralog data
+        pd = _bpd(self, quartets)
+
+        # Run the optimiser
+        optimizer = ParalogOptimizer(self, quartets, initial.counts, pd)
+        opt_result = optimizer.optimize(max_iter=max_iter, rng_seed=rng_seed)
+
+        # Wrap the final counts in a QuartetTopologyResult (no steiner)
+        final_result = QuartetTopologyResult(
+            counts=optimizer.counts,
+            steiner=None,
+            steiner_min=None,
+            steiner_max=None,
+            steiner_var=None,
+            groups=initial.groups,
+            quartets=quartets,
+            global_names=self.global_names,
+        )
+        return final_result, opt_result
+
     def build_paralog_data(self, quartets):
         """
         Build a :class:`ParalogData` for this forest and *quartets*.
