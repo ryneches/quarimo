@@ -516,6 +516,136 @@ def _quartet_steiner_njit(
 
 
 # ======================================================================== #
+# Paralog Delta Kernel                                                      #
+# ======================================================================== #
+
+
+@njit(parallel=True, cache=True)
+def _quartet_counts_delta_nb(
+        delta_quartet_ids,
+        delta_quartet_global_idx,
+        n_affected_quartets,
+        old_global_to_local,
+        new_global_to_local,
+        delta_tree_ids,
+        n_affected_trees,
+        all_first_occ,
+        all_root_distance,
+        all_euler_tour,
+        all_euler_depth,
+        all_sparse_table,
+        all_log2_table,
+        node_offsets,
+        tour_offsets,
+        sp_offsets,
+        lg_offsets,
+        sp_tour_widths,
+        tree_to_group_idx,
+        polytomy_offsets,
+        polytomy_nodes,
+        counts_out):
+    """
+    Incremental update to ``counts_out`` after a paralog copy-slot
+    permutation.
+
+    For each affected (quartet, tree) pair, computes the topology under both
+    the old and new copy-slot assignments.  If the topology changed, applies
+    a signed ±1 update to ``counts_out`` in-place.
+
+    Thread safety
+    -------------
+    ``prange`` is over ``qi_local`` (0 … n_affected_quartets-1).  Every value
+    in ``delta_quartet_global_idx`` is unique — each thread owns a distinct
+    row of ``counts_out`` — so no atomic operations are needed.
+
+    Parameters
+    ----------
+    delta_quartet_ids : int32[n_affected_quartets, 4]
+        Sorted global taxon IDs (t0, t1, t2, t3) for each affected quartet.
+    delta_quartet_global_idx : int32[n_affected_quartets]
+        Row index into ``counts_out`` for each affected quartet.
+    n_affected_quartets : int
+    old_global_to_local : int32[n_trees, n_global_taxa]
+        Copy-slot → local-leaf mapping before the permutation.
+    new_global_to_local : int32[n_trees, n_global_taxa]
+        Copy-slot → local-leaf mapping after the permutation.
+    delta_tree_ids : int32[n_affected_trees]
+        Indices of trees where ≥ 2 copies of the permuted genome are present
+        (the only trees where topology can change).
+    n_affected_trees : int
+    all_first_occ, all_root_distance, all_euler_tour, all_euler_depth,
+    all_sparse_table, all_log2_table : CSR-packed tree arrays
+    node_offsets, tour_offsets, sp_offsets, lg_offsets : int64[n_trees+1]
+    sp_tour_widths : int32[n_trees]
+    tree_to_group_idx : int32[n_trees]
+    polytomy_offsets : int32[n_trees+1]
+    polytomy_nodes : int32[total_polytomy_nodes]
+    counts_out : int32[n_quartets, n_groups, 4]
+        Modified in-place.  k=0,1,2 = resolved topologies; k=3 = unresolved.
+    """
+    for qi_local in prange(n_affected_quartets):
+        t0 = delta_quartet_ids[qi_local, 0]
+        t1 = delta_quartet_ids[qi_local, 1]
+        t2 = delta_quartet_ids[qi_local, 2]
+        t3 = delta_quartet_ids[qi_local, 3]
+        qi = delta_quartet_global_idx[qi_local]
+
+        for t_idx in range(n_affected_trees):
+            ti = delta_tree_ids[t_idx]
+            gi = tree_to_group_idx[ti]
+
+            # ---- Old assignment ----------------------------------------- #
+            ln0_old, ln1_old, ln2_old, ln3_old, \
+                node_base, tour_base, sp_base, lg_base, sp_stride = \
+                _resolve_quartet_nb(
+                    t0, t1, t2, t3, ti,
+                    old_global_to_local, node_offsets, tour_offsets,
+                    sp_offsets, lg_offsets, sp_tour_widths,
+                )
+            if ln0_old < 0 or ln1_old < 0 or ln2_old < 0 or ln3_old < 0:
+                continue
+
+            fo0_old = all_first_occ[node_base + ln0_old]
+            fo1_old = all_first_occ[node_base + ln1_old]
+            fo2_old = all_first_occ[node_base + ln2_old]
+            fo3_old = all_first_occ[node_base + ln3_old]
+            poly_start = polytomy_offsets[ti]
+            poly_end   = polytomy_offsets[ti + 1]
+            old_topo, _, _, _, _ = _quartet_topology_and_rd_nb(
+                fo0_old, fo1_old, fo2_old, fo3_old,
+                node_base, tour_base, sp_base, lg_base, sp_stride,
+                all_root_distance, all_sparse_table, all_euler_depth,
+                all_log2_table, all_euler_tour,
+                poly_start, poly_end, polytomy_nodes,
+            )
+
+            # ---- New assignment ----------------------------------------- #
+            ln0_new = new_global_to_local[ti, t0]
+            ln1_new = new_global_to_local[ti, t1]
+            ln2_new = new_global_to_local[ti, t2]
+            ln3_new = new_global_to_local[ti, t3]
+            if ln0_new < 0 or ln1_new < 0 or ln2_new < 0 or ln3_new < 0:
+                continue
+
+            fo0_new = all_first_occ[node_base + ln0_new]
+            fo1_new = all_first_occ[node_base + ln1_new]
+            fo2_new = all_first_occ[node_base + ln2_new]
+            fo3_new = all_first_occ[node_base + ln3_new]
+            new_topo, _, _, _, _ = _quartet_topology_and_rd_nb(
+                fo0_new, fo1_new, fo2_new, fo3_new,
+                node_base, tour_base, sp_base, lg_base, sp_stride,
+                all_root_distance, all_sparse_table, all_euler_depth,
+                all_log2_table, all_euler_tour,
+                poly_start, poly_end, polytomy_nodes,
+            )
+
+            # ---- Apply signed delta ------------------------------------- #
+            if old_topo != new_topo:
+                counts_out[qi, gi, old_topo] -= 1
+                counts_out[qi, gi, new_topo] += 1
+
+
+# ======================================================================== #
 # QED Kernel                                                                #
 # ======================================================================== #
 

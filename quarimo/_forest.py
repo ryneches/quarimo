@@ -175,6 +175,7 @@ if backends.numba:
         _rmq_csr_nb,
         _quartet_counts_njit,
         _quartet_steiner_njit,
+        _quartet_counts_delta_nb,
     )
 
 logger = logging.getLogger(__name__)
@@ -2182,6 +2183,193 @@ class Forest:
         if sl > steiner_max_out[qi, gi, topo]:
             steiner_max_out[qi, gi, topo] = sl
         steiner_sum_sq_out[qi, gi, topo] += sl * sl
+
+    @staticmethod
+    def _python_quartet_counts_delta(
+        delta_quartet_ids,
+        delta_quartet_global_idx,
+        old_global_to_local,
+        new_global_to_local,
+        delta_tree_ids,
+        all_first_occ,
+        all_root_distance,
+        all_euler_tour,
+        all_euler_depth,
+        all_sparse_table,
+        all_log2_table,
+        node_offsets,
+        tour_offsets,
+        sp_offsets,
+        lg_offsets,
+        sp_tour_widths,
+        tree_to_group_idx,
+        polytomy_offsets,
+        polytomy_nodes,
+        counts_out,
+    ):
+        """
+        Pure-Python fallback for ``_quartet_counts_delta_nb``.
+
+        Applies signed ±1 updates to ``counts_out`` in-place for each
+        (affected_quartet, affected_tree) pair where the topology changes
+        between the old and new copy-slot assignments.
+        """
+        n_affected_quartets = delta_quartet_ids.shape[0]
+        for qi_local in range(n_affected_quartets):
+            t0 = int(delta_quartet_ids[qi_local, 0])
+            t1 = int(delta_quartet_ids[qi_local, 1])
+            t2 = int(delta_quartet_ids[qi_local, 2])
+            t3 = int(delta_quartet_ids[qi_local, 3])
+            qi = int(delta_quartet_global_idx[qi_local])
+
+            for ti in delta_tree_ids:
+                ti = int(ti)
+                gi = int(tree_to_group_idx[ti])
+
+                # ---- Old assignment --------------------------------------- #
+                ln0_old, ln1_old, ln2_old, ln3_old, \
+                    node_base, tour_base, sp_base, lg_base, sp_stride = \
+                    Forest._resolve_quartet(
+                        t0, t1, t2, t3, ti,
+                        old_global_to_local, node_offsets, tour_offsets,
+                        sp_offsets, lg_offsets, sp_tour_widths,
+                    )
+                if ln0_old < 0 or ln1_old < 0 or ln2_old < 0 or ln3_old < 0:
+                    continue
+
+                fo0 = int(all_first_occ[node_base + ln0_old])
+                fo1 = int(all_first_occ[node_base + ln1_old])
+                fo2 = int(all_first_occ[node_base + ln2_old])
+                fo3 = int(all_first_occ[node_base + ln3_old])
+                poly_start = int(polytomy_offsets[ti])
+                poly_end   = int(polytomy_offsets[ti + 1])
+                old_topo, _, _, _, _ = Forest._quartet_topology_and_rd(
+                    fo0, fo1, fo2, fo3,
+                    node_base, tour_base, sp_base, lg_base, sp_stride,
+                    all_root_distance, all_sparse_table, all_euler_depth,
+                    all_log2_table, all_euler_tour,
+                    poly_start, poly_end, polytomy_nodes,
+                )
+
+                # ---- New assignment --------------------------------------- #
+                ln0_new = int(new_global_to_local[ti, t0])
+                ln1_new = int(new_global_to_local[ti, t1])
+                ln2_new = int(new_global_to_local[ti, t2])
+                ln3_new = int(new_global_to_local[ti, t3])
+                if ln0_new < 0 or ln1_new < 0 or ln2_new < 0 or ln3_new < 0:
+                    continue
+
+                fo0 = int(all_first_occ[node_base + ln0_new])
+                fo1 = int(all_first_occ[node_base + ln1_new])
+                fo2 = int(all_first_occ[node_base + ln2_new])
+                fo3 = int(all_first_occ[node_base + ln3_new])
+                new_topo, _, _, _, _ = Forest._quartet_topology_and_rd(
+                    fo0, fo1, fo2, fo3,
+                    node_base, tour_base, sp_base, lg_base, sp_stride,
+                    all_root_distance, all_sparse_table, all_euler_depth,
+                    all_log2_table, all_euler_tour,
+                    poly_start, poly_end, polytomy_nodes,
+                )
+
+                # ---- Apply signed delta ----------------------------------- #
+                if old_topo != new_topo:
+                    counts_out[qi, gi, old_topo] -= 1
+                    counts_out[qi, gi, new_topo] += 1
+
+    def apply_quartet_counts_delta(
+        self,
+        paralog_data,
+        li: int,
+        perm: np.ndarray,
+        counts_out: np.ndarray,
+        backend: str = "best",
+    ) -> np.ndarray:
+        """
+        Apply a paralog copy-slot permutation to ``counts_out`` in-place.
+
+        Computes the topology change for every (affected_quartet, affected_tree)
+        pair and applies ±1 signed updates to ``counts_out``.
+
+        Parameters
+        ----------
+        paralog_data : ParalogData
+            Built from this forest via ``build_paralog_data(forest, quartets)``.
+        li : int
+            Genome index within ``paralog_data.genome_names``.
+        perm : int array [k]
+            Copy-slot permutation.  ``perm[ci]`` = old slot whose leaf is
+            placed at copy position *ci*.  Identity = ``[0, 1, …, k-1]``.
+        counts_out : int32 ndarray [n_quartets, n_groups, 4]
+            Modified in-place.
+        backend : str
+            Computational backend (``'best'``, ``'cpu-parallel'``,
+            ``'python'``).  Default ``'best'``.
+
+        Returns
+        -------
+        trial_global_to_local : int32 ndarray [n_trees, n_global_taxa]
+            The modified global→local mapping corresponding to the applied
+            permutation (the caller may use this to update the current state).
+        """
+        trial_g2l, affected_tree_ids, affected_taxa, affected_qi = \
+            paralog_data.apply_permutation(li, perm, self.global_to_local)
+
+        if len(affected_qi) == 0 or len(affected_tree_ids) == 0:
+            return trial_g2l
+
+        resolved = get_backend_override() or backends.resolve(backend)
+        kd = self._kernel_data
+
+        if resolved == "cpu-parallel" and backends.numba:
+            _quartet_counts_delta_nb(
+                affected_taxa,
+                affected_qi,
+                np.int32(len(affected_qi)),
+                self.global_to_local,
+                trial_g2l,
+                affected_tree_ids,
+                np.int32(len(affected_tree_ids)),
+                kd.all_first_occ,
+                kd.all_root_distance,
+                kd.all_euler_tour,
+                kd.all_euler_depth,
+                kd.all_sparse_table,
+                kd.all_log2_table,
+                kd.node_offsets,
+                kd.tour_offsets,
+                kd.sp_offsets,
+                kd.lg_offsets,
+                kd.sp_tour_widths,
+                kd.tree_to_group_idx,
+                kd.polytomy_offsets,
+                kd.polytomy_nodes,
+                counts_out,
+            )
+        else:
+            Forest._python_quartet_counts_delta(
+                affected_taxa,
+                affected_qi,
+                self.global_to_local,
+                trial_g2l,
+                affected_tree_ids,
+                kd.all_first_occ,
+                kd.all_root_distance,
+                kd.all_euler_tour,
+                kd.all_euler_depth,
+                kd.all_sparse_table,
+                kd.all_log2_table,
+                kd.node_offsets,
+                kd.tour_offsets,
+                kd.sp_offsets,
+                kd.lg_offsets,
+                kd.sp_tour_widths,
+                kd.tree_to_group_idx,
+                kd.polytomy_offsets,
+                kd.polytomy_nodes,
+                counts_out,
+            )
+
+        return trial_g2l
 
     @staticmethod
     def _rmq_csr(
