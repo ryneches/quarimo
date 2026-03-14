@@ -973,6 +973,37 @@ class Forest:
             global_names=self.global_names,
         )
 
+    def build_paralog_data(self, quartets):
+        """
+        Build a :class:`ParalogData` for this forest and *quartets*.
+
+        Packages the forest's paralog arrays together with an inverted
+        taxon → quartet index built by iterating over all quartets once.
+
+        Parameters
+        ----------
+        quartets : Quartets
+            Quartet sequence for which the inverted index is built.
+
+        Returns
+        -------
+        ParalogData
+
+        Raises
+        ------
+        ValueError
+            If the forest has no paralog genomes (``taxon_map`` was not
+            provided or produced no groups with > 1 copy).
+        """
+        from quarimo._paralog import build_paralog_data as _build
+
+        if not self.paralog_genome_names:
+            raise ValueError(
+                "Forest has no paralog genomes. "
+                "Provide taxon_map with at least one genome appearing > 1 time."
+            )
+        return _build(self, quartets)
+
     def qed(
         self,
         counts: Union[np.ndarray, QuartetTopologyResult],

@@ -49,6 +49,9 @@ from ._quartets import Quartets
 # Result dataclasses
 from ._results import QuartetTopologyResult, QEDResult
 
+# Paralog support
+from ._paralog import ParalogData, build_paralog_data
+
 # Context managers (user-facing utilities)
 from ._context import (
     suppress_logger,
@@ -86,6 +89,9 @@ __all__ = [
     # Result dataclasses
     "QuartetTopologyResult",
     "QEDResult",
+    # Paralog support
+    "ParalogData",
+    "build_paralog_data",
     # Context managers
     "suppress_logger",
     "quiet",
