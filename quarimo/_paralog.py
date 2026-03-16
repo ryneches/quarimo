@@ -237,13 +237,48 @@ class ParalogOptimizer:
         original array is not modified.
     paralog_data : ParalogData
         Built from *forest* and *quartets* via :func:`build_paralog_data`.
+    backend : str
+        Computational backend to use for delta kernel calls.  When
+        ``'cuda'`` is resolved, ``counts`` is uploaded to the GPU once and
+        kept resident for the duration of the optimisation loop, eliminating
+        repeated H→D PCIe transfers.  When ``'mlx'`` is resolved, no
+        special device-resident state is needed because Apple Silicon's
+        Unified Memory Architecture makes wrapping numpy arrays as
+        ``mx.array`` essentially free.  Default is ``'best'`` (auto-select).
     """
 
-    def __init__(self, forest, quartets, counts: np.ndarray, paralog_data: ParalogData):
+    def __init__(
+        self,
+        forest,
+        quartets,
+        counts: np.ndarray,
+        paralog_data: ParalogData,
+        backend: str = "best",
+    ):
+        from quarimo._backend import backends
+
         self.forest = forest
         self.quartets = quartets
         self.counts = counts.copy()
         self.paralog_data = paralog_data
+        self._resolved_backend: str = backends.resolve(backend)
+
+        # Device-resident counts (CUDA path only) ─────────────────────── #
+        self._d_counts = None  # cuda DeviceNDArray or None
+        self._ckd = None       # ForestKernelData or None
+
+        if self._resolved_backend == "cuda" and backends.cuda:
+            from numba import cuda as _cuda
+            from quarimo._cuda_kernels import (
+                _quartet_counts_delta_cuda as _delta_cuda,
+                _counts_d2d_copy_cuda as _d2d_cuda,
+            )
+            self._cuda = _cuda
+            self._delta_cuda = _delta_cuda
+            self._d2d_cuda = _d2d_cuda
+            self._ckd = forest._cuda_kernel_data
+            self._d_counts = _cuda.to_device(self.counts)
+
         self._current_qed: float = self._compute_qed(self.counts)
 
     # ------------------------------------------------------------------ #
@@ -279,6 +314,65 @@ class ParalogOptimizer:
             for ti in range(self.forest.n_trees):
                 self.paralog_data.assignments[li, ci, ti] = int(new_g2l[ti, gid])
 
+    def _delta_on_device(
+        self,
+        li: int,
+        perm: np.ndarray,
+        d_counts_target,
+    ) -> np.ndarray:
+        """
+        Run ``_quartet_counts_delta_cuda`` directly against a device array.
+
+        Uploads only the small per-call arrays (trial_g2l, affected_taxa,
+        affected_qi, affected_tree_ids); the structural forest arrays stay
+        on the device via ``_ckd``.
+
+        Returns the trial ``global_to_local`` (host array) so the caller
+        can apply it if the swap is accepted.
+        """
+        trial_g2l, affected_tree_ids, affected_taxa, affected_qi = (
+            self.paralog_data.apply_permutation(li, perm, self.forest.global_to_local)
+        )
+        n_aq = len(affected_qi)
+        n_at = len(affected_tree_ids)
+        if n_aq == 0 or n_at == 0:
+            return trial_g2l
+
+        ckd = self._ckd
+        d_delta_taxa = self._cuda.to_device(affected_taxa)
+        d_delta_qi   = self._cuda.to_device(affected_qi)
+        d_old_g2l    = self._cuda.to_device(self.forest.global_to_local)
+        d_new_g2l    = self._cuda.to_device(trial_g2l)
+        d_tree_ids   = self._cuda.to_device(affected_tree_ids)
+
+        tpb = (16, 16)
+        bpg = (
+            (n_aq + tpb[0] - 1) // tpb[0],
+            (n_at + tpb[1] - 1) // tpb[1],
+        )
+        self._delta_cuda[bpg, tpb](
+            d_delta_taxa, d_delta_qi, np.int32(n_aq),
+            d_old_g2l, d_new_g2l, d_tree_ids, np.int32(n_at),
+            ckd.all_first_occ, ckd.all_root_distance, ckd.all_euler_tour,
+            ckd.all_euler_depth, ckd.all_sparse_table, ckd.all_log2_table,
+            ckd.node_offsets, ckd.tour_offsets, ckd.sp_offsets, ckd.lg_offsets,
+            ckd.sp_tour_widths, ckd.tree_to_group_idx,
+            ckd.polytomy_offsets, ckd.polytomy_nodes,
+            d_counts_target,
+        )
+        return trial_g2l
+
+    def _d2d_copy(self, src, dst) -> None:
+        """Device-to-device copy of a 3D counts array via ``_counts_d2d_copy_cuda``."""
+        shape = dst.shape
+        tpb = (8, 4, 4)
+        bpg = (
+            (shape[0] + tpb[0] - 1) // tpb[0],
+            (shape[1] + tpb[1] - 1) // tpb[1],
+            (shape[2] + tpb[2] - 1) // tpb[2],
+        )
+        self._d2d_cuda[bpg, tpb](src, dst)
+
     # ------------------------------------------------------------------ #
     # Public methods                                                       #
     # ------------------------------------------------------------------ #
@@ -287,6 +381,9 @@ class ParalogOptimizer:
         """
         Return the QED delta (new QED − current QED) from permuting genome
         *li* by *perm*, without mutating any state.
+
+        On the CUDA path, creates a device-side trial copy (D→D, no H→D
+        transfer) and downloads only the result for QED computation.
 
         Parameters
         ----------
@@ -300,6 +397,14 @@ class ParalogOptimizer:
         float
             Positive means the permutation improves QED.
         """
+        if self._d_counts is not None:
+            # CUDA path: D→D copy, delta on device, D→H download
+            d_trial = self._cuda.device_array_like(self._d_counts)
+            self._d2d_copy(self._d_counts, d_trial)
+            self._delta_on_device(li, perm, d_trial)
+            counts_trial = d_trial.copy_to_host()
+            return self._compute_qed(counts_trial) - self._current_qed
+
         counts_trial = self.counts.copy()
         self.forest.apply_quartet_counts_delta(self.paralog_data, li, perm, counts_trial)
         return self._compute_qed(counts_trial) - self._current_qed
@@ -309,6 +414,10 @@ class ParalogOptimizer:
         Apply permutation *perm* for genome *li* in-place: update counts,
         ``forest.global_to_local``, and ``paralog_data.assignments``.
 
+        On the CUDA path, the delta is applied directly to the device-resident
+        ``_d_counts`` (no H→D upload) and the host copy is synced once via
+        D→H download.
+
         Parameters
         ----------
         li : int
@@ -316,6 +425,15 @@ class ParalogOptimizer:
         perm : int array [k]
             Copy-slot permutation to apply.
         """
+        if self._d_counts is not None:
+            # CUDA path: delta directly on resident device array
+            trial_g2l = self._delta_on_device(li, perm, self._d_counts)
+            self._d_counts.copy_to_host(self.counts)
+            self.forest.global_to_local[:] = trial_g2l
+            self._update_assignments(li, trial_g2l)
+            self._current_qed = self._compute_qed(self.counts)
+            return
+
         trial_g2l = self.forest.apply_quartet_counts_delta(
             self.paralog_data, li, perm, self.counts
         )

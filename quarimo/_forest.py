@@ -1033,7 +1033,7 @@ class Forest:
         pd = _bpd(self, quartets)
 
         # Run the optimiser
-        optimizer = ParalogOptimizer(self, quartets, initial.counts, pd)
+        optimizer = ParalogOptimizer(self, quartets, initial.counts, pd, backend=backend)
         opt_result = optimizer.optimize(max_iter=max_iter, rng_seed=rng_seed)
 
         # Wrap the final counts in a QuartetTopologyResult (no steiner)
@@ -2283,7 +2283,7 @@ class Forest:
         counts_out,
     ):
         """
-        Pure-Python fallback for ``_quartet_counts_delta_nb``.
+        Pure-Python fallback for the accelerated delta kernels.
 
         Applies signed ±1 updates to ``counts_out`` in-place for each
         (affected_quartet, affected_tree) pair where the topology changes
@@ -2377,8 +2377,14 @@ class Forest:
         counts_out : int32 ndarray [n_quartets, n_groups, 4]
             Modified in-place.
         backend : str
-            Computational backend (``'best'``, ``'cpu-parallel'``,
-            ``'python'``).  Default ``'best'``.
+            Computational backend.  ``'best'`` selects the fastest available.
+            ``'cuda'`` runs a 2D CUDA kernel (atomics; device-resident counts
+            bypass this call when ``ParalogOptimizer`` is used directly).
+            ``'mlx'`` runs a 1D Metal kernel (no atomics; UMA means wrapping
+            host arrays as ``mx.array`` is essentially free).
+            ``'cpu-parallel'`` uses Numba prange.
+            ``'python'`` is the pure-Python fallback.
+            Default ``'best'``.
 
         Returns
         -------
@@ -2438,6 +2444,18 @@ class Forest:
                 d_counts,
             )
             d_counts.copy_to_host(counts_out)
+        elif resolved == "mlx" and backends.mlx:
+            from quarimo._mlx_kernels import quartet_counts_delta_mlx
+            quartet_counts_delta_mlx(
+                kd,
+                affected_taxa,
+                affected_qi,
+                self.global_to_local,
+                trial_g2l,
+                affected_tree_ids,
+                counts_out,
+                self.n_groups,
+            )
         elif resolved == "cpu-parallel" and backends.numba:
             _quartet_counts_delta_nb(
                 affected_taxa,

@@ -55,6 +55,7 @@ import pytest
 from quarimo._context import quiet, use_backend
 from quarimo._forest import Forest
 from quarimo._quartets import Quartets
+from quarimo._paralog import build_paralog_data
 
 pytestmark = pytest.mark.requires_mlx
 
@@ -410,3 +411,146 @@ class TestMLXQuartetTopology:
         # Total count across topologies for each (qi, gi) must not exceed n_trees
         totals = result.counts.sum(axis=-1)
         assert (totals <= flat_forest.n_trees).all()
+
+
+# ===========================================================================
+# 3. Paralog delta kernel
+# ===========================================================================
+
+# Paralog forest: 4 trees over {a, b, c, d} where genome "b" appears twice
+# (as "b1" and "b2") in the first two trees.  taxon_map maps b1/b2 → "b".
+_PARALOG_TREES = [
+    "((a:0.1,b1:0.2):0.3,(b2:0.15,c:0.25):0.2,d:0.4);",   # b has 2 copies
+    "((a:0.2,b2:0.1):0.25,(b1:0.2,d:0.3):0.15,c:0.35);",  # b has 2 copies
+    "((a:0.1,b:0.2):0.3,(c:0.25,d:0.2):0.3);",             # b has 1 copy
+    "((a:0.3,c:0.1):0.2,(b:0.2,d:0.15):0.25);",            # b has 1 copy
+]
+_TAXON_MAP = {"b1": "b", "b2": "b"}
+
+
+@pytest.fixture(scope="module")
+def paralog_forest():
+    with quiet():
+        return Forest(_PARALOG_TREES, taxon_map=_TAXON_MAP)
+
+
+@pytest.fixture(scope="module")
+def paralog_quartets(paralog_forest):
+    with quiet():
+        return Quartets.random(paralog_forest, count=50, seed=7)
+
+
+class TestMLXDeltaKernel:
+    """
+    Verify that ``quartet_counts_delta_mlx`` agrees with the Python fallback.
+
+    All tests are hardware-gated by ``pytestmark = pytest.mark.requires_mlx``
+    at module level.
+    """
+
+    def test_delta_identity_preserves_counts(self, paralog_forest, paralog_quartets):
+        """
+        Applying the identity permutation via the MLX delta kernel must
+        leave counts unchanged.
+        """
+        q = paralog_quartets
+        with quiet():
+            with use_backend("python"):
+                ref = paralog_forest.quartet_topology(q)
+
+        counts_copy = ref.counts.copy()
+        pd = build_paralog_data(paralog_forest, q)
+        li = 0  # genome "b"
+        k = int(pd.copy_offsets[li + 1]) - int(pd.copy_offsets[li])
+        identity = np.arange(k, dtype=np.int32)
+
+        with use_backend("mlx"):
+            paralog_forest.apply_quartet_counts_delta(pd, li, identity, counts_copy)
+
+        np.testing.assert_array_equal(
+            ref.counts, counts_copy,
+            err_msg="Identity permutation via MLX delta changed counts",
+        )
+
+    def test_delta_agrees_with_python(self, paralog_forest, paralog_quartets):
+        """
+        MLX delta for a non-identity permutation must match the Python delta
+        exactly (integer counts, no rounding).
+        """
+        q = paralog_quartets
+        with quiet():
+            with use_backend("python"):
+                ref = paralog_forest.quartet_topology(q)
+
+        pd = build_paralog_data(paralog_forest, q)
+        li = 0
+        k = int(pd.copy_offsets[li + 1]) - int(pd.copy_offsets[li])
+        if k < 2:
+            pytest.skip("No non-trivial permutation possible for k<2")
+        swap = np.array(list(range(1, k)) + [0], dtype=np.int32)
+
+        counts_py = ref.counts.copy()
+        with use_backend("python"):
+            paralog_forest.apply_quartet_counts_delta(pd, li, swap, counts_py)
+
+        counts_mlx = ref.counts.copy()
+        with use_backend("mlx"):
+            paralog_forest.apply_quartet_counts_delta(pd, li, swap, counts_mlx)
+
+        np.testing.assert_array_equal(
+            counts_py, counts_mlx,
+            err_msg="MLX delta counts differ from Python delta counts",
+        )
+
+    def test_delta_count_conservation(self, paralog_forest, paralog_quartets):
+        """
+        A swap permutation must conserve total counts: for every (qi, gi),
+        sum over k must not change for quartets that involve no paralog genome.
+        """
+        q = paralog_quartets
+        with quiet():
+            with use_backend("python"):
+                ref = paralog_forest.quartet_topology(q)
+
+        pd = build_paralog_data(paralog_forest, q)
+        li = 0
+        k = int(pd.copy_offsets[li + 1]) - int(pd.copy_offsets[li])
+        if k < 2:
+            pytest.skip("No non-trivial permutation possible for k<2")
+        swap = np.array(list(range(1, k)) + [0], dtype=np.int32)
+
+        # Quartets not involving any copy of genome li
+        gids = set(pd.copy_global_ids[pd.copy_offsets[li]:pd.copy_offsets[li + 1]].tolist())
+        uninvolved = np.array([
+            qi for qi in range(q.count)
+            if not gids.intersection(pd.quartet_taxa[qi].tolist())
+        ])
+
+        counts_copy = ref.counts.copy()
+        with use_backend("mlx"):
+            paralog_forest.apply_quartet_counts_delta(pd, li, swap, counts_copy)
+
+        if len(uninvolved) > 0:
+            np.testing.assert_array_equal(
+                ref.counts[uninvolved], counts_copy[uninvolved],
+                err_msg="MLX delta modified counts for uninvolved quartets",
+            )
+
+    def test_resolve_paralogs_mlx_backend(self, paralog_forest, paralog_quartets):
+        """
+        End-to-end: ``forest.resolve_paralogs()`` via ``use_backend("mlx")``
+        returns a valid ``OptimizationResult`` with monotone QED history.
+        """
+        q = paralog_quartets
+        with quiet():
+            with use_backend("mlx"):
+                _, opt = paralog_forest.resolve_paralogs(q, max_iter=5)
+
+        assert opt.converged or opt.n_iterations == 5
+        assert len(opt.qed_history) >= 1
+        # QED must be non-decreasing
+        for i in range(1, len(opt.qed_history)):
+            assert opt.qed_history[i] >= opt.qed_history[i - 1] - 1e-12, (
+                f"QED decreased at sweep {i}: "
+                f"{opt.qed_history[i-1]:.6f} → {opt.qed_history[i]:.6f}"
+            )

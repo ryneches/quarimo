@@ -42,6 +42,10 @@ _quartet_counts_cuda, _quartet_steiner_cuda
 _quartet_counts_delta_cuda
     2D kernel: signed ±1 delta updates to counts for a paralog permutation.
 
+_counts_d2d_copy_cuda
+    3D kernel: device-to-device copy of a (n_quartets, n_groups, 4) array.
+    Used by device-aware ParalogOptimizer to avoid PCIe round-trips.
+
 _compute_cuda_grid
     Helper to compute CUDA grid dimensions.
 
@@ -720,9 +724,12 @@ if _CUDA_AVAILABLE:
         5. If topology changed, atomically decrements ``counts_out`` at the
            old topology and increments at the new one.
 
-        Because ``old_global_to_local`` and ``new_global_to_local`` are small
-        per-call arrays (not cached), they must be uploaded to the device by
-        the host before each kernel launch.  The structural forest arrays
+        ``old_global_to_local`` and ``new_global_to_local`` are small
+        per-call arrays uploaded before each kernel launch.  When
+        ``ParalogOptimizer`` is constructed with ``backend='cuda'`` it keeps
+        ``counts_out`` device-resident and calls the kernel directly,
+        bypassing the H→D/D→H round-trip that ``apply_quartet_counts_delta``
+        would otherwise perform.  The structural forest arrays
         (``all_first_occ``, ``node_offsets``, etc.) are always taken from
         the pre-uploaded ``_cuda_kernel_data`` and are never re-uploaded.
 
@@ -820,6 +827,20 @@ if _CUDA_AVAILABLE:
         if old_topo != new_topo:
             cuda.atomic.add(counts_out, (qi, gi, old_topo), -1)
             cuda.atomic.add(counts_out, (qi, gi, new_topo), 1)
+
+    @cuda.jit
+    def _counts_d2d_copy_cuda(src, dst):
+        """
+        Device-to-device copy of a 3-D int32 array.
+
+        Grid is 3D: x over axis 0 (n_quartets), y over axis 1 (n_groups),
+        z over axis 2 (4 topology slots).  Used by the device-aware
+        ``ParalogOptimizer`` to create a trial copy of ``_d_counts`` without
+        a round-trip through host memory.
+        """
+        i, j, k = cuda.grid(3)
+        if i < dst.shape[0] and j < dst.shape[1] and k < dst.shape[2]:
+            dst[i, j, k] = src[i, j, k]
 
 
 def _compute_cuda_grid(n_quartets, n_trees, threads_per_block=(16, 16)):
