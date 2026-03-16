@@ -236,6 +236,7 @@ if backends.cuda:
         _quartet_counts_cuda,
         _quartet_steiner_cuda,
         _compute_cuda_grid,
+        _quartet_counts_delta_cuda,
     )
     from numba import cuda  # noqa: F401 — needed for device ops
 
@@ -2394,7 +2395,50 @@ class Forest:
         resolved = get_backend_override() or backends.resolve(backend)
         kd = self._kernel_data
 
-        if resolved == "cpu-parallel" and backends.numba:
+        if resolved == "cuda" and backends.cuda:
+            # Upload small per-call arrays; structural arrays come from the
+            # pre-uploaded _cuda_kernel_data (never re-uploaded per delta call).
+            ckd = self._cuda_kernel_data
+            d_delta_taxa  = cuda.to_device(affected_taxa)
+            d_delta_qi    = cuda.to_device(affected_qi)
+            d_old_g2l     = cuda.to_device(self.global_to_local)
+            d_new_g2l     = cuda.to_device(trial_g2l)
+            d_tree_ids    = cuda.to_device(affected_tree_ids)
+            d_counts      = cuda.to_device(counts_out)
+
+            n_aq = len(affected_qi)
+            n_at = len(affected_tree_ids)
+            tpb = (16, 16)
+            bpg = (
+                (n_aq + tpb[0] - 1) // tpb[0],
+                (n_at + tpb[1] - 1) // tpb[1],
+            )
+            _quartet_counts_delta_cuda[bpg, tpb](
+                d_delta_taxa,
+                d_delta_qi,
+                np.int32(n_aq),
+                d_old_g2l,
+                d_new_g2l,
+                d_tree_ids,
+                np.int32(n_at),
+                ckd.all_first_occ,
+                ckd.all_root_distance,
+                ckd.all_euler_tour,
+                ckd.all_euler_depth,
+                ckd.all_sparse_table,
+                ckd.all_log2_table,
+                ckd.node_offsets,
+                ckd.tour_offsets,
+                ckd.sp_offsets,
+                ckd.lg_offsets,
+                ckd.sp_tour_widths,
+                ckd.tree_to_group_idx,
+                ckd.polytomy_offsets,
+                ckd.polytomy_nodes,
+                d_counts,
+            )
+            d_counts.copy_to_host(counts_out)
+        elif resolved == "cpu-parallel" and backends.numba:
             _quartet_counts_delta_nb(
                 affected_taxa,
                 affected_qi,

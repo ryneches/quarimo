@@ -39,6 +39,9 @@ quartet_steiner_cuda_unified
 _quartet_counts_cuda, _quartet_steiner_cuda
     Pre-materialized variants (legacy; not used by the main dispatch path).
 
+_quartet_counts_delta_cuda
+    2D kernel: signed ±1 delta updates to counts for a paralog permutation.
+
 _compute_cuda_grid
     Helper to compute CUDA grid dimensions.
 
@@ -669,6 +672,154 @@ if _CUDA_AVAILABLE:
             qi, gi, topo, sl,
             steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
         )
+
+
+    @cuda.jit
+    def _quartet_counts_delta_cuda(
+        delta_quartet_ids,          # int32[n_affected_quartets, 4]
+        delta_quartet_global_idx,   # int32[n_affected_quartets]
+        n_affected_quartets,        # int
+        old_global_to_local,        # int32[n_trees, n_global_taxa]
+        new_global_to_local,        # int32[n_trees, n_global_taxa]
+        delta_tree_ids,             # int32[n_affected_trees]
+        n_affected_trees,           # int
+        all_first_occ,
+        all_root_distance,
+        all_euler_tour,
+        all_euler_depth,
+        all_sparse_table,
+        all_log2_table,
+        node_offsets,
+        tour_offsets,
+        sp_offsets,
+        lg_offsets,
+        sp_tour_widths,
+        tree_to_group_idx,
+        polytomy_offsets,
+        polytomy_nodes,
+        counts_out,                 # int32[n_quartets, n_groups, 4]
+    ):
+        """
+        CUDA delta kernel: incremental ±1 updates to ``counts_out`` after a
+        paralog copy-slot permutation.
+
+        Grid is 2D: x over ``qi_local`` (affected quartet index, 0 …
+        n_affected_quartets-1), y over ``t_idx`` (affected tree position, 0 …
+        n_affected_trees-1).  Multiple threads sharing the same ``qi`` can
+        write to the same ``counts_out[qi, gi, :]`` bin, so all updates use
+        ``cuda.atomic.add``.
+
+        For each (qi_local, t_idx) thread the kernel:
+
+        1. Resolves quartet taxa to tree-local positions under the *old*
+           copy-slot mapping.  Skips if any taxon is absent.
+        2. Determines the old topology (with polytomy detection).
+        3. Resolves the same quartet under the *new* mapping.  Skips if any
+           taxon is absent.
+        4. Determines the new topology.
+        5. If topology changed, atomically decrements ``counts_out`` at the
+           old topology and increments at the new one.
+
+        Because ``old_global_to_local`` and ``new_global_to_local`` are small
+        per-call arrays (not cached), they must be uploaded to the device by
+        the host before each kernel launch.  The structural forest arrays
+        (``all_first_occ``, ``node_offsets``, etc.) are always taken from
+        the pre-uploaded ``_cuda_kernel_data`` and are never re-uploaded.
+
+        Parameters
+        ----------
+        delta_quartet_ids : int32[n_affected_quartets, 4]
+            Sorted global taxon IDs for each affected quartet.
+        delta_quartet_global_idx : int32[n_affected_quartets]
+            Row index into ``counts_out`` for each affected quartet.
+        n_affected_quartets : int
+        old_global_to_local : int32[n_trees, n_global_taxa]
+            Copy-slot → local-leaf mapping before the permutation.
+        new_global_to_local : int32[n_trees, n_global_taxa]
+            Copy-slot → local-leaf mapping after the permutation.
+        delta_tree_ids : int32[n_affected_trees]
+            Indices of trees where ≥ 2 copies of the permuted genome are present.
+        n_affected_trees : int
+        counts_out : int32[n_quartets, n_groups, 4]
+            Modified atomically in-place.
+        """
+        qi_local, t_idx = cuda.grid(2)
+        if qi_local >= n_affected_quartets or t_idx >= n_affected_trees:
+            return
+
+        t0 = delta_quartet_ids[qi_local, 0]
+        t1 = delta_quartet_ids[qi_local, 1]
+        t2 = delta_quartet_ids[qi_local, 2]
+        t3 = delta_quartet_ids[qi_local, 3]
+        qi = delta_quartet_global_idx[qi_local]
+        ti = delta_tree_ids[t_idx]
+        gi = tree_to_group_idx[ti]
+
+        # ── Old assignment ───────────────────────────────────────────────── #
+        ln0_old, ln1_old, ln2_old, ln3_old, \
+            node_base, tour_base, sp_base, lg_base, sp_stride = \
+            _resolve_quartet_cuda(
+                t0, t1, t2, t3, ti,
+                old_global_to_local, node_offsets, tour_offsets,
+                sp_offsets, lg_offsets, sp_tour_widths,
+            )
+        if ln0_old < 0 or ln1_old < 0 or ln2_old < 0 or ln3_old < 0:
+            return
+
+        fo0 = all_first_occ[node_base + ln0_old]
+        fo1 = all_first_occ[node_base + ln1_old]
+        fo2 = all_first_occ[node_base + ln2_old]
+        fo3 = all_first_occ[node_base + ln3_old]
+        poly_start = polytomy_offsets[ti]
+        poly_end   = polytomy_offsets[ti + 1]
+
+        found, old_topo, r0, r1, r2, rw = _polytomy_check_cuda(
+            fo0, fo1, fo2, fo3,
+            node_base, tour_base, sp_base, lg_base, sp_stride,
+            poly_start, poly_end, polytomy_nodes,
+            all_sparse_table, all_euler_depth, all_log2_table,
+            all_euler_tour, all_root_distance,
+        )
+        if not found:
+            old_topo, r0, r1, r2, rw = _quartet_topology_and_rd_cuda(
+                fo0, fo1, fo2, fo3,
+                node_base, tour_base, sp_base, lg_base, sp_stride,
+                all_root_distance, all_sparse_table, all_euler_depth,
+                all_log2_table, all_euler_tour,
+            )
+
+        # ── New assignment ───────────────────────────────────────────────── #
+        ln0_new = new_global_to_local[ti, t0]
+        ln1_new = new_global_to_local[ti, t1]
+        ln2_new = new_global_to_local[ti, t2]
+        ln3_new = new_global_to_local[ti, t3]
+        if ln0_new < 0 or ln1_new < 0 or ln2_new < 0 or ln3_new < 0:
+            return
+
+        fo0 = all_first_occ[node_base + ln0_new]
+        fo1 = all_first_occ[node_base + ln1_new]
+        fo2 = all_first_occ[node_base + ln2_new]
+        fo3 = all_first_occ[node_base + ln3_new]
+
+        found, new_topo, r0, r1, r2, rw = _polytomy_check_cuda(
+            fo0, fo1, fo2, fo3,
+            node_base, tour_base, sp_base, lg_base, sp_stride,
+            poly_start, poly_end, polytomy_nodes,
+            all_sparse_table, all_euler_depth, all_log2_table,
+            all_euler_tour, all_root_distance,
+        )
+        if not found:
+            new_topo, r0, r1, r2, rw = _quartet_topology_and_rd_cuda(
+                fo0, fo1, fo2, fo3,
+                node_base, tour_base, sp_base, lg_base, sp_stride,
+                all_root_distance, all_sparse_table, all_euler_depth,
+                all_log2_table, all_euler_tour,
+            )
+
+        # ── Apply signed delta ───────────────────────────────────────────── #
+        if old_topo != new_topo:
+            cuda.atomic.add(counts_out, (qi, gi, old_topo), -1)
+            cuda.atomic.add(counts_out, (qi, gi, new_topo), 1)
 
 
 def _compute_cuda_grid(n_quartets, n_trees, threads_per_block=(16, 16)):

@@ -23,6 +23,7 @@ if backends.cuda:
         _rmq_csr_cuda,
         _quartet_counts_cuda,
         _quartet_steiner_cuda,
+        _quartet_counts_delta_cuda,
     )
 
 _CUDA_AVAILABLE = backends.cuda
@@ -119,12 +120,18 @@ class TestCUDAKernelStructure:
         assert callable(_quartet_steiner_cuda)
         assert hasattr(_quartet_steiner_cuda, "__name__")
 
+    def test_delta_cuda_kernel_exists(self):
+        """Test that the paralog delta kernel exists."""
+        assert callable(_quartet_counts_delta_cuda)
+        assert hasattr(_quartet_counts_delta_cuda, "__name__")
+
     def test_cuda_kernels_are_cuda_jit(self):
         """Test that kernels have CUDA JIT attributes."""
         # numba.cuda.jit decorated functions have special attributes
         # We just check they have some kind of dispatcher/compile attributes
         assert hasattr(_quartet_counts_cuda, "__name__")
         assert hasattr(_quartet_steiner_cuda, "__name__")
+        assert hasattr(_quartet_counts_delta_cuda, "__name__")
 
     def test_cuda_kernels_imported_conditionally(self):
         """Test that CUDA kernels are only available when CUDA is available."""
@@ -135,6 +142,7 @@ class TestCUDAKernelStructure:
         assert hasattr(_cuda_kernels, "_rmq_csr_cuda")
         assert hasattr(_cuda_kernels, "_quartet_counts_cuda")
         assert hasattr(_cuda_kernels, "_quartet_steiner_cuda")
+        assert hasattr(_cuda_kernels, "_quartet_counts_delta_cuda")
 
 
 class TestCUDAAvailability:
