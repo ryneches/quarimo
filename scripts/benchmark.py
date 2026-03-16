@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.19.9"
+__generated_with = "0.19.11"
 app = marimo.App(width="medium")
 
 
@@ -17,10 +17,11 @@ def _():
     import random
     import math
     import polars as pl
-    from dendropy.simulate import treesim
+    from dendropy.simulate.treesim import pure_kingman_tree as PKT
+    from dendropy import TaxonNamespace
     from quarimo import Forest, Quartets, quiet
 
-    return Forest, Quartets, math, pl, quiet, random, time, treesim
+    return Forest, PKT, Quartets, TaxonNamespace, math, pl, random, time
 
 
 @app.cell
@@ -60,7 +61,7 @@ def _(mo):
 
 @app.cell
 def _():
-    N_TAXA           = 1_000   # design target: 10_000
+    N_TAXA           = 10_000   # design target: 10_000
     N_GROUPS         = 2
     REPEATS          = 3       # best-of-N timing repetitions per cell
     BACKEND          = "best"  # 'best' | 'cpu-parallel' | 'cuda'
@@ -145,43 +146,38 @@ def _(mo):
 
 
 @app.cell
-def _(random, treesim):
+def _(TaxonNamespace, random, treesim):
     def make_base_tree(n_taxa, seed=0):
         rng = random.Random(seed)
-        return treesim.birth_death_tree(
-            birth_rate=1.0,
-            death_rate=0.0,
-            num_extant_tips=n_taxa,
-            rng=rng,
-        )
+        return treesim.pure_kingman_tree( TaxonNamespace( [ 'S'+str(i)
+                                                            for i in range(n_taxa) ],
+                                                          label='taxa' ) )
 
-    return (make_base_tree,)
+    return
 
 
 @app.cell
-def _(Forest, N_GROUPS, N_TAXA, make_base_tree, quiet, random):
+def _(Forest, N_GROUPS, TaxonNamespace, treesim):
+    labels = [ 'group_{i}' for i in range(N_GROUPS) ]
+    F = Forest( { label : [ treesim.pure_kingman_tree( TaxonNamespace( [ 'S'+str(i)
+                                                                         for i in range(10) ],
+                                                                       label='taxa' ) ).as_string( schema='newick' )
+                            for i in range(3) ]
+                  for label in labels } )
+
+    return
+
+
+@app.cell
+def _(Forest, N_GROUPS, N_TAXA, PKT, TaxonNamespace):
     def make_forest(n_trees, n_taxa=N_TAXA, n_groups=N_GROUPS, seed=0):
-        rng  = random.Random(seed + 1)
-        base = make_base_tree(n_taxa, seed)
-
-        def one_newick():
-            for node in base.preorder_node_iter():
-                if node.edge_length is not None:
-                    node.edge_length = max(1e-6, rng.expovariate(1.0))
-            nwk = base.as_string(schema="newick").strip()
-            # DendroPy prepends a [&R] / [&U] rooting annotation that quarimo
-            # cannot parse; strip it before handing the string to Forest.
-            if nwk.startswith("[&"):
-                nwk = nwk[nwk.index("]") + 1:].strip()
-            return nwk
-
-        trees_per_group = max(1, n_trees // n_groups)
-        groups = {
-            f"g{i}": [one_newick() for _ in range(trees_per_group)]
-            for i in range(n_groups)
-        }
-        with quiet():
-            return Forest(groups)
+    
+        labels = [ 'group_{i}' for i in range(N_GROUPS) ]
+        return Forest( { label : [ PKT( TaxonNamespace( [ 'S'+str(i)
+                                                          for i in range(N_TAXA) ],
+                                                        label='taxa' ) ).as_string( schema='newick' )
+                                   for i in range(n_trees) ]
+                         for label in labels } )
 
     return (make_forest,)
 
