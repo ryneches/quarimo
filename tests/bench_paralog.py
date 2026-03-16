@@ -79,6 +79,7 @@ import numpy as np
 import pytest
 
 from quarimo import Forest, Quartets
+from quarimo._backend import backends
 from quarimo._context import quiet
 
 
@@ -513,8 +514,11 @@ class TestStressResolveParalogs:
         init_g2l = f.global_to_local.copy()
         counts_before = f.quartet_topology(q, backend="python").counts.copy()
 
+        # Resolve once so the reported backend name is concrete, not "best"
+        resolved_backend = backends.resolve("best")
+
         # One outer run for invariant checks and metadata
-        result0, opt0 = f.resolve_paralogs(q)
+        result0, opt0 = f.resolve_paralogs(q, backend=resolved_backend)
         _check_invariants(counts_before, result0, opt0,
                           label=f"npg={npg} k={cpg}")
 
@@ -522,7 +526,7 @@ class TestStressResolveParalogs:
 
         f.global_to_local[:] = init_g2l    # reset for timed loop
 
-        _extra_info(benchmark, backend="best",
+        _extra_info(benchmark, backend=resolved_backend,
                     n_trees_per_group=STRESS_N_TREES_PER_GROUP,
                     n_groups=STRESS_N_GROUPS,
                     n_paralog_genomes=npg, copies_per_genome=cpg,
@@ -535,7 +539,7 @@ class TestStressResolveParalogs:
 
         def _run():
             f.global_to_local[:] = init_g2l
-            return f.resolve_paralogs(q)
+            return f.resolve_paralogs(q, backend=resolved_backend)
 
         benchmark(_run)
 
