@@ -24,6 +24,7 @@ if backends.cuda:
         _quartet_counts_cuda,
         _quartet_steiner_cuda,
         _quartet_counts_delta_cuda,
+        _counts_d2d_copy_cuda,
     )
 
 _CUDA_AVAILABLE = backends.cuda
@@ -125,6 +126,11 @@ class TestCUDAKernelStructure:
         assert callable(_quartet_counts_delta_cuda)
         assert hasattr(_quartet_counts_delta_cuda, "__name__")
 
+    def test_d2d_copy_cuda_kernel_exists(self):
+        """Test that the device-to-device copy kernel exists."""
+        assert callable(_counts_d2d_copy_cuda)
+        assert hasattr(_counts_d2d_copy_cuda, "__name__")
+
     def test_cuda_kernels_are_cuda_jit(self):
         """Test that kernels have CUDA JIT attributes."""
         # numba.cuda.jit decorated functions have special attributes
@@ -132,6 +138,7 @@ class TestCUDAKernelStructure:
         assert hasattr(_quartet_counts_cuda, "__name__")
         assert hasattr(_quartet_steiner_cuda, "__name__")
         assert hasattr(_quartet_counts_delta_cuda, "__name__")
+        assert hasattr(_counts_d2d_copy_cuda, "__name__")
 
     def test_cuda_kernels_imported_conditionally(self):
         """Test that CUDA kernels are only available when CUDA is available."""
@@ -143,6 +150,7 @@ class TestCUDAKernelStructure:
         assert hasattr(_cuda_kernels, "_quartet_counts_cuda")
         assert hasattr(_cuda_kernels, "_quartet_steiner_cuda")
         assert hasattr(_cuda_kernels, "_quartet_counts_delta_cuda")
+        assert hasattr(_cuda_kernels, "_counts_d2d_copy_cuda")
 
 
 class TestCUDAAvailability:

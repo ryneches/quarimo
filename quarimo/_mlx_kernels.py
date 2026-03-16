@@ -631,6 +631,280 @@ inline int32_t rmq_msl(
         mx.eval(out[0])
         return np.array(out[0], copy=False).reshape(n_quartets, n_groups, 4)
 
+    # ====================================================================== #
+    # Delta kernel                                                            #
+    # ====================================================================== #
+    # 1 thread per affected quartet (qi_local); sequential inner loop over   #
+    # affected trees.  No atomics needed — each thread owns its entire       #
+    # output row.  On Apple Silicon (UMA) the mx.array() wrapping of numpy  #
+    # host arrays has negligible cost, so no device-resident state is needed #
+    # and the kernel is simply called once per evaluate_swap / apply_swap.   #
+    #                                                                         #
+    # Output layout: only the n_affected_quartets rows, not the full array.  #
+    # The Python wrapper scatter-assigns them back into the host counts array #
+    # (counts_out[affected_qi] = delta_rows).                                #
+
+    # Shared topology-resolution helper used by the delta kernel only.
+    # Appended to _TOPOLOGY_HEADER so that rmq_msl is in scope.
+    _RESOLVE_TOPO_HELPER = """
+// Resolve the quartet topology for one (quartet, tree) pair.
+// Returns k=0,1,2 for the three resolved topologies or k=3 for a polytomy.
+inline int32_t resolve_topo_msl(
+    int32_t ln0, int32_t ln1, int32_t ln2, int32_t ln3,
+    long node_base, long tour_base, long sp_base, long lg_base, int32_t sp_stride,
+    int32_t poly_start, int32_t poly_end,
+    device const int32_t* all_first_occ,
+    device const float*   all_root_distance,
+    device const int32_t* all_euler_tour,
+    device const int32_t* all_euler_depth,
+    device const int32_t* all_sparse_table,
+    device const int32_t* all_log2_table,
+    device const int32_t* polytomy_nodes)
+{
+    int32_t fo0 = all_first_occ[node_base + ln0];
+    int32_t fo1 = all_first_occ[node_base + ln1];
+    int32_t fo2 = all_first_occ[node_base + ln2];
+    int32_t fo3 = all_first_occ[node_base + ln3];
+
+    int32_t l, r, tmp;
+    l = fo0; r = fo1; if (l > r) { tmp = l; l = r; r = tmp; }
+    int32_t lca01 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+    l = fo0; r = fo2; if (l > r) { tmp = l; l = r; r = tmp; }
+    int32_t lca02 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+    l = fo0; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+    int32_t lca03 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+    l = fo1; r = fo2; if (l > r) { tmp = l; l = r; r = tmp; }
+    int32_t lca12 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+    l = fo1; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+    int32_t lca13 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+    l = fo2; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+    int32_t lca23 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+
+    float rd01 = all_root_distance[node_base + lca01];
+    float rd02 = all_root_distance[node_base + lca02];
+    float rd03 = all_root_distance[node_base + lca03];
+    float rd12 = all_root_distance[node_base + lca12];
+    float rd13 = all_root_distance[node_base + lca13];
+    float rd23 = all_root_distance[node_base + lca23];
+
+    float r0 = rd01 + rd23;
+    float r1 = rd02 + rd13;
+    float r2 = rd03 + rd12;
+
+    if (poly_end > poly_start) {
+        bool found_poly = false;
+        for (int32_t j = poly_start; j < poly_end; j++) {
+            int32_t pn = polytomy_nodes[j];
+            if (pn == lca01 || pn == lca02 || pn == lca03 ||
+                pn == lca12 || pn == lca13 || pn == lca23) {
+                found_poly = true;
+                break;
+            }
+        }
+        if (found_poly && r0 == r1 && r1 == r2) return 3;
+    }
+    if (r0 >= r1 && r0 >= r2) return 0;
+    if (r1 >= r0 && r1 >= r2) return 1;
+    return 2;
+}
+"""
+
+    _DELTA_HEADER = _TOPOLOGY_HEADER + _RESOLVE_TOPO_HELPER
+
+    _QUARTET_DELTA_BODY = """
+    uint32_t qi_local       = thread_position_in_grid.x;
+    int32_t  n_affected     = n_affected_arr[0];
+    if ((int32_t)qi_local >= n_affected) return;
+
+    int32_t n_groups         = n_groups_arr[0];
+    int32_t n_gtaxa          = n_global_taxa_arr[0];
+    int32_t n_affected_trees = n_affected_trees_arr[0];
+
+    int32_t t0 = delta_quartet_ids[(int32_t)qi_local * 4 + 0];
+    int32_t t1 = delta_quartet_ids[(int32_t)qi_local * 4 + 1];
+    int32_t t2 = delta_quartet_ids[(int32_t)qi_local * 4 + 2];
+    int32_t t3 = delta_quartet_ids[(int32_t)qi_local * 4 + 3];
+    int32_t qi = delta_quartet_global_idx[(int32_t)qi_local];
+
+    // Copy this quartet's counts row from counts_in → counts_out
+    int32_t qi_base_in  = qi            * n_groups * 4;
+    int32_t qi_base_out = (int32_t)qi_local * n_groups * 4;
+    for (int32_t g = 0; g < n_groups; g++)
+        for (int32_t k = 0; k < 4; k++)
+            counts_out[qi_base_out + g * 4 + k] = counts_in[qi_base_in + g * 4 + k];
+
+    // Apply per-tree signed deltas
+    for (int32_t t_idx = 0; t_idx < n_affected_trees; t_idx++) {
+        int32_t ti       = delta_tree_ids[t_idx];
+        int32_t gi       = tree_to_group_idx[ti];
+        int32_t base_g2l = ti * n_gtaxa;
+
+        int32_t ln0_old = old_global_to_local[base_g2l + t0];
+        int32_t ln1_old = old_global_to_local[base_g2l + t1];
+        int32_t ln2_old = old_global_to_local[base_g2l + t2];
+        int32_t ln3_old = old_global_to_local[base_g2l + t3];
+        if (ln0_old < 0 || ln1_old < 0 || ln2_old < 0 || ln3_old < 0) continue;
+
+        long    node_base = node_offsets[ti];
+        long    tour_base = tour_offsets[ti];
+        long    sp_base   = sp_offsets[ti];
+        long    lg_base   = lg_offsets[ti];
+        int32_t sp_stride = sp_tour_widths[ti];
+        int32_t poly_start = polytomy_offsets[ti];
+        int32_t poly_end   = polytomy_offsets[ti + 1];
+
+        int32_t old_topo = resolve_topo_msl(
+            ln0_old, ln1_old, ln2_old, ln3_old,
+            node_base, tour_base, sp_base, lg_base, sp_stride,
+            poly_start, poly_end,
+            all_first_occ, all_root_distance, all_euler_tour,
+            all_euler_depth, all_sparse_table, all_log2_table, polytomy_nodes);
+
+        int32_t ln0_new = new_global_to_local[base_g2l + t0];
+        int32_t ln1_new = new_global_to_local[base_g2l + t1];
+        int32_t ln2_new = new_global_to_local[base_g2l + t2];
+        int32_t ln3_new = new_global_to_local[base_g2l + t3];
+        if (ln0_new < 0 || ln1_new < 0 || ln2_new < 0 || ln3_new < 0) continue;
+
+        int32_t new_topo = resolve_topo_msl(
+            ln0_new, ln1_new, ln2_new, ln3_new,
+            node_base, tour_base, sp_base, lg_base, sp_stride,
+            poly_start, poly_end,
+            all_first_occ, all_root_distance, all_euler_tour,
+            all_euler_depth, all_sparse_table, all_log2_table, polytomy_nodes);
+
+        if (old_topo != new_topo) {
+            counts_out[qi_base_out + gi * 4 + old_topo] -= 1;
+            counts_out[qi_base_out + gi * 4 + new_topo] += 1;
+        }
+    }
+"""
+
+    _DELTA_INPUT_NAMES = [
+        "delta_quartet_ids",        # int32[n_affected * 4]
+        "delta_quartet_global_idx", # int32[n_affected]
+        "old_global_to_local",      # int32[n_trees * n_global_taxa]
+        "new_global_to_local",      # int32[n_trees * n_global_taxa]
+        "delta_tree_ids",           # int32[n_affected_trees]
+        "counts_in",                # int32[n_quartets * n_groups * 4]
+        "all_first_occ",            # int32[total_nodes]
+        "all_root_distance",        # float32[total_nodes]
+        "all_euler_tour",           # int32[total_tour_len]
+        "all_euler_depth",          # int32[total_tour_len]
+        "all_sparse_table",         # int32[total_sp_size]
+        "all_log2_table",           # int32[total_log2_size]
+        "node_offsets",             # int64[n_trees + 1]
+        "tour_offsets",             # int64[n_trees + 1]
+        "sp_offsets",               # int64[n_trees + 1]
+        "lg_offsets",               # int64[n_trees + 1]
+        "sp_tour_widths",           # int32[n_trees]
+        "tree_to_group_idx",        # int32[n_trees]
+        "polytomy_offsets",         # int32[n_trees + 1]
+        "polytomy_nodes",           # int32[total_polytomy] (at least 1 element)
+        "n_affected_arr",           # int32[1]
+        "n_affected_trees_arr",     # int32[1]
+        "n_groups_arr",             # int32[1]
+        "n_global_taxa_arr",        # int32[1]
+    ]
+
+    _delta_kernel = mx.fast.metal_kernel(
+        name="quartet_counts_delta",
+        input_names=_DELTA_INPUT_NAMES,
+        output_names=["counts_out"],
+        header=_DELTA_HEADER,
+        source=_QUARTET_DELTA_BODY,
+    )
+
+    def quartet_counts_delta_mlx(
+        kd,
+        affected_taxa,          # int32[n_affected, 4]
+        affected_qi,            # int32[n_affected]
+        old_global_to_local,    # int32[n_trees, n_global_taxa]
+        new_global_to_local,    # int32[n_trees, n_global_taxa]
+        affected_tree_ids,      # int32[n_affected_trees]
+        counts_out,             # int32[n_quartets, n_groups, 4] — modified in-place
+        n_groups: int,
+    ) -> None:
+        """
+        Apply a paralog copy-slot permutation to ``counts_out`` in-place using Metal.
+
+        Dispatches one Metal thread per affected quartet; each thread loops
+        sequentially over the affected trees and applies signed ±1 updates.
+        No atomics are needed because each thread owns its entire output row.
+
+        On Apple Silicon (UMA), wrapping numpy arrays as ``mx.array`` has
+        negligible cost, so no device-resident state is maintained between
+        calls.  The kernel outputs only the affected rows; they are scattered
+        back into ``counts_out`` via index assignment.
+
+        Parameters
+        ----------
+        kd : ForestKernelData
+            Forest structural arrays (CPU arrays, wrapped by MLX at call time).
+        affected_taxa : int32[n_affected, 4]
+            Sorted global taxon IDs for each affected quartet.
+        affected_qi : int32[n_affected]
+            Row indices into ``counts_out`` for each affected quartet.
+        old_global_to_local : int32[n_trees, n_global_taxa]
+            Copy-slot → local-leaf mapping before the permutation.
+        new_global_to_local : int32[n_trees, n_global_taxa]
+            Copy-slot → local-leaf mapping after the permutation.
+        affected_tree_ids : int32[n_affected_trees]
+            Indices of trees where ≥ 2 copies of the genome are present.
+        counts_out : int32[n_quartets, n_groups, 4]
+            Modified in-place via scatter assignment of the affected rows.
+        n_groups : int
+        """
+        n_affected = len(affected_qi)
+        n_affected_trees = len(affected_tree_ids)
+        if n_affected == 0 or n_affected_trees == 0:
+            return
+
+        poly_nodes = (
+            kd.polytomy_nodes if len(kd.polytomy_nodes) > 0
+            else np.array([-1], dtype=np.int32)
+        )
+
+        tg_size = 256
+        grid_x = ((n_affected + tg_size - 1) // tg_size) * tg_size
+
+        out = _delta_kernel(
+            inputs=[
+                mx.array(affected_taxa.reshape(-1),          dtype=mx.int32),
+                mx.array(affected_qi,                        dtype=mx.int32),
+                mx.array(old_global_to_local.reshape(-1),    dtype=mx.int32),
+                mx.array(new_global_to_local.reshape(-1),    dtype=mx.int32),
+                mx.array(affected_tree_ids,                  dtype=mx.int32),
+                mx.array(counts_out.reshape(-1),             dtype=mx.int32),
+                mx.array(kd.all_first_occ,                   dtype=mx.int32),
+                mx.array(kd.all_root_distance.astype("f4"),  dtype=mx.float32),
+                mx.array(kd.all_euler_tour,                  dtype=mx.int32),
+                mx.array(kd.all_euler_depth,                 dtype=mx.int32),
+                mx.array(kd.all_sparse_table,                dtype=mx.int32),
+                mx.array(kd.all_log2_table,                  dtype=mx.int32),
+                mx.array(kd.node_offsets,                    dtype=mx.int64),
+                mx.array(kd.tour_offsets,                    dtype=mx.int64),
+                mx.array(kd.sp_offsets,                      dtype=mx.int64),
+                mx.array(kd.lg_offsets,                      dtype=mx.int64),
+                mx.array(kd.sp_tour_widths,                  dtype=mx.int32),
+                mx.array(kd.tree_to_group_idx,               dtype=mx.int32),
+                mx.array(poly_nodes,                         dtype=mx.int32),
+                mx.array([n_affected],                       dtype=mx.int32),
+                mx.array([n_affected_trees],                 dtype=mx.int32),
+                mx.array([n_groups],                         dtype=mx.int32),
+                mx.array([kd.n_global_taxa],                 dtype=mx.int32),
+            ],
+            output_shapes=[(n_affected * n_groups * 4,)],
+            output_dtypes=[mx.int32],
+            grid=(grid_x, 1, 1),
+            threadgroup=(tg_size, 1, 1),
+        )
+        mx.eval(out[0])
+
+        # Scatter the affected rows back into counts_out in-place
+        delta_rows = np.array(out[0], copy=False).reshape(n_affected, n_groups, 4)
+        counts_out[affected_qi] = delta_rows
+
     def quartet_steiner_mlx(kd, sorted_ids, n_quartets, n_groups):
         """
         Count quartet topologies and accumulate Steiner distances using Metal.
