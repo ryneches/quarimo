@@ -28,10 +28,12 @@ Two test classes with distinct purposes:
                                     with independent leaf shuffles (maximum
                                     within-group quartet conflict)
 
-  Benchmarks are split by backend (python, cpu-parallel) so that timing data
-  from different machines can be combined.  A separate TestParalogKernelAgreement
-  class asserts that every backend returns bit-identical counts for every cell
-  in the condition matrix — fidelity is thus verified independently of timing.
+  Benchmarks are split by backend (python, cpu-parallel, cuda, mlx) so that
+  timing data from different machines can be combined.  Hardware-specific
+  backends are skipped automatically when the hardware is not present.
+  A separate TestParalogKernelAgreement class asserts that every backend
+  returns bit-identical counts for every cell in the condition matrix —
+  fidelity is thus verified independently of timing.
 
   Problem size is chosen so that:
     • python backend completes each benchmark cell in < 2 s (feasible in CI)
@@ -409,6 +411,66 @@ class TestBenchResolveParalogs:
         def _run():
             f.global_to_local[:] = init_g2l
             return f.resolve_paralogs(q, backend="cpu-parallel")
+
+        benchmark(_run)
+
+    @pytest.mark.requires_cuda
+    @pytest.mark.parametrize("disc",  [v for _, v in DISCORDANCE],         ids=[k for k, _ in DISCORDANCE])
+    @pytest.mark.parametrize("cpg",   [v for _, v in PARALOG_INTENSITY],   ids=[k for k, _ in PARALOG_INTENSITY])
+    @pytest.mark.parametrize("npg",   [v for _, v in PARALOG_FREQ],        ids=[k for k, _ in PARALOG_FREQ])
+    def test_cuda(self, benchmark, npg, cpg, disc):
+        """CUDA delta kernel — JIT warmup excluded from timing."""
+        f, q = _build(BENCH_N_GROUPS, BENCH_N_TREES_PER_GROUP,
+                      BENCH_N_SINGLETONS, npg, cpg, BENCH_N_QUARTETS,
+                      discordance=disc)
+        init_g2l = f.global_to_local.copy()
+        _, opt0 = f.resolve_paralogs(q, backend="cuda")   # JIT warmup
+        f.global_to_local[:] = init_g2l
+
+        _extra_info(benchmark, backend="cuda",
+                    n_trees_per_group=BENCH_N_TREES_PER_GROUP,
+                    n_groups=BENCH_N_GROUPS,
+                    n_paralog_genomes=npg, copies_per_genome=cpg,
+                    n_quartets=BENCH_N_QUARTETS,
+                    n_leaves=f._trees[0].n_leaves,
+                    n_global_taxa=f.n_global_taxa,
+                    discordance=disc,
+                    qed_history=opt0.qed_history,
+                    n_optimizer_iters=opt0.n_iterations)
+
+        def _run():
+            f.global_to_local[:] = init_g2l
+            return f.resolve_paralogs(q, backend="cuda")
+
+        benchmark(_run)
+
+    @pytest.mark.requires_mlx
+    @pytest.mark.parametrize("disc",  [v for _, v in DISCORDANCE],         ids=[k for k, _ in DISCORDANCE])
+    @pytest.mark.parametrize("cpg",   [v for _, v in PARALOG_INTENSITY],   ids=[k for k, _ in PARALOG_INTENSITY])
+    @pytest.mark.parametrize("npg",   [v for _, v in PARALOG_FREQ],        ids=[k for k, _ in PARALOG_FREQ])
+    def test_mlx(self, benchmark, npg, cpg, disc):
+        """Metal delta kernel — Metal JIT warmup excluded from timing."""
+        f, q = _build(BENCH_N_GROUPS, BENCH_N_TREES_PER_GROUP,
+                      BENCH_N_SINGLETONS, npg, cpg, BENCH_N_QUARTETS,
+                      discordance=disc)
+        init_g2l = f.global_to_local.copy()
+        _, opt0 = f.resolve_paralogs(q, backend="mlx")   # Metal JIT warmup
+        f.global_to_local[:] = init_g2l
+
+        _extra_info(benchmark, backend="mlx",
+                    n_trees_per_group=BENCH_N_TREES_PER_GROUP,
+                    n_groups=BENCH_N_GROUPS,
+                    n_paralog_genomes=npg, copies_per_genome=cpg,
+                    n_quartets=BENCH_N_QUARTETS,
+                    n_leaves=f._trees[0].n_leaves,
+                    n_global_taxa=f.n_global_taxa,
+                    discordance=disc,
+                    qed_history=opt0.qed_history,
+                    n_optimizer_iters=opt0.n_iterations)
+
+        def _run():
+            f.global_to_local[:] = init_g2l
+            return f.resolve_paralogs(q, backend="mlx")
 
         benchmark(_run)
 
