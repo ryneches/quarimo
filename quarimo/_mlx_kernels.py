@@ -888,6 +888,7 @@ inline int32_t resolve_topo_msl(
                 mx.array(kd.lg_offsets,                      dtype=mx.int64),
                 mx.array(kd.sp_tour_widths,                  dtype=mx.int32),
                 mx.array(kd.tree_to_group_idx,               dtype=mx.int32),
+                mx.array(kd.polytomy_offsets,                dtype=mx.int32),
                 mx.array(poly_nodes,                         dtype=mx.int32),
                 mx.array([n_affected],                       dtype=mx.int32),
                 mx.array([n_affected_trees],                 dtype=mx.int32),
