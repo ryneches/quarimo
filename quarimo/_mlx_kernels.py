@@ -709,7 +709,14 @@ inline int32_t resolve_topo_msl(
 }
 """
 
-    _DELTA_HEADER = _TOPOLOGY_HEADER + _RESOLVE_TOPO_HELPER
+    # The delta kernel uses _TOPOLOGY_HEADER only (for rmq_msl).
+    # _RESOLVE_TOPO_HELPER is NOT included here because it declares helper
+    # function parameters with 'device const' address space; MLX passes kernel
+    # inputs in 'constant' address space, and the Metal compiler rejects the
+    # resulting mismatch at the call site.  Instead, the topology computation
+    # is inlined directly in the kernel body, which mirrors the working
+    # topology kernels and avoids any address-space helper-function boundary.
+    _DELTA_HEADER = _TOPOLOGY_HEADER
 
     _QUARTET_DELTA_BODY = """
     uint32_t qi_local       = thread_position_in_grid.x;
@@ -739,39 +746,126 @@ inline int32_t resolve_topo_msl(
         int32_t gi       = tree_to_group_idx[ti];
         int32_t base_g2l = ti * n_gtaxa;
 
-        int32_t ln0_old = old_global_to_local[base_g2l + t0];
-        int32_t ln1_old = old_global_to_local[base_g2l + t1];
-        int32_t ln2_old = old_global_to_local[base_g2l + t2];
-        int32_t ln3_old = old_global_to_local[base_g2l + t3];
-        if (ln0_old < 0 || ln1_old < 0 || ln2_old < 0 || ln3_old < 0) continue;
-
-        long    node_base = node_offsets[ti];
-        long    tour_base = tour_offsets[ti];
-        long    sp_base   = sp_offsets[ti];
-        long    lg_base   = lg_offsets[ti];
-        int32_t sp_stride = sp_tour_widths[ti];
+        long    node_base  = node_offsets[ti];
+        long    tour_base  = tour_offsets[ti];
+        long    sp_base    = sp_offsets[ti];
+        long    lg_base    = lg_offsets[ti];
+        int32_t sp_stride  = sp_tour_widths[ti];
         int32_t poly_start = polytomy_offsets[ti];
         int32_t poly_end   = polytomy_offsets[ti + 1];
 
-        int32_t old_topo = resolve_topo_msl(
-            ln0_old, ln1_old, ln2_old, ln3_old,
-            node_base, tour_base, sp_base, lg_base, sp_stride,
-            poly_start, poly_end,
-            all_first_occ, all_root_distance, all_euler_tour,
-            all_euler_depth, all_sparse_table, all_log2_table, polytomy_nodes);
+        // ── OLD assignment topology ──────────────────────────────────────
+        int32_t ln0 = old_global_to_local[base_g2l + t0];
+        int32_t ln1 = old_global_to_local[base_g2l + t1];
+        int32_t ln2 = old_global_to_local[base_g2l + t2];
+        int32_t ln3 = old_global_to_local[base_g2l + t3];
+        if (ln0 < 0 || ln1 < 0 || ln2 < 0 || ln3 < 0) continue;
 
-        int32_t ln0_new = new_global_to_local[base_g2l + t0];
-        int32_t ln1_new = new_global_to_local[base_g2l + t1];
-        int32_t ln2_new = new_global_to_local[base_g2l + t2];
-        int32_t ln3_new = new_global_to_local[base_g2l + t3];
-        if (ln0_new < 0 || ln1_new < 0 || ln2_new < 0 || ln3_new < 0) continue;
+        int32_t fo0 = all_first_occ[node_base + ln0];
+        int32_t fo1 = all_first_occ[node_base + ln1];
+        int32_t fo2 = all_first_occ[node_base + ln2];
+        int32_t fo3 = all_first_occ[node_base + ln3];
 
-        int32_t new_topo = resolve_topo_msl(
-            ln0_new, ln1_new, ln2_new, ln3_new,
-            node_base, tour_base, sp_base, lg_base, sp_stride,
-            poly_start, poly_end,
-            all_first_occ, all_root_distance, all_euler_tour,
-            all_euler_depth, all_sparse_table, all_log2_table, polytomy_nodes);
+        int32_t l, r, tmp;
+        l = fo0; r = fo1; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca01 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo0; r = fo2; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca02 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo0; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca03 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo1; r = fo2; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca12 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo1; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca13 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo2; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+        int32_t lca23 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+
+        float rd01 = all_root_distance[node_base + lca01];
+        float rd02 = all_root_distance[node_base + lca02];
+        float rd03 = all_root_distance[node_base + lca03];
+        float rd12 = all_root_distance[node_base + lca12];
+        float rd13 = all_root_distance[node_base + lca13];
+        float rd23 = all_root_distance[node_base + lca23];
+
+        float r0 = rd01 + rd23;
+        float r1 = rd02 + rd13;
+        float r2 = rd03 + rd12;
+
+        int32_t old_topo;
+        if (poly_end > poly_start) {
+            bool found_poly = false;
+            for (int32_t j = poly_start; j < poly_end; j++) {
+                int32_t pn = polytomy_nodes[j];
+                if (pn == lca01 || pn == lca02 || pn == lca03 ||
+                    pn == lca12 || pn == lca13 || pn == lca23) {
+                    found_poly = true; break;
+                }
+            }
+            if (found_poly && r0 == r1 && r1 == r2) old_topo = 3;
+            else if (r0 >= r1 && r0 >= r2) old_topo = 0;
+            else if (r1 >= r0 && r1 >= r2) old_topo = 1;
+            else                           old_topo = 2;
+        } else {
+            if      (r0 >= r1 && r0 >= r2) old_topo = 0;
+            else if (r1 >= r0 && r1 >= r2) old_topo = 1;
+            else                           old_topo = 2;
+        }
+
+        // ── NEW assignment topology ──────────────────────────────────────
+        ln0 = new_global_to_local[base_g2l + t0];
+        ln1 = new_global_to_local[base_g2l + t1];
+        ln2 = new_global_to_local[base_g2l + t2];
+        ln3 = new_global_to_local[base_g2l + t3];
+        if (ln0 < 0 || ln1 < 0 || ln2 < 0 || ln3 < 0) continue;
+
+        fo0 = all_first_occ[node_base + ln0];
+        fo1 = all_first_occ[node_base + ln1];
+        fo2 = all_first_occ[node_base + ln2];
+        fo3 = all_first_occ[node_base + ln3];
+
+        l = fo0; r = fo1; if (l > r) { tmp = l; l = r; r = tmp; }
+        lca01 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo0; r = fo2; if (l > r) { tmp = l; l = r; r = tmp; }
+        lca02 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo0; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+        lca03 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo1; r = fo2; if (l > r) { tmp = l; l = r; r = tmp; }
+        lca12 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo1; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+        lca13 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+        l = fo2; r = fo3; if (l > r) { tmp = l; l = r; r = tmp; }
+        lca23 = rmq_msl(l, r, sp_base, sp_stride, all_sparse_table, all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour);
+
+        rd01 = all_root_distance[node_base + lca01];
+        rd02 = all_root_distance[node_base + lca02];
+        rd03 = all_root_distance[node_base + lca03];
+        rd12 = all_root_distance[node_base + lca12];
+        rd13 = all_root_distance[node_base + lca13];
+        rd23 = all_root_distance[node_base + lca23];
+
+        r0 = rd01 + rd23;
+        r1 = rd02 + rd13;
+        r2 = rd03 + rd12;
+
+        int32_t new_topo;
+        if (poly_end > poly_start) {
+            bool found_poly = false;
+            for (int32_t j = poly_start; j < poly_end; j++) {
+                int32_t pn = polytomy_nodes[j];
+                if (pn == lca01 || pn == lca02 || pn == lca03 ||
+                    pn == lca12 || pn == lca13 || pn == lca23) {
+                    found_poly = true; break;
+                }
+            }
+            if (found_poly && r0 == r1 && r1 == r2) new_topo = 3;
+            else if (r0 >= r1 && r0 >= r2) new_topo = 0;
+            else if (r1 >= r0 && r1 >= r2) new_topo = 1;
+            else                           new_topo = 2;
+        } else {
+            if      (r0 >= r1 && r0 >= r2) new_topo = 0;
+            else if (r1 >= r0 && r1 >= r2) new_topo = 1;
+            else                           new_topo = 2;
+        }
 
         if (old_topo != new_topo) {
             counts_out[qi_base_out + gi * 4 + old_topo] -= 1;
