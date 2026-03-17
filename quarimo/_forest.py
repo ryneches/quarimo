@@ -126,6 +126,7 @@ objects.  The _rmq_csr() static method is the primary candidate for
 arrays.
 """
 
+import functools
 import logging
 import multiprocessing
 import os
@@ -146,6 +147,7 @@ from quarimo._logging import (
     log_backend_availability,
     log_polytomy_statistics,
     log_zero_length_branch_warning,
+    log_multifurcation_resolved_warning,
     log_group_statistics,
     log_namespace_coverage,
     log_collection_statistics,
@@ -246,18 +248,19 @@ if backends.cuda:
 # ======================================================================== #
 
 
-def _parse_newick_worker(newick: str) -> "Tree":
+def _parse_newick_worker(newick: str, polytomy_strategy: str = "multifurcation") -> "Tree":
     """Subprocess worker: parse one NEWICK string into a Tree.
 
     Kept at module scope so it is picklable by :mod:`multiprocessing`.
     """
-    return Tree(newick)
+    return Tree(newick, polytomy_strategy=polytomy_strategy)
 
 
 def _load_tree_data(
     newick_input: Dict[str, List[str]],
     ordered_groups: List[str],
     n_threads: Optional[int] = None,
+    polytomy_strategy: str = "multifurcation",
 ) -> Tuple[List["Tree"], List[str]]:
     """Parse NEWICK strings into :class:`Tree` instances, optionally in parallel.
 
@@ -325,8 +328,9 @@ def _load_tree_data(
             _MP_CHAR_THRESHOLD,
         )
         ctx = multiprocessing.get_context(_MP_CONTEXT)
+        worker = functools.partial(_parse_newick_worker, polytomy_strategy=polytomy_strategy)
         with ProcessPoolExecutor(max_workers=effective_workers, mp_context=ctx) as pool:
-            trees: List["Tree"] = list(pool.map(_parse_newick_worker, flat_newicks))
+            trees: List["Tree"] = list(pool.map(worker, flat_newicks))
     else:
         logger.debug(
             "Parsing %d NEWICK strings sequentially (%d chars total, threshold=%d)",
@@ -334,7 +338,7 @@ def _load_tree_data(
             total_chars,
             _MP_CHAR_THRESHOLD,
         )
-        trees = [Tree(newick) for newick in flat_newicks]
+        trees = [Tree(newick, polytomy_strategy=polytomy_strategy) for newick in flat_newicks]
 
     return trees, flat_groups
 
@@ -428,7 +432,12 @@ class Forest:
     # Construction                                                         #
     # ================================================================== #
 
-    def __init__(self, newick_input, taxon_map: Optional[Dict[str, str]] = None) -> None:
+    def __init__(
+        self,
+        newick_input,
+        taxon_map: Optional[Dict[str, str]] = None,
+        polytomy_strategy: str = "multifurcation",
+    ) -> None:
         """Initialize collection from NEWICK strings with optional group labels.
 
         Parameters
@@ -443,7 +452,30 @@ class Forest:
             paralog group (MUL-tree support).  When *None* (default),
             duplicate leaf names across all trees raise ``ValueError`` as
             before.
+        polytomy_strategy : str
+            How to treat zero-length branches and multifurcations.  Passed
+            through to each :class:`Tree` constructor.
+
+            ``'multifurcation'`` (default)
+                Only true NEWICK multifurcations are treated as polytomies.
+                User-provided zero-length branches are treated as real branches
+                and trigger a warning.
+
+            ``'zero-length-branch'``
+                Zero-length internal branches in the NEWICK are treated as
+                polytomies.  True multifurcations are resolved silently with a
+                warning.
+
+            ``'both'``
+                Both forms are accepted as polytomies.  No warnings emitted.
         """
+        _VALID_STRATEGIES = {"multifurcation", "zero-length-branch", "both"}
+        if polytomy_strategy not in _VALID_STRATEGIES:
+            raise ValueError(
+                f"polytomy_strategy must be one of {sorted(_VALID_STRATEGIES)!r}, "
+                f"got {polytomy_strategy!r}"
+            )
+        self._polytomy_strategy = polytomy_strategy
 
         # Normalize all supported input forms to dict[str, list[str]].
         # Accepts: dict, list/tuple of NEWICK strings or paths, a single
@@ -463,7 +495,9 @@ class Forest:
             logger.info("  Single group: %s", self.unique_groups[0])
 
         # Parse NEWICK strings into Tree objects (parallel when dataset is large)
-        self._trees, self.group_labels = _load_tree_data(newick_input, self.unique_groups)
+        self._trees, self.group_labels = _load_tree_data(
+            newick_input, self.unique_groups, polytomy_strategy=polytomy_strategy
+        )
         self.n_trees = len(self._trees)
 
         # Apply taxon_map (paralog renaming) after parsing so the subprocess
@@ -489,6 +523,11 @@ class Forest:
         if n_zero_trees > 0:
             total_zero = sum(t.n_zero_length_branches for t in self._trees)
             log_zero_length_branch_warning(n_zero_trees, self.n_trees, total_zero)
+
+        if polytomy_strategy == "zero-length-branch":
+            n_multifurc_trees = sum(1 for t in self._trees if t.had_multifurcations)
+            if n_multifurc_trees > 0:
+                log_multifurcation_resolved_warning(n_multifurc_trees, self.n_trees)
 
         # Package all forest arrays into a single kernel-dispatch object
         self._build_kernel_data()

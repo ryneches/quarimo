@@ -88,13 +88,13 @@ def _(Counter, numpy, permutations):
         '''
         From two ensembles of trees, count the occurances of each possible topology of the
         given quartets. Returns a dictionary of three tuples of two integers :
-    
+
             {a,b,c,d} : ( (c0a,c0b), (c1a,c1b), (c2a,c2b) )
 
         where c0a, c1a and c2a are the counts of the three topologies in the first ensemble, and
         c0a, c1a and c2a are the counts of the corresponding topologies in second ensemble.
         '''
-        
+
         Q1 = [ Counter(q) for q in zip( *[ T.quartet_topologies_by_name( quartets ) for T in F1 ] ) ]
         Q2 = [ Counter(q) for q in zip( *[ T.quartet_topologies_by_name( quartets ) for T in F2 ] ) ]
 
@@ -104,11 +104,11 @@ def _(Counter, numpy, permutations):
             for t in topologies :
                 if not t in c1 : c1[t] = 0
                 if not t in c2 : c2[t] = 0
-    
+
             data[ q ] = sorted( [ (c1[key], c2[key] ) for key in topologies ],
                                 reverse=True,
                                 key=lambda x : max( [ x[0], x[1] ] ) )
-            
+
         return [ unpack_vectors(v) for v in data.values() ]
 
     return (quartet_frequencies,)
@@ -135,6 +135,13 @@ def _(Forest, N, Quartets, gene_a, gene_b, os, prefix, quartets):
     Q = Quartets( F, seed=quartets, count=N )
 
     print( F.quartet_topology( Q ) )
+    return F, Q
+
+
+@app.cell
+def _(F, Q):
+    result = F.quartet_topology( Q, steiner=True )
+    result.to_frame( form="long" )
     return
 
 

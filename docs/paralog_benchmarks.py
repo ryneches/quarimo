@@ -50,7 +50,6 @@ def _():
     import json
     import pathlib
     import re
-    from collections import defaultdict
 
     import marimo as mo
     import matplotlib.pyplot as plt
@@ -220,14 +219,16 @@ def _(mo):
     mo.md(r"""
     ## Performance matrix
 
-    Throughput (million quartet×tree pairs per second) for each cell of the
-    condition space.  Rows group the three background-discordance modes;
-    columns show paralog frequency (*npg* = number of genomes with > 1 copy).
-    The two bars within each cell distinguish **k = 2** (two copies per genome,
-    solid) from **k = 3** (three copies, hatched).
+    Throughput (million quartet×tree pairs per second) across the full
+    condition space.  **Rows** = architecture (machine); **columns** =
+    backend, ordered slowest → fastest (Python, CPU-parallel, CUDA, MLX).
+    Blank panels indicate backends not available on that machine.
 
-    One panel is drawn per *backend × machine* combination so that
-    cross-hardware comparisons are easy to read off.
+    Within each panel, the x-axis groups the three background-discordance
+    modes; bar colour encodes paralog frequency (*npg*); hatching
+    distinguishes **k = 2** (solid) from **k = 3** (hatched).  All panels
+    share the same Y-axis scale so throughput is directly comparable across
+    backends and architectures.
     """)
     return
 
@@ -235,65 +236,88 @@ def _(mo):
 @app.cell
 def _(bench_rows, mo, mticker, plt):
     def _():
-        # ── Helpers ───────────────────────────────────────────────────────────── #
+        # ── Constants ─────────────────────────────────────────────────────────── #
 
-        _DISC_ORDER = ["concordant", "mixed", "discordant"]
+        _DISC_ORDER  = ["concordant", "mixed", "discordant"]
         _DISC_LABELS = {"concordant": "Concordant", "mixed": "Mixed", "discordant": "Discordant"}
-        _NPG_ORDER = [1, 3, 5]
-        _CPG_ORDER = [2, 3]
-        _CPG_HATCH = {2: "", 3: "///"}
-        _CPG_LABEL = {2: "k = 2", 3: "k = 3"}
-        _NPG_COLORS = ["#4C72B0", "#DD8452", "#55A868"]   # blue / orange / green
+        _NPG_ORDER   = [1, 3, 5]
+        _CPG_ORDER   = [2, 3]
+        _CPG_HATCH   = {2: "", 3: "///"}
+        _NPG_COLORS  = ["#4C72B0", "#DD8452", "#55A868"]   # blue / orange / green
+
+        # Backends shown left→right (reverse priority: slowest first)
+        _BACKEND_ORDER  = ["python", "cpu-parallel", "cuda", "mlx"]
+        _BACKEND_LABELS = {
+            "python":       "Python",
+            "cpu-parallel": "CPU-parallel\n(Numba)",
+            "cuda":         "CUDA",
+            "mlx":          "MLX (Metal)",
+        }
 
         def _throughput(row):
-            """Mquartet-tree pairs per second, or None if timing unavailable."""
             if row["mean_s"] and row["mean_s"] > 0 and row["cells"]:
                 return row["cells"] / row["mean_s"] / 1e6
             return None
 
-        # ── Group rows by (machine, backend) ──────────────────────────────────── #
-
-        from collections import defaultdict as _dd
-        _panels = _dd(list)
-        for _r in bench_rows:
-            _key = (_r["machine"], _r["backend"])
-            _panels[_key].append(_r)
-
-        if not _panels:
-            _perf_fig = mo.callout(
+        if not bench_rows:
+            return mo.callout(
                 mo.md("No `TestBenchResolveParalogs` data available yet."),
                 kind="neutral",
             )
-        else:
-            _n_panels = len(_panels)
-            _fig, _axes = plt.subplots(
-                1, _n_panels,
-                figsize=(max(5 * _n_panels, 8), 5),
-                squeeze=False,
-            )
 
-            for _col, ((mach, backend), rows) in enumerate(sorted(_panels.items())):
-                ax = _axes[0, _col]
+        # ── Grid dimensions ───────────────────────────────────────────────────── #
 
-                # Index rows by (disc, npg, cpg)
-                _data = {}
-                for row in rows:
-                    _tp = _throughput(row)
-                    if _tp is not None:
-                        _data[(row["discordance"], row["npg"], row["cpg"])] = _tp
+        _machines = sorted({r["machine"] for r in bench_rows})
+        _backends = [b for b in _BACKEND_ORDER
+                     if any(r["backend"] == b for r in bench_rows)]
 
-                _n_disc = len(_DISC_ORDER)
-                _n_npg = len(_NPG_ORDER)
-                _n_cpg = len(_CPG_ORDER)
-                _group_width = 0.8
-                _bar_w = _group_width / (_n_npg * _n_cpg)
+        _n_rows = len(_machines)
+        _n_cols = len(_backends)
 
+        # Pre-index data: {(machine, backend): {(disc, npg, cpg): throughput}}
+        _cell_data = {}
+        for _r in bench_rows:
+            _tp = _throughput(_r)
+            if _tp is None:
+                continue
+            _key = (_r["machine"], _r["backend"])
+            _cell_data.setdefault(_key, {})[
+                (_r["discordance"], _r["npg"], _r["cpg"])
+            ] = _tp
+
+        # Global Y maximum for shared axis
+        _all_tp = [v for d in _cell_data.values() for v in d.values()]
+        _y_max = max(_all_tp) * 1.15 if _all_tp else 1.0
+
+        # ── Figure ────────────────────────────────────────────────────────────── #
+
+        _fig, _axes = plt.subplots(
+            _n_rows, _n_cols,
+            figsize=(4.5 * _n_cols, 3.8 * _n_rows),
+            sharey=True,
+            squeeze=False,
+        )
+
+        _n_npg   = len(_NPG_ORDER)
+        _n_cpg   = len(_CPG_ORDER)
+        _gw      = 0.8                          # total group width
+        _bar_w   = _gw / (_n_npg * _n_cpg)
+
+        for _ri, machine in enumerate(_machines):
+            for _ci, backend in enumerate(_backends):
+                ax = _axes[_ri, _ci]
+                _data = _cell_data.get((machine, backend), {})
+
+                if not _data:
+                    ax.set_visible(False)
+                    continue
+
+                # Draw bars
                 for _di, disc in enumerate(_DISC_ORDER):
-                    _x_center = _di
                     for _ni, npg in enumerate(_NPG_ORDER):
-                        for _ci, cpg in enumerate(_CPG_ORDER):
-                            _bar_idx = _ni * _n_cpg + _ci
-                            _x = _x_center - _group_width / 2 + _bar_w * (_bar_idx + 0.5)
+                        for _ki, cpg in enumerate(_CPG_ORDER):
+                            _bar_idx = _ni * _n_cpg + _ki
+                            _x = _di - _gw / 2 + _bar_w * (_bar_idx + 0.5)
                             _val = _data.get((disc, npg, cpg))
                             if _val is not None:
                                 ax.bar(
@@ -303,49 +327,81 @@ def _(bench_rows, mo, mticker, plt):
                                     hatch=_CPG_HATCH[cpg],
                                     edgecolor="white",
                                     linewidth=0.5,
-                                    label=f"npg={npg}, {_CPG_LABEL[cpg]}"
-                                    if _di == 0 else "_",
                                 )
 
-                ax.set_xticks(range(_n_disc))
-                ax.set_xticklabels([_DISC_LABELS[d] for d in _DISC_ORDER], fontsize=9)
-                ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
-                ax.set_ylabel("Throughput (M pairs / s)", fontsize=9)
-                ax.set_title(
-                    f"backend: {backend}\n{mach}",
-                    fontsize=9,
-                    loc="left",
+                ax.set_xticks(range(len(_DISC_ORDER)))
+                ax.set_xticklabels(
+                    [_DISC_LABELS[d] for d in _DISC_ORDER], fontsize=8
                 )
+                ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
+                ax.set_ylim(0, _y_max)
                 ax.tick_params(labelsize=8)
                 ax.spines[["top", "right"]].set_visible(False)
                 ax.grid(axis="y", linestyle="--", alpha=0.4)
 
-                if _col == 0:
-                    # Build a compact legend: npg colours + cpg hatches
-                    from matplotlib.patches import Patch
-                    _legend_handles = []
-                    for _ni, npg in enumerate(_NPG_ORDER):
-                        _legend_handles.append(
-                            Patch(facecolor=_NPG_COLORS[_ni], label=f"npg = {npg}")
-                        )
-                    _legend_handles.append(
-                        Patch(facecolor="grey", hatch="", label="k = 2 (solid)")
-                    )
-                    _legend_handles.append(
-                        Patch(facecolor="grey", hatch="///", label="k = 3 (hatched)")
-                    )
-                    ax.legend(
-                        handles=_legend_handles,
-                        fontsize=7,
-                        loc="upper right",
-                        framealpha=0.7,
-                        ncol=2,
+                # Y-axis tick labels — leftmost column only
+                if _ci > 0:
+                    ax.tick_params(labelleft=False)
+
+                # Row label (machine name) — leftmost column only
+                if _ci == 0:
+                    ax.set_ylabel(
+                        machine.replace("\n", "  "),
+                        fontsize=8, labelpad=6,
                     )
 
-            _fig.suptitle("resolve_paralogs() throughput — performance matrix", fontsize=11, y=1.02)
-            _fig.tight_layout()
-            _perf_fig = _fig
-        return _perf_fig
+        # Shared Y-axis label
+        _fig.supylabel("Throughput (M pairs / s)", fontsize=9, x=0.01)
+
+        # Legend: placed above the grid, centered
+        from matplotlib.patches import Patch as _Patch
+        _legend_handles = (
+            [_Patch(facecolor=_NPG_COLORS[i], label=f"npg = {npg}")
+             for i, npg in enumerate(_NPG_ORDER)]
+            + [_Patch(facecolor="grey", hatch="",    label="k = 2 (solid)"),
+               _Patch(facecolor="grey", hatch="///", label="k = 3 (hatched)")]
+        )
+        _fig.legend(
+            handles=_legend_handles,
+            fontsize=8,
+            ncol=len(_legend_handles),
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.0),
+            framealpha=0.8,
+        )
+
+        _fig.tight_layout()
+
+        # Column headers via fig.text at figure-level coordinates.
+        # Must come AFTER tight_layout() so that axis positions are finalised.
+        # Using ax.set_title() on the first visible row would cause labels to
+        # "fall down" whenever the top row has a blank cell for that column.
+        _y_top = max(
+            _axes[_ri, _ci].get_position().y1
+            for _ri in range(_n_rows)
+            for _ci in range(_n_cols)
+            if _axes[_ri, _ci].get_visible()
+        )
+        for _ci, backend in enumerate(_backends):
+            _xs = [
+                (_axes[_ri, _ci].get_position().x0
+                 + _axes[_ri, _ci].get_position().x1) / 2
+                for _ri in range(_n_rows)
+                if _axes[_ri, _ci].get_visible()
+            ]
+            if _xs:
+                _fig.text(
+                    _xs[0], _y_top + 0.01,
+                    _BACKEND_LABELS.get(backend, backend),
+                    ha="center", va="bottom",
+                    fontsize=10, fontweight="bold",
+                )
+
+        _fig.suptitle(
+            "resolve_paralogs() throughput — performance matrix",
+            fontsize=11, y=_y_top + 0.07,
+        )
+        return _fig
 
 
     _()

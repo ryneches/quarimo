@@ -83,7 +83,7 @@ class Tree:
     # Construction                                                         #
     # ================================================================== #
 
-    def __init__(self, newick_string: str) -> None:
+    def __init__(self, newick_string: str, polytomy_strategy: str = "multifurcation") -> None:
         """
         Parse *newick_string* and build all tree and LCA data structures.
 
@@ -91,8 +91,32 @@ class Tree:
         ----------
         newick_string : str
             A valid NEWICK-formatted tree string (trailing ';' optional).
+        polytomy_strategy : str
+            How to handle zero-length branches and multifurcations.
+
+            ``'multifurcation'`` (default)
+                Only true multifurcations in the NEWICK are treated as
+                polytomies.  User-provided zero-length branches are treated as
+                real branches; a warning is emitted by the enclosing
+                :class:`Forest`.
+
+            ``'zero-length-branch'``
+                Zero-length internal branches are treated as polytomies (added
+                to ``polytomy_node_ids``).  True multifurcations are still
+                resolved, but the enclosing :class:`Forest` will warn about
+                them.
+
+            ``'both'``
+                Both true multifurcations and zero-length internal branches are
+                accepted as polytomies.  No warnings are emitted for either.
         """
-        self._parse_newick(newick_string)
+        _VALID_STRATEGIES = {"multifurcation", "zero-length-branch", "both"}
+        if polytomy_strategy not in _VALID_STRATEGIES:
+            raise ValueError(
+                f"polytomy_strategy must be one of {sorted(_VALID_STRATEGIES)!r}, "
+                f"got {polytomy_strategy!r}"
+            )
+        self._parse_newick(newick_string, polytomy_strategy)
         self._build_lca_structures()
 
         # ---- Derived scalar properties (convenient for callers and  ---- #
@@ -454,7 +478,9 @@ class Tree:
     # Private instance methods                                             #
     # ================================================================== #
 
-    def _parse_newick(self, newick_string: str) -> None:
+    def _parse_newick(
+        self, newick_string: str, polytomy_strategy: str = "multifurcation"
+    ) -> None:
         """
         **Private.**  Parse *newick_string* and populate the tree-structure
         arrays as instance attributes.
@@ -501,7 +527,8 @@ class Tree:
 
         n_leaves = n_commas + 1
 
-        if n_parens < n_commas:
+        _had_multifurcations = n_parens < n_commas
+        if _had_multifurcations:
             s = Tree._resolve_multifurcations(s[:n_chars])
             n_chars = len(s)
             if n_chars > 0 and s[n_chars - 1] == ";":
@@ -663,15 +690,29 @@ class Tree:
             if np.isnan(distance[_i]):
                 polytomy_ids.append(_i)
                 distance[_i] = 0.0
-        self.polytomy_node_ids: list = polytomy_ids
 
-        # Detect user-provided zero-length branches (not our polytomy sentinels).
-        # Scan all non-root nodes; polytomy-inserted sentinels were just reset
-        # from NaN and are excluded via the polytomy set.
+        # Handle user-provided zero-length branches based on polytomy_strategy.
+        # Polytomy-inserted sentinels (just reset from NaN) are excluded via
+        # _poly_set so they are never double-counted.
         _poly_set = set(polytomy_ids)
-        self.n_zero_length_branches: int = sum(
-            1 for _i in range(n_nodes - 1) if distance[_i] == 0.0 and _i not in _poly_set
-        )
+        if polytomy_strategy == "multifurcation":
+            # Default: count as real branches; Forest will warn about them.
+            self.n_zero_length_branches: int = sum(
+                1 for _i in range(n_nodes - 1) if distance[_i] == 0.0 and _i not in _poly_set
+            )
+        else:
+            # 'zero-length-branch' or 'both': absorb user zero-length internal
+            # branches into polytomy_ids so the kernel treats them as polytomies.
+            # Only internal non-root nodes can appear as quartet LCAs, so only
+            # those need to be added; leaf zero-length branches are absorbed
+            # silently (they have no effect on LCA-based quartet topology).
+            for _i in range(n_leaves, n_nodes - 1):
+                if distance[_i] == 0.0 and _i not in _poly_set:
+                    polytomy_ids.append(_i)
+            self.n_zero_length_branches = 0
+
+        self.polytomy_node_ids: list = polytomy_ids
+        self.had_multifurcations: bool = _had_multifurcations
 
         self.names = names
         self.parent = parent

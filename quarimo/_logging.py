@@ -243,6 +243,34 @@ def log_zero_length_branch_warning(
     logger.warning("   collapse them into into explicit polytomies.")
 
 
+def log_multifurcation_resolved_warning(n_trees_with_multifurc: int, n_trees: int) -> None:
+    """
+    Warn that true multifurcations were detected and binarized under
+    ``polytomy_strategy='zero-length-branch'``.
+
+    Parameters
+    ----------
+    n_trees_with_multifurc : int
+        Number of trees that contained at least one true multifurcating node.
+    n_trees : int
+        Total number of trees in collection.
+    """
+    logger.warning(
+        "🚨 %d of %d trees contain true multifurcations in the NEWICK input.",
+        n_trees_with_multifurc,
+        n_trees,
+    )
+    logger.warning(
+        "   With polytomy_strategy='zero-length-branch', these have been binarized"
+    )
+    logger.warning(
+        "   with zero-length sentinel branches and will be treated as polytomies."
+    )
+    logger.warning(
+        "   Use polytomy_strategy='both' to suppress this warning."
+    )
+
+
 def log_group_statistics(
     n_groups: int, unique_groups: List[str], group_to_tree_indices: Dict[str, List[int]]
 ) -> None:
