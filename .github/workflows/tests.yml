@@ -76,6 +76,8 @@ jobs:
           files: coverage.xml
           flags: linux
           fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: ryneches/quarimo
 
   # ── macOS Apple Silicon (cpu-parallel + MLX Metal) ───────────────────────
   # macos-15 runs on M4 hardware; Metal GPU is accessible via Apple's
@@ -105,3 +107,5 @@ jobs:
           files: coverage.xml
           flags: macos-mlx
           fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: ryneches/quarimo
