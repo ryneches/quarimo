@@ -282,5 +282,135 @@ class TestQuartetIndex:
         assert np.array_equal(q.index_array(), q.index_array())
 
 
+class TestQuartetFromIndex:
+    """Tests for Quartets.quartet_from_index() and Quartets.quartet_names_from_index()."""
+
+    # ── quartet_from_index ────────────────────────────────────────────────
+
+    def test_scalar_known_values(self):
+        """Known (index → quartet) pairs from the quartet_index docstring."""
+        from quarimo._quartets import Quartets
+
+        assert Quartets.quartet_from_index(0) == (0, 1, 2, 3)
+        assert Quartets.quartet_from_index(1) == (0, 1, 2, 4)
+        assert Quartets.quartet_from_index(4) == (1, 2, 3, 4)
+
+    def test_scalar_round_trip(self):
+        """quartet_from_index inverts quartet_index for all 4-subsets of {0..9}."""
+        from itertools import combinations
+        from quarimo._quartets import Quartets
+
+        for abcd in combinations(range(10), 4):
+            idx = Quartets.quartet_index(*abcd)
+            assert Quartets.quartet_from_index(idx) == abcd
+
+    def test_scalar_returns_sorted_tuple(self):
+        """Result is always a 4-tuple with a < b < c < d."""
+        from quarimo._quartets import Quartets
+
+        for idx in range(50):
+            a, b, c, d = Quartets.quartet_from_index(idx)
+            assert a < b < c < d
+
+    def test_array_known_values(self):
+        """Array input returns correct (n, 4) ndarray."""
+        from quarimo._quartets import Quartets
+
+        result = Quartets.quartet_from_index([0, 1, 4])
+        expected = np.array([[0, 1, 2, 3], [0, 1, 2, 4], [1, 2, 3, 4]])
+        assert np.array_equal(result, expected)
+
+    def test_array_shape_and_dtype(self):
+        from quarimo._quartets import Quartets
+
+        result = Quartets.quartet_from_index(np.arange(20))
+        assert result.shape == (20, 4)
+        assert result.dtype == np.int64
+
+    def test_array_round_trip(self):
+        """Array path inverts quartet_index for a random sample of quartets."""
+        from quarimo._quartets import Quartets
+
+        rng = np.random.default_rng(0)
+        n_taxa = 40
+        abcd = np.array(
+            [sorted(rng.choice(n_taxa, 4, replace=False).tolist()) for _ in range(200)]
+        )
+        indices = np.array([Quartets.quartet_index(*row) for row in abcd])
+        recovered = Quartets.quartet_from_index(indices)
+        assert np.array_equal(recovered, abcd)
+
+    def test_large_index_scalar(self):
+        """Correctly unranks a quartet with large taxon IDs (d ~ 1000)."""
+        from quarimo._quartets import Quartets
+
+        abcd = (500, 700, 800, 999)
+        idx = Quartets.quartet_index(*abcd)
+        assert Quartets.quartet_from_index(idx) == abcd
+
+    def test_dense_bijection(self):
+        """Indices [0, C(n,4)) each unrank to a distinct valid quartet."""
+        from math import comb
+        from quarimo._quartets import Quartets
+
+        n = 8
+        n_quartets = comb(n, 4)
+        recovered = Quartets.quartet_from_index(np.arange(n_quartets))
+        # All a < b < c < d
+        assert np.all(recovered[:, 0] < recovered[:, 1])
+        assert np.all(recovered[:, 1] < recovered[:, 2])
+        assert np.all(recovered[:, 2] < recovered[:, 3])
+        # All d < n
+        assert np.all(recovered[:, 3] < n)
+        # No duplicate rows
+        rows_as_tuples = set(map(tuple, recovered))
+        assert len(rows_as_tuples) == n_quartets
+
+    # ── quartet_names_from_index ──────────────────────────────────────────
+
+    def test_names_scalar(self):
+        """Scalar index → 4-tuple of strings."""
+        from quarimo._quartets import Quartets
+
+        names = ["Aardvark", "Bear", "Cat", "Dog", "Eel"]
+        assert Quartets.quartet_names_from_index(0, names) == (
+            "Aardvark", "Bear", "Cat", "Dog"
+        )
+
+    def test_names_array(self):
+        """Array of indices → list of string tuples."""
+        from quarimo._quartets import Quartets
+
+        names = ["Aardvark", "Bear", "Cat", "Dog", "Eel"]
+        result = Quartets.quartet_names_from_index([0, 1], names)
+        assert result == [
+            ("Aardvark", "Bear", "Cat", "Dog"),
+            ("Aardvark", "Bear", "Cat", "Eel"),
+        ]
+
+    def test_names_agrees_with_from_index(self):
+        """quartet_names_from_index is consistent with quartet_from_index."""
+        from quarimo._quartets import Quartets
+
+        names = [f"T{i:03d}" for i in range(20)]
+        indices = [0, 1, 4, 100]
+        ids = Quartets.quartet_from_index(indices)
+        expected = [
+            (names[r[0]], names[r[1]], names[r[2]], names[r[3]]) for r in ids
+        ]
+        assert Quartets.quartet_names_from_index(indices, names) == expected
+
+    def test_names_with_forest(self):
+        """quartet_names_from_index integrates with Forest.global_names."""
+        from quarimo import Forest
+        from quarimo._quartets import Quartets
+
+        forest = Forest(["((A:1,B:1):1,(C:1,D:1):1);"])
+        q = Quartets.from_list(forest, [("A", "B", "C", "D")])
+        idx = q.index_array()[0]
+        result = Quartets.quartet_names_from_index(int(idx), forest.global_names)
+        assert set(result) == {"A", "B", "C", "D"}
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

@@ -501,6 +501,183 @@ class Quartets:
             + d * (d - 1) * (d - 2) * (d - 3) // 24
         )
 
+    @staticmethod
+    def quartet_from_index(
+        idx: Union[int, "np.ndarray"],
+    ) -> Union[Tuple[int, int, int, int], "np.ndarray"]:
+        """
+        Inverse of :meth:`quartet_index`: recover ``(a, b, c, d)`` from a
+        combinadic rank.
+
+        This is the combinatorial number system *unranking* operation.  Given
+        ``n = C(a,1) + C(b,2) + C(c,3) + C(d,4)`` the method recovers the
+        unique 4-element subset ``a < b < c < d`` that produced ``n``.
+
+        Parameters
+        ----------
+        idx : int or array-like of int
+            One combinadic index or an array of indices.  Accepts Python ints,
+            int64 arrays, and object-dtype arrays (for indices beyond the int64
+            range, e.g. large forests).
+
+        Returns
+        -------
+        tuple of 4 ints
+            ``(a, b, c, d)`` with ``a < b < c < d`` when *idx* is scalar.
+        np.ndarray, shape ``(n, 4)``, dtype int64
+            Each row is ``[a, b, c, d]`` when *idx* is array-like.
+
+        Examples
+        --------
+        >>> Quartets.quartet_from_index(0)
+        (0, 1, 2, 3)
+        >>> Quartets.quartet_from_index(1)
+        (0, 1, 2, 4)
+        >>> Quartets.quartet_from_index(4)
+        (1, 2, 3, 4)
+        >>> Quartets.quartet_from_index([0, 1, 4])
+        array([[0, 1, 2, 3],
+               [0, 1, 2, 4],
+               [1, 2, 3, 4]])
+        """
+        scalar = np.ndim(idx) == 0
+        if scalar:
+            return Quartets._unrank_one(int(idx))
+
+        arr = np.asarray(idx)
+        result = np.empty((len(arr), 4), dtype=np.int64)
+
+        # Float-based initial approximation + integer correction.
+        # The float estimate is accurate to within a handful of steps for any
+        # d that fits in float64 (d < ~10^15).  For larger values the while
+        # loops still converge; they just may run a few extra iterations.
+        n = arr.astype(np.int64)
+
+        # ── d: largest d >= 3 with C(d,4) <= n ─────────────────────────
+        d = np.maximum(3, np.floor((24.0 * n.astype(np.float64)) ** 0.25 + 1.0).astype(np.int64))
+        cd = d * (d - 1) * (d - 2) * (d - 3) // 24
+        while np.any(cd > n):
+            mask = cd > n
+            d[mask] -= 1
+            cd[mask] = d[mask] * (d[mask] - 1) * (d[mask] - 2) * (d[mask] - 3) // 24
+        cd_next = (d + 1) * d * (d - 1) * (d - 2) // 24
+        while np.any(cd_next <= n):
+            mask = cd_next <= n
+            d[mask] += 1
+            cd[mask] = d[mask] * (d[mask] - 1) * (d[mask] - 2) * (d[mask] - 3) // 24
+            cd_next[mask] = (d[mask] + 1) * d[mask] * (d[mask] - 1) * (d[mask] - 2) // 24
+        n = n - cd
+
+        # ── c: largest c >= 2 with C(c,3) <= n ─────────────────────────
+        c = np.maximum(2, np.floor((6.0 * n.astype(np.float64)) ** (1.0 / 3.0) + 0.5).astype(np.int64))
+        cc = c * (c - 1) * (c - 2) // 6
+        while np.any(cc > n):
+            mask = cc > n
+            c[mask] -= 1
+            cc[mask] = c[mask] * (c[mask] - 1) * (c[mask] - 2) // 6
+        cc_next = (c + 1) * c * (c - 1) // 6
+        while np.any(cc_next <= n):
+            mask = cc_next <= n
+            c[mask] += 1
+            cc[mask] = c[mask] * (c[mask] - 1) * (c[mask] - 2) // 6
+            cc_next[mask] = (c[mask] + 1) * c[mask] * (c[mask] - 1) // 6
+        n = n - cc
+
+        # ── b: largest b >= 1 with C(b,2) <= n ─────────────────────────
+        b = np.maximum(1, np.floor((2.0 * n.astype(np.float64)) ** 0.5 + 0.5).astype(np.int64))
+        cb = b * (b - 1) // 2
+        while np.any(cb > n):
+            mask = cb > n
+            b[mask] -= 1
+            cb[mask] = b[mask] * (b[mask] - 1) // 2
+        cb_next = (b + 1) * b // 2
+        while np.any(cb_next <= n):
+            mask = cb_next <= n
+            b[mask] += 1
+            cb[mask] = b[mask] * (b[mask] - 1) // 2
+            cb_next[mask] = (b[mask] + 1) * b[mask] // 2
+        n = n - cb
+
+        result[:, 0] = n        # a
+        result[:, 1] = b
+        result[:, 2] = c
+        result[:, 3] = d
+        return result
+
+    @staticmethod
+    def _unrank_one(n: int) -> Tuple[int, int, int, int]:
+        """Scalar combinadic unranking using integer arithmetic (exact)."""
+        # ── d ───────────────────────────────────────────────────────────
+        # Good float estimate, then integer correction (O(1) extra steps).
+        d = max(3, int((24 * n) ** 0.25 + 1.0))
+        while d * (d - 1) * (d - 2) * (d - 3) // 24 > n:
+            d -= 1
+        while (d + 1) * d * (d - 1) * (d - 2) // 24 <= n:
+            d += 1
+        n -= d * (d - 1) * (d - 2) * (d - 3) // 24
+
+        # ── c ───────────────────────────────────────────────────────────
+        c = max(2, int((6 * n) ** (1.0 / 3.0) + 0.5))
+        while c * (c - 1) * (c - 2) // 6 > n:
+            c -= 1
+        while (c + 1) * c * (c - 1) // 6 <= n:
+            c += 1
+        n -= c * (c - 1) * (c - 2) // 6
+
+        # ── b ───────────────────────────────────────────────────────────
+        b = max(1, int((2 * n) ** 0.5 + 0.5))
+        while b * (b - 1) // 2 > n:
+            b -= 1
+        while (b + 1) * b // 2 <= n:
+            b += 1
+        n -= b * (b - 1) // 2
+
+        return (n, b, c, d)  # a = remaining n
+
+    @staticmethod
+    def quartet_names_from_index(
+        idx: Union[int, "np.ndarray"],
+        global_names: List[str],
+    ) -> Union[Tuple[str, str, str, str], List[Tuple[str, str, str, str]]]:
+        """
+        Recover taxon names for one or more combinadic quartet indices.
+
+        Wraps :meth:`quartet_from_index` and maps global taxon IDs to their
+        string names using *global_names* (e.g. ``Forest.global_names``).
+
+        Parameters
+        ----------
+        idx : int or array-like of int
+            One combinadic index or an array of indices.
+        global_names : list of str
+            Mapping from global taxon ID to name (``global_names[gid]``).
+            Typically ``Forest.global_names``.
+
+        Returns
+        -------
+        tuple of 4 str
+            ``(name_a, name_b, name_c, name_d)`` when *idx* is scalar.
+        list of tuple of 4 str
+            One tuple per index when *idx* is array-like.
+
+        Examples
+        --------
+        >>> names = ["Aardvark", "Bear", "Cat", "Dog", "Eel"]
+        >>> Quartets.quartet_names_from_index(0, names)
+        ('Aardvark', 'Bear', 'Cat', 'Dog')
+        >>> Quartets.quartet_names_from_index([0, 1], names)
+        [('Aardvark', 'Bear', 'Cat', 'Dog'), ('Aardvark', 'Bear', 'Cat', 'Eel')]
+        """
+        scalar = np.ndim(idx) == 0
+        if scalar:
+            a, b, c, d = Quartets._unrank_one(int(idx))
+            return (global_names[a], global_names[b], global_names[c], global_names[d])
+        rows = Quartets.quartet_from_index(idx)
+        return [
+            (global_names[r[0]], global_names[r[1]], global_names[r[2]], global_names[r[3]])
+            for r in rows
+        ]
+
     def index_array(self) -> np.ndarray:
         """
         Combinadic indices for all quartets in this object.

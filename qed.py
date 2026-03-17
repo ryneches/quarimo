@@ -140,8 +140,14 @@ def _(Forest, N, Quartets, gene_a, gene_b, os, prefix, quartets):
 
 @app.cell
 def _(F, Q):
-    result = F.quartet_topology( Q, steiner=True )
-    result.to_frame( form="long" )
+    result = F.quartet_topology( Q )
+    result.to_frame( form="wide" )
+    return
+
+
+@app.cell
+def _(F):
+    F.global_names
     return
 
 
