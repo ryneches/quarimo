@@ -39,7 +39,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install (core only)
-        run: uv pip install --system -e ".[dev]"
+        run: uv venv && uv pip install -e ".[dev]"
 
       - name: Test
         run: uv run pytest tests/ -m "not large_scale" -v
@@ -62,7 +62,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install (dev + cpu-parallel)
-        run: uv pip install --system -e ".[dev,parallel]"
+        run: uv venv && uv pip install -e ".[dev,parallel]"
 
       - name: Test
         run: uv run pytest tests/ -m "not large_scale" -v --cov=. --cov-report=xml
@@ -98,7 +98,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install (dev + cpu-parallel + MLX)
-        run: uv pip install --system -e ".[dev,parallel,apple]"
+        run: uv venv && uv pip install -e ".[dev,parallel,apple]"
 
       - name: Test
         run: uv run pytest tests/ -m "not large_scale" -v --cov=. --cov-report=xml
