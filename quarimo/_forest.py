@@ -132,7 +132,7 @@ import multiprocessing
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
-from time import time
+from time import time, perf_counter
 from itertools import combinations
 from typing import Union, List, Tuple, Optional, Dict, Any
 import numpy as np
@@ -933,7 +933,11 @@ class Forest:
             elif resolved_backend == "mlx":
                 from quarimo._mlx_kernels import quartet_counts_mlx, quartet_steiner_mlx
 
+                _t_ql0 = perf_counter()
                 sorted_ids = np.array(list(quartets), dtype=np.int32)
+                _t_ql = perf_counter() - _t_ql0
+
+                _t_c0 = perf_counter()
                 if steiner:
                     counts_out, steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out = (
                         quartet_steiner_mlx(
@@ -944,9 +948,15 @@ class Forest:
                     counts_out = quartet_counts_mlx(
                         self._kernel_data, sorted_ids, n_quartets, self.n_groups
                     )
+                _t_c = perf_counter() - _t_c0
+                # On Apple Silicon UMA there is no host/device boundary; retrieve is ~0.
+                logger.info(
+                    "⏱ t_query_load=%.6f t_calc=%.6f t_retrieve=%.6f", _t_ql, _t_c, 0.0
+                )
 
             else:
                 # CPU/Python backends: materialise quartets to array
+                _t_ql0 = perf_counter()
                 sorted_ids = np.array(list(quartets), dtype=np.int32)
                 common_args = self._kernel_data.cpu_common_args(sorted_ids, n_quartets)
 
@@ -958,7 +968,9 @@ class Forest:
                     steiner_min_out = np.full(shape, np.inf, dtype=np.float64)
                     steiner_max_out = np.full(shape, -np.inf, dtype=np.float64)
                     steiner_sum_sq_out = np.zeros(shape, dtype=np.float64)
+                _t_ql = perf_counter() - _t_ql0
 
+                _t_c0 = perf_counter()
                 if resolved_backend == "cpu-parallel":
                     kernel_key = f"cpu-parallel-{'steiner' if steiner else 'counts'}"
                     if _kernel_first_call.get(kernel_key, False):
@@ -989,6 +1001,11 @@ class Forest:
                     Forest._quartet_kernel(
                         *common_args, counts_out, steiner_arg, smin_arg, smax_arg, ssq_arg,
                     )
+                _t_c = perf_counter() - _t_c0
+                # CPU: results are already in host numpy arrays; no retrieve step.
+                logger.info(
+                    "⏱ t_query_load=%.6f t_calc=%.6f t_retrieve=%.6f", _t_ql, _t_c, 0.0
+                )
 
         # ── Suture: assemble result ────────────────────────────────────────────
         # Compute variance from accumulated sum-of-squares.
@@ -1324,6 +1341,7 @@ class Forest:
             _kernel_first_call[kernel_key] = False
 
         # ── Seed array (tiny per-call upload) ─────────────────────────────
+        _t_ql0 = perf_counter()
         seed_array = np.array(quartets.seed, dtype=np.int32)
         d_seed_quartets = cuda.to_device(seed_array)
         logger.info(
@@ -1365,6 +1383,9 @@ class Forest:
             steiner_sum_sq_out = np.zeros(shape, dtype=np.float64)
 
         # ── Batched kernel dispatch ────────────────────────────────────────
+        _t_ql = perf_counter() - _t_ql0
+        _t_c_total = 0.0
+        _t_r_total = 0.0
         q_args = QuartetKernelArgs.from_quartets(quartets)
 
         for batch_idx in range(n_batches):
@@ -1435,40 +1456,46 @@ class Forest:
                     np.zeros((bc, self.n_groups, 4), dtype=np.float64)
                 )
                 logger.info("  🧮 launching Steiner kernel...")
-                time0 = time()
+                _t_c0b = perf_counter()
                 quartet_steiner_cuda_unified[blocks, tpb](
                     *batch_args, d_fkd.n_global_taxa, *d_forest_args,
                     d_counts_b, d_steiner_b, d_steiner_min_b, d_steiner_max_b,
                     d_steiner_sum_sq_b,
                 )
                 cuda.synchronize()
-                time1 = time()
+                _t_cb = perf_counter() - _t_c0b
+                _t_c_total += _t_cb
                 logger.info(
                     "  💾 computation completed in %.3f seconds, moving data...",
-                    time1 - time0,
+                    _t_cb,
                 )
                 # copy_to_host(ary=...) writes directly into the pre-allocated output
                 # slice — one GPU→CPU transfer, no temporary array, no extra CPU memcpy.
+                _t_r0b = perf_counter()
                 d_counts_b.copy_to_host(ary=counts_out[bs : bs + bc])
                 d_steiner_b.copy_to_host(ary=steiner_out[bs : bs + bc])
                 d_steiner_min_b.copy_to_host(ary=steiner_min_out[bs : bs + bc])
                 d_steiner_max_b.copy_to_host(ary=steiner_max_out[bs : bs + bc])
                 d_steiner_sum_sq_b.copy_to_host(ary=steiner_sum_sq_out[bs : bs + bc])
+                _t_r_total += perf_counter() - _t_r0b
                 del d_steiner_b, d_steiner_min_b, d_steiner_max_b, d_steiner_sum_sq_b
             else:
                 logger.info("  🧮 launching counts kernel...")
-                time0 = time()
+                _t_c0b = perf_counter()
                 quartet_counts_cuda_unified[blocks, tpb](
                     *batch_args, d_fkd.n_global_taxa, *d_forest_args,
                     d_counts_b,
                 )
                 cuda.synchronize()
-                time1 = time()
+                _t_cb = perf_counter() - _t_c0b
+                _t_c_total += _t_cb
                 logger.info(
                     "  💾 computation completed in %.3f seconds, moving data...",
-                    time1 - time0,
+                    _t_cb,
                 )
+                _t_r0b = perf_counter()
                 d_counts_b.copy_to_host(ary=counts_out[bs : bs + bc])
+                _t_r_total += perf_counter() - _t_r0b
 
             if batch_needs_rng:
                 del d_quartet_batch
@@ -1481,6 +1508,10 @@ class Forest:
                 + steiner_max_out.nbytes + steiner_sum_sq_out.nbytes
             )
         logger.info("  ✅ D→H total: %.2f MB", total_bytes / (1024**2))
+        logger.info(
+            "⏱ t_query_load=%.6f t_calc=%.6f t_retrieve=%.6f",
+            _t_ql, _t_c_total, _t_r_total,
+        )
 
         return counts_out, steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out
 
