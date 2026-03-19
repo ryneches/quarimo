@@ -124,16 +124,19 @@ def _(json, json_dir_input, mo, pathlib, pl, re):
                         fullname = b.get("fullname", b.get("name", ""))
                         if not _is_throughput_bench(fullname):
                             continue
-                        ei   = b.get("extra_info", {})
+                        ei    = b.get("extra_info", {})
+                        mi    = obj.get("machine_info", {})
                         stats = b.get("stats", {})
                         rows.append(
                             {
                                 "machine":           machine,
+                                "arch":              mi.get("machine", ""),
                                 "file":              fpath.name,
                                 "name":              b.get("name", ""),
                                 "fullname":          fullname,
                                 "sweep":             ei.get("sweep", ""),
                                 "backend":           ei.get("backend", "unknown"),
+                                "gpu_name":          ei.get("gpu_name"),
                                 "n_trees":           ei.get("n_trees"),
                                 "n_groups":          ei.get("n_groups"),
                                 "n_leaves":          ei.get("n_leaves"),
@@ -165,11 +168,13 @@ def _(json, json_dir_input, mo, pathlib, pl, re):
         df = pl.DataFrame(
             schema={
                 "machine": pl.Utf8,
+                "arch": pl.Utf8,
                 "file": pl.Utf8,
                 "name": pl.Utf8,
                 "fullname": pl.Utf8,
                 "sweep": pl.Utf8,
                 "backend": pl.Utf8,
+                "gpu_name": pl.Utf8,
                 "n_trees": pl.Int64,
                 "n_groups": pl.Int64,
                 "n_leaves": pl.Int64,
@@ -294,9 +299,17 @@ def _(df, machines, mo, pl, plt):
                     continue
                 xs = seg["n_groups"].to_list()
                 ys = seg["quartets_per_second"].to_list()
-                label = _BACKEND_LABELS.get(backend, backend)
-                if len(machines) > 1:
-                    label = f"{label}\n({machine.split('/')[0].strip()})"
+                hostname = machine.split("/")[0].strip()
+                arch_v = seg["arch"].drop_nulls().head(1).to_list()
+                arch = arch_v[0] if arch_v else ""
+                gpu_v = seg["gpu_name"].drop_nulls().head(1).to_list()
+                gpu = gpu_v[0] if gpu_v else None
+                hw_parts = [hostname]
+                if arch:
+                    hw_parts.append(arch)
+                if gpu:
+                    hw_parts.append(gpu)
+                label = f"{_BACKEND_LABELS.get(backend, backend)}\n({' / '.join(hw_parts)})"
                 ax.plot(
                     xs, ys,
                     color=_BACKEND_COLORS.get(backend, "grey"),
@@ -307,6 +320,10 @@ def _(df, machines, mo, pl, plt):
                     label=label,
                 )
 
+        n_lines = sum(
+            1 for m in machines for b in backends_present
+            if len(sub.filter((pl.col("machine") == m) & (pl.col("backend") == b))) > 0
+        )
         ax.set_xlabel("Number of tree groups", fontsize=10)
         ax.set_ylabel("Quartets / second  (calc phase)", fontsize=10)
         ax.set_title(
@@ -316,7 +333,13 @@ def _(df, machines, mo, pl, plt):
             fontsize=10,
         )
         ax.set_xticks(sorted(sub["n_groups"].unique().to_list()))
-        ax.legend(fontsize=8, framealpha=0.8)
+        ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.22),
+            ncol=max(1, min(n_lines, 3)),
+            fontsize=8,
+            framealpha=0.8,
+        )
         ax.spines[["top", "right"]].set_visible(False)
         ax.grid(axis="y", linestyle="--", alpha=0.4)
         ax.semilogy()
@@ -401,9 +424,17 @@ def _(df, machines, mo, pl, plt):
                     continue
                 xs = seg["n_trees"].to_list()
                 ys = seg["quartets_per_second"].to_list()
-                label = _BACKEND_LABELS.get(backend, backend)
-                if len(machines) > 1:
-                    label = f"{label}\n({machine.split('/')[0].strip()})"
+                hostname = machine.split("/")[0].strip()
+                arch_v = seg["arch"].drop_nulls().head(1).to_list()
+                arch = arch_v[0] if arch_v else ""
+                gpu_v = seg["gpu_name"].drop_nulls().head(1).to_list()
+                gpu = gpu_v[0] if gpu_v else None
+                hw_parts = [hostname]
+                if arch:
+                    hw_parts.append(arch)
+                if gpu:
+                    hw_parts.append(gpu)
+                label = f"{_BACKEND_LABELS.get(backend, backend)}\n({' / '.join(hw_parts)})"
                 ax.plot(
                     xs, ys,
                     color=_BACKEND_COLORS.get(backend, "grey"),
@@ -414,6 +445,10 @@ def _(df, machines, mo, pl, plt):
                     label=label,
                 )
 
+        n_lines = sum(
+            1 for m in machines for b in backends_present
+            if len(sub.filter((pl.col("machine") == m) & (pl.col("backend") == b))) > 0
+        )
         ax.set_xlabel("Total number of trees", fontsize=10)
         ax.set_ylabel("Quartets / second  (calc phase)", fontsize=10)
         ax.set_title(
@@ -424,7 +459,13 @@ def _(df, machines, mo, pl, plt):
         )
         ax.set_xticks(sorted(sub["n_trees"].unique().to_list()))
         ax.tick_params(axis="x", rotation=45)
-        ax.legend(fontsize=8, framealpha=0.8)
+        ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.3),
+            ncol=max(1, min(n_lines, 3)),
+            fontsize=8,
+            framealpha=0.8,
+        )
         ax.spines[["top", "right"]].set_visible(False)
         ax.grid(axis="y", linestyle="--", alpha=0.4)
         ax.semilogy()

@@ -120,6 +120,26 @@ def _balanced_newick(
     return _build(leaf_names) + ";"
 
 
+def _detect_gpu(backend: str) -> str | None:
+    """Return a short GPU name string for the active backend, or None."""
+    if backend == "cuda":
+        try:
+            from numba import cuda as numba_cuda
+            device = numba_cuda.get_current_device()
+            name = device.name
+            return name.decode() if isinstance(name, bytes) else str(name)
+        except Exception:
+            return None
+    if backend == "mlx":
+        try:
+            import mlx.core as mx
+            info = mx.metal.device_info()
+            return info.get("device_name") or "Apple Metal"
+        except Exception:
+            return "Apple Metal"
+    return None
+
+
 def _make_grouped_forest(
     n_total_trees: int,
     n_groups: int,
@@ -254,6 +274,7 @@ def _run_trial(
         {
             "sweep":               sweep,
             "backend":             backend,
+            "gpu_name":            _detect_gpu(backend),
             "n_trees":             n_total_trees,
             "n_groups":            n_groups,
             "n_leaves":            N_LEAVES,
