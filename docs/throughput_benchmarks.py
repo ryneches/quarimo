@@ -11,29 +11,40 @@ def _(mo):
 
     This notebook aggregates `pytest-benchmark` JSON output files produced by
     `tests/bench_throughput.py` and visualises how quartet topology throughput
-    (quartets per second, **calculation phase only**) scales across two axes:
-
-    1. **Fixed forest size** — 1 000 trees total, 1–10 tree groups.
-       Shows how per-group accumulation overhead grows with group count.
-
-    2. **Fixed group count** — 5 groups, 100–1 000 total trees.
-       Shows how the kernel scales with forest depth.
-
-    Each plot draws one line per backend.  All timing values come from the
-    `⏱ t_calc` phase logged by `quartet_topology()` — not the total wall time —
+    (quartets per second, **calculation phase only**) scales across three axes.
+    All timing comes from the `⏱ t_calc` phase logged by `quartet_topology()`,
     so device-load and host-to-device copy overhead are excluded.
+
+    | Plot | Sweep | Fixed | Varying | What it measures |
+    |---|---|---|---|---|
+    | 1 | `fixed_forest` | total trees | group count | per-group accumulation overhead |
+    | 2 | `fixed_groups` | group count | total trees | kernel throughput vs. forest depth |
+    | 3 | `fixed_trees`  | tree count  | leaves/tree | O(1) LCA hypothesis; cache-spill threshold |
+
+    Each plot draws one line per (backend, machine) combination.  Color encodes
+    backend; line style encodes machine.  Legend entries include hostname, CPU
+    architecture, and GPU name where applicable.
 
     ## Generating benchmark data
 
     ```bash
-    # Run from the project root (substitute a short machine label).
-    pytest tests/bench_throughput.py -m "not large_scale" \
+    # Run all three sweeps from the project root:
+    pytest tests/bench_throughput.py \
+        --benchmark-json=docs/benchmark_results/throughput_$(hostname)_$(date +%Y%m%d).json
+
+    # Or run a single sweep:
+    pytest tests/bench_throughput.py::TestThroughputFixedForest \
+        --benchmark-json=docs/benchmark_results/throughput_$(hostname)_$(date +%Y%m%d).json
+    pytest tests/bench_throughput.py::TestThroughputFixedGroups \
+        --benchmark-json=docs/benchmark_results/throughput_$(hostname)_$(date +%Y%m%d).json
+    pytest tests/bench_throughput.py::TestThroughputFixedTrees \
         --benchmark-json=docs/benchmark_results/throughput_$(hostname)_$(date +%Y%m%d).json
     ```
 
     Drop any number of `.json` files into `docs/benchmark_results/` and this
     notebook aggregates them automatically.  Results from different machines
-    (different backends available) appear as separate line styles.
+    appear as separate line styles so hardware comparisons are readable on a
+    single plot.
     """)
     return
 
@@ -230,14 +241,15 @@ def _(mo):
     mo.md(r"""
     ## Plot 1 — Fixed forest size, varying group count
 
-    Each line shows how **quartets per second** (calculation phase only,
-    `steiner=False`) changes as the 1 000-tree forest is split into 1–10
-    groups.  Separate lines per backend; separate line styles per machine.
+    Total tree count is fixed; group count varies.  Each line shows
+    **quartets per second** (`steiner=False`, calc phase) as one large forest
+    is progressively sub-divided into more groups.
 
-    Expected behaviour: throughput should be roughly constant (the total
-    work — `n_quartets × n_trees` — is fixed), with a slight overhead
-    increase for larger group counts due to the extra per-group accumulation
-    in the kernel's inner loop.
+    Because the total work (`n_quartets × n_trees`) is constant across the
+    x-axis, a flat line means the kernel has zero per-group overhead.  Any
+    throughput decline with increasing group count reflects accumulation
+    overhead in the kernel's per-group inner loop.  The magnitude of this
+    decline is expected to differ between GPU and CPU backends.
     """)
     return
 
@@ -355,14 +367,15 @@ def _(mo):
     mo.md(r"""
     ## Plot 2 — Fixed group count, varying forest size
 
-    Each line shows how **quartets per second** (calculation phase only,
-    `steiner=False`) grows as the total number of trees increases, with the
-    group count held fixed at 5.
+    Group count is fixed; total tree count varies.  Each line shows
+    **quartets per second** (`steiner=False`, calc phase) as the forest grows
+    deeper (more trees per group), with the group structure held constant.
 
-    Expected behaviour: CPU-parallel throughput should increase roughly
-    linearly until the available core count is saturated.  GPU backends
-    should show steeper initial growth followed by a plateau at peak
-    device occupancy.
+    All sweep points start above the GPU L2-cache escape threshold so
+    throughput reflects HBM bandwidth rather than cache capacity.
+    CPU-parallel throughput should grow roughly linearly until the available
+    core count is saturated.  GPU backends should show steeper initial growth
+    followed by a plateau at peak device occupancy.
     """)
     return
 
@@ -473,6 +486,137 @@ def _(df, machines, mo, pl, plt):
         return fig
 
     _plot_fixed_groups()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Plot 3 — Fixed tree count, varying leaf count
+
+    Tree count is fixed; leaf count per tree varies.  Each line shows
+    **quartets per second** (`steiner=False`, calc phase) as trees grow
+    larger, with the total number of trees held constant.
+
+    The O(1) LCA algorithm (sparse table RMQ) predicts **flat throughput**
+    across this sweep — each quartet topology query requires exactly four
+    sparse-table lookups regardless of n_leaves.  A throughput drop at larger
+    leaf counts indicates that the sparse table has grown large enough to spill
+    out of the GPU's L2 cache, making the kernel memory-latency-bound rather
+    than compute-bound.  Per-tree sparse table size is O(n log n) in n_leaves,
+    so cache spill is expected well before the largest sizes in this sweep.
+    Note that forest construction time (dominated by sparse-table build) grows
+    with leaf count but is excluded from all timing via `t_device_load`.
+    """)
+    return
+
+
+@app.cell
+def _(df, machines, mo, pl, plt):
+    def _plot_fixed_trees():
+        _BACKEND_ORDER = ["python", "cpu-parallel", "cuda", "mlx"]
+        _BACKEND_COLORS = {
+            "python":       "#4C72B0",
+            "cpu-parallel": "#DD8452",
+            "cuda":         "#55A868",
+            "mlx":          "#C44E52",
+        }
+        _BACKEND_LABELS = {
+            "python":       "Python",
+            "cpu-parallel": "CPU-parallel (Numba)",
+            "cuda":         "CUDA",
+            "mlx":          "MLX (Metal)",
+        }
+        _MACHINE_STYLES = ["solid", "dashed", "dotted", "dashdot"]
+
+        if len(df) == 0:
+            return mo.callout(mo.md("No benchmark data available."), kind="neutral")
+
+        sub = (
+            df.filter(
+                (pl.col("sweep") == "fixed_trees")
+                & (pl.col("steiner") == False)  # noqa: E712
+                & pl.col("quartets_per_second").is_not_null()
+            )
+            .sort("n_leaves")
+        )
+
+        if len(sub) == 0:
+            return mo.callout(
+                mo.md(
+                    "No `fixed_trees` / `steiner=False` rows found.  "
+                    "Run `TestThroughputFixedTrees` and save the JSON."
+                ),
+                kind="neutral",
+            )
+
+        backends_present = [b for b in _BACKEND_ORDER if b in sub["backend"].to_list()]
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        for mi, machine in enumerate(machines):
+            ls = _MACHINE_STYLES[mi % len(_MACHINE_STYLES)]
+            for backend in backends_present:
+                seg = (
+                    sub.filter(
+                        (pl.col("machine") == machine)
+                        & (pl.col("backend") == backend)
+                    )
+                    .sort("n_leaves")
+                )
+                if len(seg) == 0:
+                    continue
+                xs = seg["n_leaves"].to_list()
+                ys = seg["quartets_per_second"].to_list()
+                hostname = machine.split("/")[0].strip()
+                arch_v = seg["arch"].drop_nulls().head(1).to_list()
+                arch = arch_v[0] if arch_v else ""
+                gpu_v = seg["gpu_name"].drop_nulls().head(1).to_list()
+                gpu = gpu_v[0] if gpu_v else None
+                hw_parts = [hostname]
+                if arch:
+                    hw_parts.append(arch)
+                if gpu:
+                    hw_parts.append(gpu)
+                label = f"{_BACKEND_LABELS.get(backend, backend)}\n({' / '.join(hw_parts)})"
+                ax.plot(
+                    xs, ys,
+                    color=_BACKEND_COLORS.get(backend, "grey"),
+                    linestyle=ls,
+                    marker="o",
+                    markersize=5,
+                    linewidth=1.8,
+                    label=label,
+                )
+
+        n_lines = sum(
+            1 for m in machines for b in backends_present
+            if len(sub.filter((pl.col("machine") == m) & (pl.col("backend") == b))) > 0
+        )
+        n_trees_val = df.filter(pl.col("sweep") == "fixed_trees")["n_trees"].max()
+        ax.set_xlabel("Leaves per tree", fontsize=10)
+        ax.set_ylabel("Quartets / second  (calc phase)", fontsize=10)
+        ax.set_title(
+            f"Throughput vs. leaf count  "
+            f"(fixed trees: {n_trees_val}, steiner=False)",
+            fontsize=10,
+        )
+        ax.set_xticks(sorted(sub["n_leaves"].unique().to_list()))
+        ax.tick_params(axis="x", rotation=45)
+        ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.3),
+            ncol=max(1, min(n_lines, 3)),
+            fontsize=8,
+            framealpha=0.8,
+        )
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="y", linestyle="--", alpha=0.4)
+        ax.semilogy()
+        fig.tight_layout()
+        return fig
+
+    _plot_fixed_trees()
     return
 
 

@@ -2,23 +2,35 @@
 tests/bench_throughput.py
 =========================
 Quartet topology throughput benchmarks across a matrix of forest sizes,
-group counts, Steiner modes, and backends.
+group counts, leaf counts, Steiner modes, and backends.
 
-Two scaling sweeps
-------------------
-fixed_forest
+Three scaling sweeps
+--------------------
+fixed_forest  (TestThroughputFixedForest)
     Total forest size is held constant (FIXED_FOREST_N_TREES trees).
-    The number of tree groups varies from 1 to len(FIXED_FOREST_N_GROUPS).
+    The number of tree groups varies across FIXED_FOREST_N_GROUPS.
     Each group receives floor(n_trees / n_groups) trees (last group takes
-    the remainder).  Measures how per-group accumulation overhead scales.
+    the remainder).  Measures how per-group accumulation overhead scales
+    relative to raw kernel throughput as group count increases.
 
-fixed_groups
+fixed_groups  (TestThroughputFixedGroups)
     Group count is held constant (FIXED_GROUPS_N_GROUPS groups).
     Total forest size varies across FIXED_GROUPS_N_TREES.
-    Measures how kernel throughput scales with forest depth.
+    All sweeps start above the GPU L2-cache escape threshold so every
+    point is bandwidth-bound rather than cache-bound.  Measures how
+    kernel throughput scales with forest depth (trees per group).
 
-Four timing phases
-------------------
+fixed_trees  (TestThroughputFixedTrees)
+    Tree count is held constant (FIXED_TREES_N_TREES trees, one group).
+    Leaf count per tree varies across FIXED_TREES_N_LEAVES.
+    Tests the O(1) LCA hypothesis: calculation-phase throughput should be
+    independent of tree size because each quartet query requires exactly
+    four sparse-table lookups regardless of n_leaves.  A throughput drop
+    at larger leaf counts indicates sparse-table cache spill (O(n log n)
+    per tree).
+
+Timing phases
+-------------
 Every call to quartet_topology() emits a structured INFO log line:
 
     ⏱ t_query_load=<s> t_calc=<s> t_retrieve=<s>
@@ -26,23 +38,36 @@ Every call to quartet_topology() emits a structured INFO log line:
 These are captured by a _PhaseCapture log handler attached for the
 duration of the benchmark loop.  The median across BENCH_ROUNDS rounds
 is stored in benchmark.extra_info alongside t_device_load (measured
-directly around Forest construction).
+directly around Forest construction, which is excluded from all plots).
 
 Primary metric: quartets_per_second = n_quartets / t_calc
 
 JSON output
 -----------
 Run with --benchmark-json to save results for the throughput_benchmarks.py
-Marimo notebook:
+Marimo notebook.  Run each sweep separately or all at once:
 
-    pytest tests/bench_throughput.py -m "not large_scale" \\
+    # All three sweeps
+    pytest tests/bench_throughput.py \\
+        --benchmark-json=docs/benchmark_results/throughput_$(hostname)_$(date +%Y%m%d).json
+
+    # Individual sweeps
+    pytest tests/bench_throughput.py::TestThroughputFixedForest \\
+        --benchmark-json=docs/benchmark_results/throughput_$(hostname)_$(date +%Y%m%d).json
+    pytest tests/bench_throughput.py::TestThroughputFixedGroups \\
+        --benchmark-json=docs/benchmark_results/throughput_$(hostname)_$(date +%Y%m%d).json
+    pytest tests/bench_throughput.py::TestThroughputFixedTrees \\
         --benchmark-json=docs/benchmark_results/throughput_$(hostname)_$(date +%Y%m%d).json
 
 Tuning
 ------
-Adjust N_QUARTETS (per backend), FIXED_FOREST_N_GROUPS, and
-FIXED_GROUPS_N_TREES at the top of this file.  The defaults are small
-for fast plot development; replace with realistic values once satisfied.
+Per-backend quartet counts (N_QUARTETS) are sized for ~2 s of kernel
+time per trial at the maximum forest size, giving stable estimates without
+long runs.  Reduce cuda/mlx if individual trials exceed ~5 s; reduce
+python if the fixed_trees sweep at high leaf counts is too slow.
+
+Adjust FIXED_FOREST_N_GROUPS, FIXED_GROUPS_N_TREES, and FIXED_TREES_N_LEAVES
+to change the sweep ranges.
 """
 
 from __future__ import annotations
@@ -84,6 +109,18 @@ FIXED_GROUPS_N_GROUPS: int       = 5
 FIXED_GROUPS_N_TREES:  list[int] = [
     2_000, 4_000, 6_000, 8_000, 10_000,
     12_000, 14_000, 16_000, 18_000, 20_000,
+]
+
+# ── Scaling axis 3: fixed tree count, varying number of leaves ───────────
+# Tests the O(1) LCA hypothesis: throughput should be flat across leaf counts
+# because each quartet query requires exactly 4 sparse-table lookups.
+# A drop at large leaf counts indicates sparse-table cache spill (O(n log n)
+# per tree).  Forest construction (excluded from timing) is slow at high
+# leaf counts; only the calculation phase is measured.
+FIXED_TREES_N_TREES:  int       = 1_000
+FIXED_TREES_N_LEAVES: list[int] = [
+    1_000, 2_000, 3_000, 4_000, 5_000,
+    6_000, 7_000, 8_000, 9_000, 10_000,
 ]
 
 # ── Per-backend quartet counts ────────────────────────────────────────────
@@ -232,7 +269,8 @@ def _run_trial(
     n_groups: int,
     backend: str,
     steiner: bool,
-    sweep: str,         # 'fixed_forest' or 'fixed_groups'
+    sweep: str,         # 'fixed_forest', 'fixed_groups', or 'fixed_trees'
+    n_leaves: int = N_LEAVES,
 ) -> None:
     """
     Build a forest, warm up the kernel, then run BENCH_ROUNDS timed calls
@@ -245,7 +283,7 @@ def _run_trial(
 
     # ── Phase 1: device load (Forest construction + optional GPU upload) ──
     t0 = perf_counter()
-    forest = _make_grouped_forest(n_total_trees, n_groups)
+    forest = _make_grouped_forest(n_total_trees, n_groups, n_leaves=n_leaves)
     t_device_load = perf_counter() - t0
 
     q = Quartets.random(forest, count=n_quartets, seed=QUARTET_SEED)
@@ -286,7 +324,7 @@ def _run_trial(
             "gpu_name":            _detect_gpu(backend),
             "n_trees":             n_total_trees,
             "n_groups":            n_groups,
-            "n_leaves":            N_LEAVES,
+            "n_leaves":            n_leaves,
             "n_quartets":          n_quartets,
             "steiner":             steiner,
             "t_device_load":       t_device_load,
@@ -305,14 +343,18 @@ def _run_trial(
 
 class TestThroughputFixedForest:
     """
-    Fixed total forest size (FIXED_FOREST_N_TREES trees), varying n_groups.
+    Sweep 1: fixed total forest size, varying number of tree groups.
 
-    Sweeps n_groups ∈ FIXED_FOREST_N_GROUPS while holding the total tree
-    count constant.  Measures how per-group accumulation overhead grows
-    relative to computation throughput as the group count increases.
+    Holds the total tree count constant at FIXED_FOREST_N_TREES and sweeps
+    n_groups across FIXED_FOREST_N_GROUPS.  Each group receives
+    floor(n_trees / n_groups) trees; any remainder goes to the first groups.
 
-    Steiner=False and Steiner=True are both tested so the notebook can
-    show overhead from Steiner statistics accumulation.
+    The total kernel work (n_quartets × n_trees) is fixed, so throughput
+    should be roughly constant.  Any decline with increasing group count
+    reflects per-group accumulation overhead in the kernel's inner loop.
+
+    Both steiner=False and steiner=True are tested; comparing them isolates
+    the cost of accumulating Steiner-length statistics alongside topology counts.
     """
 
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
@@ -374,12 +416,18 @@ class TestThroughputFixedForest:
 
 class TestThroughputFixedGroups:
     """
-    Fixed number of groups (FIXED_GROUPS_N_GROUPS), varying total forest size.
+    Sweep 2: fixed group count, varying total forest size.
 
-    Sweeps n_trees ∈ FIXED_GROUPS_N_TREES with FIXED_GROUPS_N_GROUPS groups.
-    Measures how kernel throughput scales with forest depth (more trees per
-    group).  GPU backends should show near-linear throughput growth up to
-    occupancy saturation; CPU backends may saturate at available core count.
+    Holds the group count constant at FIXED_GROUPS_N_GROUPS and sweeps
+    n_trees across FIXED_GROUPS_N_TREES.  All sizes start above the GPU
+    L2-cache escape threshold (~7 200 trees at 20 leaves/tree ≈ 26 MB for
+    A100), so every data point is bandwidth-bound rather than cache-bound.
+
+    Measures how kernel throughput scales with forest depth (trees per group).
+    GPU backends should show near-linear growth up to peak device occupancy;
+    CPU-parallel backends may saturate at available core count.
+
+    Both steiner=False and steiner=True are tested.
     """
 
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
@@ -431,4 +479,80 @@ class TestThroughputFixedGroups:
             backend="mlx",
             steiner=steiner,
             sweep="fixed_groups",
+        )
+
+
+# ======================================================================== #
+# 3. Fixed tree count, varying number of leaves                            #
+# ======================================================================== #
+
+
+class TestThroughputFixedTrees:
+    """
+    Fixed tree count (FIXED_TREES_N_TREES trees), varying leaf count.
+
+    Sweeps n_leaves ∈ FIXED_TREES_N_LEAVES with a single group.
+    Tests whether calculation-phase throughput is independent of tree size,
+    as predicted by the O(1) LCA algorithm.  Cache effects will appear as a
+    throughput drop at larger leaf counts where the sparse table outgrows the
+    GPU's L2 cache.  Per-tree sparse table size grows as O(n log n) in the
+    number of leaves, so cache spill happens well before the tree count limit.
+
+    Note: forest construction is slow at large leaf counts (excluded from
+    timing via t_device_load), but the calculation phase should remain flat.
+    """
+
+    @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
+    @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
+    def test_python(self, benchmark, n_leaves, steiner):
+        _run_trial(
+            benchmark,
+            n_total_trees=FIXED_TREES_N_TREES,
+            n_groups=1,
+            backend="python",
+            steiner=steiner,
+            sweep="fixed_trees",
+            n_leaves=n_leaves,
+        )
+
+    @pytest.mark.requires_cpu_parallel
+    @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
+    @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
+    def test_cpu_parallel(self, benchmark, n_leaves, steiner):
+        _run_trial(
+            benchmark,
+            n_total_trees=FIXED_TREES_N_TREES,
+            n_groups=1,
+            backend="cpu-parallel",
+            steiner=steiner,
+            sweep="fixed_trees",
+            n_leaves=n_leaves,
+        )
+
+    @pytest.mark.requires_cuda
+    @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
+    @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
+    def test_cuda(self, benchmark, n_leaves, steiner):
+        _run_trial(
+            benchmark,
+            n_total_trees=FIXED_TREES_N_TREES,
+            n_groups=1,
+            backend="cuda",
+            steiner=steiner,
+            sweep="fixed_trees",
+            n_leaves=n_leaves,
+        )
+
+    @pytest.mark.requires_mlx
+    @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
+    @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
+    def test_mlx(self, benchmark, n_leaves, steiner):
+        _run_trial(
+            benchmark,
+            n_total_trees=FIXED_TREES_N_TREES,
+            n_groups=1,
+            backend="mlx",
+            steiner=steiner,
+            sweep="fixed_trees",
+            n_leaves=n_leaves,
         )
