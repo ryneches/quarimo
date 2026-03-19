@@ -18,6 +18,9 @@ def _():
     import os
     import random
     import numpy
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
     datasets = [ { 'gene_a' : 'GVOG04832', 'gene_b' : 'GVOG06851' },
                  { 'gene_a' : 'GVOG06814', 'gene_b' : 'GVOG00888' },
