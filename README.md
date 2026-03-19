@@ -495,7 +495,7 @@ If you use this software in your research, please cite:
 
 ## License
 
-MIT License — see LICENSE file for details.
+BSD-3 License — see LICENSE file for details.
 
 ## Contributing
 
