@@ -49,7 +49,7 @@ def _():
     import matplotlib.ticker as mticker
     import polars as pl
 
-    return json, mo, mticker, pathlib, pl, plt, re
+    return json, mo, pathlib, pl, plt, re
 
 
 @app.cell
@@ -238,7 +238,7 @@ def _(mo):
 
 
 @app.cell
-def _(df, machines, mo, plt):
+def _(df, machines, mo, pl, plt):
     def _plot_fixed_forest():
         _BACKEND_ORDER = ["python", "cpu-parallel", "cuda", "mlx"]
         _BACKEND_COLORS = {
@@ -319,6 +319,7 @@ def _(df, machines, mo, plt):
         ax.legend(fontsize=8, framealpha=0.8)
         ax.spines[["top", "right"]].set_visible(False)
         ax.grid(axis="y", linestyle="--", alpha=0.4)
+        ax.semilogy()
         fig.tight_layout()
         return fig
 
@@ -344,7 +345,7 @@ def _(mo):
 
 
 @app.cell
-def _(df, machines, mo, plt):
+def _(df, machines, mo, pl, plt):
     def _plot_fixed_groups():
         _BACKEND_ORDER = ["python", "cpu-parallel", "cuda", "mlx"]
         _BACKEND_COLORS = {
@@ -426,6 +427,7 @@ def _(df, machines, mo, plt):
         ax.legend(fontsize=8, framealpha=0.8)
         ax.spines[["top", "right"]].set_visible(False)
         ax.grid(axis="y", linestyle="--", alpha=0.4)
+        ax.semilogy()
         fig.tight_layout()
         return fig
 
