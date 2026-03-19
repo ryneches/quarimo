@@ -27,7 +27,7 @@ def _(mo):
 
     ```bash
     # Run from the project root (substitute a short machine label).
-    pytest tests/bench_throughput.py -m "not large_scale" \\
+    pytest tests/bench_throughput.py -m "not large_scale" \
         --benchmark-json=docs/benchmark_results/throughput_$(hostname)_$(date +%Y%m%d).json
     ```
 

@@ -71,21 +71,30 @@ QUARTET_SEED: int = 7
 BENCH_ROUNDS: int = 3
 
 # ── Scaling axis 1: fixed total forest size, varying number of groups ───
-FIXED_FOREST_N_TREES:  int       = 1_000
+# 20_000 trees × ~3.6 KB/tree ≈ 72 MB — exceeds L2 cache on A100 (40 MB),
+# H100 (50 MB) and GB10, so throughput reflects HBM bandwidth rather than
+# cache capacity.
+FIXED_FOREST_N_TREES:  int       = 20_000
 FIXED_FOREST_N_GROUPS: list[int] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 # ── Scaling axis 2: fixed group count, varying total forest size ─────────
+# Sweep starts well above the L2-escape threshold so every point is
+# bandwidth-bound rather than cache-bound.
 FIXED_GROUPS_N_GROUPS: int       = 5
-FIXED_GROUPS_N_TREES:  list[int] = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1_000]
+FIXED_GROUPS_N_TREES:  list[int] = [
+    2_000, 4_000, 6_000, 8_000, 10_000,
+    12_000, 14_000, 16_000, 18_000, 20_000,
+]
 
 # ── Per-backend quartet counts ────────────────────────────────────────────
-# Scale up once satisfied with the plot shapes; current values are sized
-# for fast development on CPU hardware (< 2 s per non-large_scale trial).
+# Sized for ~2 s of kernel time per trial at the maximum forest size above,
+# which gives stable throughput estimates without long runs.
+# Reduce cuda/mlx if individual trials exceed ~5 s on your hardware.
 N_QUARTETS: dict[str, int] = {
-    "python":       100,
-    "cpu-parallel": 1_000,
-    "cuda":         10_000,
-    "mlx":          10_000,
+    "python":       10,
+    "cpu-parallel": 10_000,
+    "cuda":         500_000,
+    "mlx":          500_000,
 }
 
 
