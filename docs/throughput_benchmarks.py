@@ -163,7 +163,7 @@ def _(json, json_dir_input, mo, pathlib, pl, re):
 
     # ── Build polars DataFrame ────────────────────────────────────────────────
     if rows:
-        df = pl.DataFrame(rows)
+        df = pl.DataFrame(rows, schema_overrides={"gpu_name": pl.Utf8, "arch": pl.Utf8})
     else:
         df = pl.DataFrame(
             schema={

@@ -362,6 +362,30 @@ cost when uploading forest arrays.
 **CUDA note:** when using `Quartets.random()`, quartet generation runs on-device,
 eliminating host-to-device quartet transfer for large random samples.
 
+### Hardware Requirements
+
+#### `mlx` — Apple Silicon Metal GPU
+
+- **Chip:** Apple M-series SoC, M1 or later (M1 / M2 / M3 / M4, all Pro / Max / Ultra variants)
+- **OS:** macOS 12.0 (Monterey) or later
+- **Not supported:** Intel Macs, iOS/iPadOS devices, AMD or NVIDIA GPUs
+- **Install:** `pip install quarimo[apple]`
+
+All M-series chips share a Unified Memory Architecture (UMA), so the same physical RAM
+is used by both the CPU and the Metal GPU — forest arrays are available on-device
+immediately after construction with no copy overhead.
+
+#### `cuda` — NVIDIA GPU
+
+- **GPU:** NVIDIA only; AMD and Intel GPUs are not supported
+- **Compute Capability:** 3.5 or higher (Maxwell generation, 2014, or newer)
+- **CUDA Toolkit:** 10.2 or higher, matching your installed driver version
+- **Install:** `pip install quarimo[gpu]`
+
+For the exact compatibility matrix between numba versions, CUDA toolkit versions, and GPU
+compute capabilities, see the
+[numba CUDA installation guide](https://numba.readthedocs.io/en/stable/cuda/overview.html).
+
 ## Documentation
 
 Full documentation coming soon.
@@ -400,6 +424,65 @@ isort . --profile=black
 flake8 .
 mypy quarimo/
 ```
+
+### Run benchmarks
+
+Benchmarks require `pytest-benchmark`, which is included in `[dev]`:
+
+```bash
+pip install -e ".[dev]"
+```
+
+There are three benchmark suites, each with a corresponding Marimo notebook that
+aggregates JSON output files from one or more machines into plots.
+
+#### Throughput benchmarks (`bench_throughput.py` → `docs/throughput_benchmarks.py`)
+
+Measures quartet topology throughput (quartets/second) across a matrix of forest sizes,
+group counts, Steiner modes, and backends.
+
+```bash
+pytest tests/bench_throughput.py -m "not large_scale" \
+    --benchmark-json=docs/benchmark_results/throughput_$(hostname)_$(date +%Y%m%d).json
+```
+
+#### Paralog resolver benchmarks (`bench_paralog.py` → `docs/paralog_benchmarks.py`)
+
+Benchmarks and convergence-data tests for `Forest.resolve_paralogs()` across a
+matrix of paralog frequency, copy count, and background discordance conditions.
+
+```bash
+# Timing benchmarks across all backends
+pytest tests/bench_paralog.py -m "not large_scale" \
+    --benchmark-json=docs/benchmark_results/paralog_$(hostname)_$(date +%Y%m%d).json
+
+# Stress / convergence data only (longer runs, saved to the same directory)
+pytest tests/bench_paralog.py -k "Stress" \
+    --benchmark-json=docs/benchmark_results/paralog_stress_$(hostname)_$(date +%Y%m%d).json
+```
+
+#### Forest scaling benchmarks (`bench_forest.py`)
+
+Measures how `quartet_topology()` and `qed()` scale with quartet count and forest size
+across all backends.
+
+```bash
+pytest tests/bench_forest.py -m "not large_scale" \
+    --benchmark-json=docs/benchmark_results/forest_$(hostname)_$(date +%Y%m%d).json
+```
+
+#### Viewing results in the notebooks
+
+Drop any number of JSON files into `docs/benchmark_results/` and open the corresponding
+notebook with [Marimo](https://marimo.io):
+
+```bash
+marimo run docs/throughput_benchmarks.py
+marimo run docs/paralog_benchmarks.py
+```
+
+Results from different machines are automatically aggregated — run the benchmarks on
+each machine you want to compare and copy the JSON files into the same directory.
 
 ## Citation
 
