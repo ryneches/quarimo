@@ -288,8 +288,10 @@ def _probe_cuda_toolchain() -> CUDAToolchainInfo:
     # at JIT-compile time — including CUDA_ERROR_UNSUPPORTED_PTX_VERSION, which
     # occurs when llvmlite emits a PTX ISA version newer than ptxas supports.
     try:
+        import warnings
         import numpy as np
         from numba import cuda
+        from numba.core.errors import NumbaPerformanceWarning
 
         @cuda.jit(cache=False)
         def _probe(x):
@@ -298,7 +300,9 @@ def _probe_cuda_toolchain() -> CUDAToolchainInfo:
                 x[i] = x[i] + 1.0
 
         arr = cuda.to_device(np.zeros(1, dtype=np.float32))
-        _probe[1, 1](arr)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", NumbaPerformanceWarning)
+            _probe[1, 1](arr)
         cuda.synchronize()
 
         # Extract the PTX .version directive from the compiled kernel.
