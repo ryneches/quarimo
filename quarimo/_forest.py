@@ -529,9 +529,6 @@ class Forest:
             if n_multifurc_trees > 0:
                 log_multifurcation_resolved_warning(n_multifurc_trees, self.n_trees)
 
-        # [MORTON_SCHED] Build consensus DFS ranks for Morton query scheduling.
-        self._build_consensus_dfs_rank()
-
         # Package all forest arrays into a single kernel-dispatch object
         self._build_kernel_data()
 
@@ -564,73 +561,6 @@ class Forest:
             [group_to_idx[g] for g in self.group_labels], dtype=np.int32
         )
 
-    def _build_consensus_dfs_rank(self) -> None:
-        """[MORTON_SCHED] Compute consensus DFS ranks for Morton query scheduling.
-
-        For each global taxon, computes the mean first-occurrence Euler-tour
-        position across all trees where the taxon is present.  Taxa absent from
-        all trees receive rank n_global_taxa (placed after all present taxa).
-
-        Builds
-        ------
-        self.consensus_dfs_rank : int32[n_global_taxa]
-            Mean first-occurrence tour position per taxon, cast to int32.
-        self.gid_sorted_by_dfs : int32[n_global_taxa]
-            gid_sorted_by_dfs[i] = global taxon ID of the i-th taxon in
-            ascending DFS order.  Inverse permutation of argsort(consensus_dfs_rank).
-        """
-        rank_sum = np.zeros(self.n_global_taxa, dtype=np.float64)
-        rank_count = np.zeros(self.n_global_taxa, dtype=np.int32)
-
-        for ti in range(self.n_trees):
-            node_base = int(self.node_offsets[ti])
-            g2l = self.global_to_local[ti]   # int32[n_global_taxa]; -1 = absent
-            gids = np.where(g2l >= 0)[0]
-            local_ids = g2l[gids]
-            rank_sum[gids] += self.all_first_occ[node_base + local_ids]
-            rank_count[gids] += 1
-
-        # Mean first-occ rank; absent taxa get a large sentinel rank (sorted last).
-        consensus_float = np.where(
-            rank_count > 0,
-            rank_sum / np.maximum(rank_count, 1),
-            float(self.n_global_taxa),
-        )
-        self.consensus_dfs_rank = consensus_float.astype(np.int32)
-        self.gid_sorted_by_dfs = np.argsort(self.consensus_dfs_rank).astype(np.int32)
-
-    @staticmethod
-    def _compute_morton_keys(sorted_ids: np.ndarray, consensus_dfs_rank: np.ndarray) -> np.ndarray:
-        """[MORTON_SCHED] Compute 4D Morton keys for a batch of sorted quartet IDs.
-
-        Translates each quartet's four global taxon IDs to their consensus DFS
-        ranks, then interleaves the bit representations into a 64-bit Morton key.
-        Sorting by this key groups quartets whose four taxa lie in nearby DFS
-        subtrees, improving sparse-table cache hit rates.
-
-        Parameters
-        ----------
-        sorted_ids : int32[n_quartets, 4]
-            Sorted global taxon IDs per quartet (t0 < t1 < t2 < t3).
-        consensus_dfs_rank : int32[n_global_taxa]
-            Mean DFS first-occurrence rank per global taxon ID.
-
-        Returns
-        -------
-        keys : uint64[n_quartets]
-            4D Morton key for each quartet.
-        """
-        # Translate global IDs → DFS ranks; shape (n_quartets, 4)
-        r = consensus_dfs_rank[sorted_ids].astype(np.uint64)
-        keys = np.zeros(len(sorted_ids), dtype=np.uint64)
-        # Interleave 16 bits from each of the 4 dimensions → 64-bit key.
-        # Bit k of dim d occupies bit position 4k+d.
-        for bit in range(16):
-            shift = np.uint64(bit)
-            for dim in range(4):
-                keys |= ((r[:, dim] >> shift) & np.uint64(1)) << np.uint64(4 * bit + dim)
-        return keys
-
     def _build_kernel_data(self) -> None:
         """Package all forest arrays into a ``ForestKernelData`` for kernel dispatch."""
         self._kernel_data = ForestKernelData(
@@ -652,9 +582,6 @@ class Forest:
             n_trees=self.n_trees,
             n_global_taxa=self.n_global_taxa,
             n_groups=self.n_groups,
-            # [MORTON_SCHED] Morton scheduling tables (None when unavailable).
-            consensus_dfs_rank=getattr(self, "consensus_dfs_rank", None),
-            gid_sorted_by_dfs=getattr(self, "gid_sorted_by_dfs", None),
         )
 
     def _upload_to_gpu(self) -> None:
@@ -777,7 +704,6 @@ class Forest:
 
     def quartet_topology(
         self, quartets: Quartets, steiner: bool = False, backend: str = "best",
-        morton_order: bool = False,
     ) -> QuartetTopologyResult:
         """
         Count the three possible unrooted quartet topologies for one or more
@@ -1001,7 +927,7 @@ class Forest:
 
             if resolved_backend == "cuda":
                 counts_out, steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out = (
-                    self._quartet_topology_cuda_unified(quartets, steiner, morton_order)  # [MORTON_SCHED]
+                    self._quartet_topology_cuda_unified(quartets, steiner)
                 )
 
             elif resolved_backend == "mlx":
@@ -1009,16 +935,6 @@ class Forest:
 
                 _t_ql0 = perf_counter()
                 sorted_ids = np.array(list(quartets), dtype=np.int32)
-
-                # [MORTON_SCHED] Pre-sort by Morton key for cache-friendly access.
-                morton_restore = None
-                if morton_order and self.consensus_dfs_rank is not None:
-                    morton_keys = Forest._compute_morton_keys(sorted_ids, self.consensus_dfs_rank)
-                    morton_perm = np.argsort(morton_keys)
-                    sorted_ids = sorted_ids[morton_perm]
-                    morton_restore = np.argsort(morton_perm)
-                    logger.info("  [MORTON_SCHED] Pre-sorted %d quartets by 4D Morton key", n_quartets)
-
                 _t_ql = perf_counter() - _t_ql0
 
                 _t_c0 = perf_counter()
@@ -1034,15 +950,6 @@ class Forest:
                     )
                 _t_c = perf_counter() - _t_c0
 
-                # [MORTON_SCHED] Restore original quartet ordering after Morton-sorted run.
-                if morton_restore is not None:
-                    counts_out = counts_out[morton_restore]
-                    if steiner_out is not None:
-                        steiner_out = steiner_out[morton_restore]
-                        steiner_min_out = steiner_min_out[morton_restore]
-                        steiner_max_out = steiner_max_out[morton_restore]
-                        steiner_sum_sq_out = steiner_sum_sq_out[morton_restore]
-
                 # On Apple Silicon UMA there is no host/device boundary; retrieve is ~0.
                 logger.info(
                     "⏱ t_query_load=%.6f t_calc=%.6f t_retrieve=%.6f", _t_ql, _t_c, 0.0
@@ -1052,16 +959,6 @@ class Forest:
                 # CPU/Python backends: materialise quartets to array
                 _t_ql0 = perf_counter()
                 sorted_ids = np.array(list(quartets), dtype=np.int32)
-
-                # [MORTON_SCHED] Pre-sort by Morton key for cache-friendly sparse table access.
-                morton_restore = None
-                if morton_order and self.consensus_dfs_rank is not None:
-                    morton_keys = Forest._compute_morton_keys(sorted_ids, self.consensus_dfs_rank)
-                    morton_perm = np.argsort(morton_keys)
-                    sorted_ids = sorted_ids[morton_perm]
-                    morton_restore = np.argsort(morton_perm)
-                    logger.info("  [MORTON_SCHED] Pre-sorted %d quartets by 4D Morton key", n_quartets)
-
                 common_args = self._kernel_data.cpu_common_args(sorted_ids, n_quartets)
 
                 counts_out = np.zeros((n_quartets, self.n_groups, 4), dtype=np.int32)
@@ -1106,15 +1003,6 @@ class Forest:
                         *common_args, counts_out, steiner_arg, smin_arg, smax_arg, ssq_arg,
                     )
                 _t_c = perf_counter() - _t_c0
-
-                # [MORTON_SCHED] Restore original quartet ordering after Morton-sorted run.
-                if morton_restore is not None:
-                    counts_out = counts_out[morton_restore]
-                    if steiner_out is not None:
-                        steiner_out = steiner_out[morton_restore]
-                        steiner_min_out = steiner_min_out[morton_restore]
-                        steiner_max_out = steiner_max_out[morton_restore]
-                        steiner_sum_sq_out = steiner_sum_sq_out[morton_restore]
 
                 # CPU: results are already in host numpy arrays; no retrieve step.
                 logger.info(
@@ -1414,7 +1302,7 @@ class Forest:
         return max(1, available // bpq)
 
     def _quartet_topology_cuda_unified(
-        self, quartets: Quartets, steiner: bool, morton_order: bool = False  # [MORTON_SCHED]
+        self, quartets: Quartets, steiner: bool,
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
         GPU implementation using unified kernel with on-GPU quartet generation.
@@ -1529,36 +1417,20 @@ class Forest:
             if batch_needs_rng:
                 d_quartet_batch = cuda.device_array((bc, 4), dtype=np.int32)
                 gen_blocks = (bc + 255) // 256
-                if morton_order and d_fkd.gid_sorted_by_dfs is not None:
-                    # [MORTON_SCHED] Generate quartets in Morton DFS order.
-                    from quarimo._cuda_kernels import generate_quartets_morton_cuda
-                    n_bits_per_dim = max(1, int(np.log2(max(d_fkd.n_global_taxa, 1))) // 4)
-                    M = max(1, bc // (1 << (4 * n_bits_per_dim)))
-                    generate_quartets_morton_cuda[gen_blocks, 256](
-                        bc,
-                        q_args.rng_seed,
-                        d_fkd.n_global_taxa,
-                        d_fkd.gid_sorted_by_dfs,
-                        n_bits_per_dim,
-                        M,
-                        d_quartet_batch,
-                    )
-                else:
-                    # [STD_SCHED] Standard XorShift128 random generation.
-                    generate_quartets_cuda[gen_blocks, 256](
-                        d_seed_quartets,
-                        q_args.n_seed,
-                        batch_offset,
-                        bc,
-                        q_args.rng_seed,
-                        d_fkd.n_global_taxa,
-                        d_quartet_batch,
-                    )
+                generate_quartets_cuda[gen_blocks, 256](
+                    d_seed_quartets,
+                    q_args.n_seed,
+                    batch_offset,
+                    bc,
+                    q_args.rng_seed,
+                    d_fkd.n_global_taxa,
+                    d_quartet_batch,
+                )
                 proc_seed = d_quartet_batch
                 proc_n_seed = bc
                 proc_offset = 0
             else:
-                # [STD_SCHED] Explicit seed quartets — served directly from the seed array.
+                # Explicit seed quartets — served directly from the seed array.
                 proc_seed = d_seed_quartets
                 proc_n_seed = q_args.n_seed
                 proc_offset = batch_offset

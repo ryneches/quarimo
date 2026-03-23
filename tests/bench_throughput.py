@@ -31,14 +31,11 @@ fixed_trees  (TestThroughputFixedTrees)
     sparse-table cache spill (O(n log n) per tree).
 
 correlated_trees  (TestThroughputCorrelatedTrees)
-    Same axis as fixed_trees but trees are drawn from a five-template
-    NNI ensemble that approximates a bootstrap phylogenetic analysis.
-    All trees share a common balanced-binary reference topology; only a
-    few NNI edits per template perturb it.  The consensus DFS rank is
-    predictive of individual-tree sparse-table positions, satisfying the
-    prerequisite for Morton-ordered quartet scheduling to reduce cache
-    misses.  This is the primary sweep for evaluating whether the Morton
-    path provides a throughput benefit.
+    Same axis as fixed_trees but trees are drawn from a five-template NNI
+    ensemble that approximates a bootstrap phylogenetic analysis.  All trees
+    share a common balanced-binary reference topology; only a few NNI edits
+    per template perturb it.  Use this sweep to compare cache-spill behaviour
+    on realistic correlated data vs the independently-shuffled fixed_trees sweep.
 
 Timing phases
 -------------
@@ -432,7 +429,6 @@ def _run_trial(
     steiner: bool,
     sweep: str,         # 'fixed_forest', 'fixed_groups', 'fixed_trees', or 'correlated_trees'
     n_leaves: int = N_LEAVES,
-    morton_order: bool = False,  # [MORTON_SCHED]
     correlated: bool = False,
 ) -> None:
     """
@@ -456,7 +452,7 @@ def _run_trial(
 
     # ── Warmup: triggers JIT/Metal compilation; excluded from timing ──────
     with quiet(), use_backend(backend):
-        forest.quartet_topology(q, steiner=steiner, morton_order=morton_order)
+        forest.quartet_topology(q, steiner=steiner)
 
     # ── Phases 2–4: attach log capture, then run the benchmark loop ───────
     # Temporarily enable INFO-level logging on the forest logger so that the
@@ -472,7 +468,7 @@ def _run_trial(
             benchmark.pedantic(
                 forest.quartet_topology,
                 args=(q,),
-                kwargs={"steiner": steiner, "morton_order": morton_order},
+                kwargs={"steiner": steiner},
                 rounds=BENCH_ROUNDS,
                 iterations=1,
             )
@@ -493,7 +489,6 @@ def _run_trial(
             "n_leaves":            n_leaves,
             "n_quartets":          n_quartets,
             "steiner":             steiner,
-            "morton_order":        morton_order,         # [MORTON_SCHED]
             "correlated":          correlated,
             "t_device_load":       t_device_load,
             "t_query_load":        phases["t_query_load"],
@@ -525,10 +520,9 @@ class TestThroughputFixedForest:
     the cost of accumulating Steiner-length statistics alongside topology counts.
     """
 
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_groups", FIXED_FOREST_N_GROUPS)
-    def test_python(self, benchmark, n_groups, steiner, morton_order):
+    def test_python(self, benchmark, n_groups, steiner):
         _run_trial(
             benchmark,
             n_total_trees=FIXED_FOREST_N_TREES,
@@ -536,14 +530,12 @@ class TestThroughputFixedForest:
             backend="python",
             steiner=steiner,
             sweep="fixed_forest",
-            morton_order=morton_order,
         )
 
     @pytest.mark.requires_cpu_parallel
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_groups", FIXED_FOREST_N_GROUPS)
-    def test_cpu_parallel(self, benchmark, n_groups, steiner, morton_order):
+    def test_cpu_parallel(self, benchmark, n_groups, steiner):
         _run_trial(
             benchmark,
             n_total_trees=FIXED_FOREST_N_TREES,
@@ -551,14 +543,12 @@ class TestThroughputFixedForest:
             backend="cpu-parallel",
             steiner=steiner,
             sweep="fixed_forest",
-            morton_order=morton_order,
         )
 
     @pytest.mark.requires_cuda
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_groups", FIXED_FOREST_N_GROUPS)
-    def test_cuda(self, benchmark, n_groups, steiner, morton_order):
+    def test_cuda(self, benchmark, n_groups, steiner):
         _run_trial(
             benchmark,
             n_total_trees=FIXED_FOREST_N_TREES,
@@ -566,14 +556,12 @@ class TestThroughputFixedForest:
             backend="cuda",
             steiner=steiner,
             sweep="fixed_forest",
-            morton_order=morton_order,
         )
 
     @pytest.mark.requires_mlx
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_groups", FIXED_FOREST_N_GROUPS)
-    def test_mlx(self, benchmark, n_groups, steiner, morton_order):
+    def test_mlx(self, benchmark, n_groups, steiner):
         _run_trial(
             benchmark,
             n_total_trees=FIXED_FOREST_N_TREES,
@@ -581,7 +569,6 @@ class TestThroughputFixedForest:
             backend="mlx",
             steiner=steiner,
             sweep="fixed_forest",
-            morton_order=morton_order,
         )
 
 
@@ -606,10 +593,9 @@ class TestThroughputFixedGroups:
     Both steiner=False and steiner=True are tested.
     """
 
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_trees", FIXED_GROUPS_N_TREES)
-    def test_python(self, benchmark, n_trees, steiner, morton_order):
+    def test_python(self, benchmark, n_trees, steiner):
         _run_trial(
             benchmark,
             n_total_trees=n_trees,
@@ -617,14 +603,12 @@ class TestThroughputFixedGroups:
             backend="python",
             steiner=steiner,
             sweep="fixed_groups",
-            morton_order=morton_order,
         )
 
     @pytest.mark.requires_cpu_parallel
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_trees", FIXED_GROUPS_N_TREES)
-    def test_cpu_parallel(self, benchmark, n_trees, steiner, morton_order):
+    def test_cpu_parallel(self, benchmark, n_trees, steiner):
         _run_trial(
             benchmark,
             n_total_trees=n_trees,
@@ -632,14 +616,12 @@ class TestThroughputFixedGroups:
             backend="cpu-parallel",
             steiner=steiner,
             sweep="fixed_groups",
-            morton_order=morton_order,
         )
 
     @pytest.mark.requires_cuda
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_trees", FIXED_GROUPS_N_TREES)
-    def test_cuda(self, benchmark, n_trees, steiner, morton_order):
+    def test_cuda(self, benchmark, n_trees, steiner):
         _run_trial(
             benchmark,
             n_total_trees=n_trees,
@@ -647,14 +629,12 @@ class TestThroughputFixedGroups:
             backend="cuda",
             steiner=steiner,
             sweep="fixed_groups",
-            morton_order=morton_order,
         )
 
     @pytest.mark.requires_mlx
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_trees", FIXED_GROUPS_N_TREES)
-    def test_mlx(self, benchmark, n_trees, steiner, morton_order):
+    def test_mlx(self, benchmark, n_trees, steiner):
         _run_trial(
             benchmark,
             n_total_trees=n_trees,
@@ -662,7 +642,6 @@ class TestThroughputFixedGroups:
             backend="mlx",
             steiner=steiner,
             sweep="fixed_groups",
-            morton_order=morton_order,
         )
 
 
@@ -686,10 +665,9 @@ class TestThroughputFixedTrees:
     timing via t_device_load), but the calculation phase should remain flat.
     """
 
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
-    def test_python(self, benchmark, n_leaves, steiner, morton_order):
+    def test_python(self, benchmark, n_leaves, steiner):
         _run_trial(
             benchmark,
             n_total_trees=FIXED_TREES_N_TREES,
@@ -698,14 +676,12 @@ class TestThroughputFixedTrees:
             steiner=steiner,
             sweep="fixed_trees",
             n_leaves=n_leaves,
-            morton_order=morton_order,
         )
 
     @pytest.mark.requires_cpu_parallel
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
-    def test_cpu_parallel(self, benchmark, n_leaves, steiner, morton_order):
+    def test_cpu_parallel(self, benchmark, n_leaves, steiner):
         _run_trial(
             benchmark,
             n_total_trees=FIXED_TREES_N_TREES,
@@ -714,14 +690,12 @@ class TestThroughputFixedTrees:
             steiner=steiner,
             sweep="fixed_trees",
             n_leaves=n_leaves,
-            morton_order=morton_order,
         )
 
     @pytest.mark.requires_cuda
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
-    def test_cuda(self, benchmark, n_leaves, steiner, morton_order):
+    def test_cuda(self, benchmark, n_leaves, steiner):
         _run_trial(
             benchmark,
             n_total_trees=FIXED_TREES_N_TREES,
@@ -730,14 +704,12 @@ class TestThroughputFixedTrees:
             steiner=steiner,
             sweep="fixed_trees",
             n_leaves=n_leaves,
-            morton_order=morton_order,
         )
 
     @pytest.mark.requires_mlx
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
-    def test_mlx(self, benchmark, n_leaves, steiner, morton_order):
+    def test_mlx(self, benchmark, n_leaves, steiner):
         _run_trial(
             benchmark,
             n_total_trees=FIXED_TREES_N_TREES,
@@ -746,39 +718,31 @@ class TestThroughputFixedTrees:
             steiner=steiner,
             sweep="fixed_trees",
             n_leaves=n_leaves,
-            morton_order=morton_order,
         )
 
 
 # ======================================================================== #
-# 4. Correlated trees: Morton vs standard on bootstrap-like ensemble       #
+# 4. Correlated trees: bootstrap-like NNI ensemble                         #
 # ======================================================================== #
 
 
 class TestThroughputCorrelatedTrees:
     """
-    Sweep 4: correlated bootstrap-like ensemble, standard vs Morton scheduling.
+    Sweep 4: correlated bootstrap-like ensemble, fixed tree count, varying leaf count.
 
-    Holds the tree count constant at FIXED_TREES_N_TREES (one group) and
-    sweeps n_leaves across FIXED_TREES_N_LEAVES, but builds each forest from
-    the five-template NNI ensemble rather than independently shuffled trees.
+    Same axis as fixed_trees, but builds each forest from the five-template NNI
+    ensemble rather than independently shuffled trees.  All trees share a common
+    balanced-binary reference topology with only a few NNI edits per template;
+    DFS order is therefore correlated across trees, unlike the fixed_trees sweep
+    (worst case: independently shuffled leaf orders).
 
-    Because all trees share a common balanced-binary reference topology with
-    only a few NNI edits, the consensus DFS rank is predictive of individual-
-    tree sparse-table positions.  This is the prerequisite for Morton-ordered
-    quartet scheduling to reduce cache misses; the fixed_trees sweep (with
-    randomly shuffled trees) tests the worst case.
-
-    Expected result: morton_order=True should show higher throughput than
-    morton_order=False at large leaf counts where the sparse table overflows
-    GPU L2.  If no benefit appears here either, the Morton path should be
-    removed.
+    Use this sweep to compare cache-spill behaviour on realistic data vs the
+    randomised trees in fixed_trees.
     """
 
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
-    def test_python(self, benchmark, n_leaves, steiner, morton_order):
+    def test_python(self, benchmark, n_leaves, steiner):
         _run_trial(
             benchmark,
             n_total_trees=FIXED_TREES_N_TREES,
@@ -787,15 +751,13 @@ class TestThroughputCorrelatedTrees:
             steiner=steiner,
             sweep="correlated_trees",
             n_leaves=n_leaves,
-            morton_order=morton_order,
             correlated=True,
         )
 
     @pytest.mark.requires_cpu_parallel
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
-    def test_cpu_parallel(self, benchmark, n_leaves, steiner, morton_order):
+    def test_cpu_parallel(self, benchmark, n_leaves, steiner):
         _run_trial(
             benchmark,
             n_total_trees=FIXED_TREES_N_TREES,
@@ -804,15 +766,13 @@ class TestThroughputCorrelatedTrees:
             steiner=steiner,
             sweep="correlated_trees",
             n_leaves=n_leaves,
-            morton_order=morton_order,
             correlated=True,
         )
 
     @pytest.mark.requires_cuda
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
-    def test_cuda(self, benchmark, n_leaves, steiner, morton_order):
+    def test_cuda(self, benchmark, n_leaves, steiner):
         _run_trial(
             benchmark,
             n_total_trees=FIXED_TREES_N_TREES,
@@ -821,15 +781,13 @@ class TestThroughputCorrelatedTrees:
             steiner=steiner,
             sweep="correlated_trees",
             n_leaves=n_leaves,
-            morton_order=morton_order,
             correlated=True,
         )
 
     @pytest.mark.requires_mlx
-    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
     @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
     @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
-    def test_mlx(self, benchmark, n_leaves, steiner, morton_order):
+    def test_mlx(self, benchmark, n_leaves, steiner):
         _run_trial(
             benchmark,
             n_total_trees=FIXED_TREES_N_TREES,
@@ -838,6 +796,5 @@ class TestThroughputCorrelatedTrees:
             steiner=steiner,
             sweep="correlated_trees",
             n_leaves=n_leaves,
-            morton_order=morton_order,
             correlated=True,
         )

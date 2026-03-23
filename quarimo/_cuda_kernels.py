@@ -105,8 +105,7 @@ if _CUDA_AVAILABLE:
         init_xorshift128,
         xorshift128_next,
         sample_4_unique_cuda,
-        get_quartet_at_index,          # [STD_SCHED]
-        get_quartet_morton_at_index,   # [MORTON_SCHED]
+        get_quartet_at_index,
     )
 
     @cuda.jit(device=True)
@@ -472,62 +471,6 @@ if _CUDA_AVAILABLE:
         absolute_idx = offset + qi
         a, b, c, d = get_quartet_at_index(
             absolute_idx, seed_quartets, n_seed, rng_seed, n_taxa
-        )
-        quartets_out[qi, 0] = a
-        quartets_out[qi, 1] = b
-        quartets_out[qi, 2] = c
-        quartets_out[qi, 3] = d
-
-    # ======================================================================== #
-    # [MORTON_SCHED] Morton-ordered generation kernel                         #
-    # ======================================================================== #
-
-    @cuda.jit
-    def generate_quartets_morton_cuda(
-        count,              # int  - number of quartets to generate
-        rng_seed,           # uint32 - RNG seed
-        n_taxa,             # int  - namespace size
-        gid_sorted_by_dfs,  # int32[n_taxa] - DFS-rank → global taxon ID
-        n_bits_per_dim,     # int  - Morton block depth (bits per dimension)
-        M,                  # int  - quartets per Morton block
-        quartets_out,       # int32[count, 4] - output
-    ):
-        """
-        [MORTON_SCHED] 1D kernel: materialise quartets in Morton DFS order.
-
-        Thread qi generates the quartet at position qi in the Morton-ordered
-        sequence.  Quartets within the same Morton block (qi // M == const)
-        all draw taxa from the same 4 DFS subranges, keeping the relevant
-        sparse table rows warm in L2 during the subsequent 2D counting kernel.
-
-        Parameters
-        ----------
-        count : int
-            Total quartets to generate (kernel grid covers count threads).
-        rng_seed : uint32
-            Shared RNG seed (same value used by the standard generation kernel,
-            so the two paths are comparable in statistical quality).
-        n_taxa : int
-            Global taxon namespace size.
-        gid_sorted_by_dfs : int32[n_taxa]
-            Maps DFS rank → global taxon ID.  Device-resident; uploaded once
-            at Forest construction via ForestKernelData.to_device().
-        n_bits_per_dim : int
-            Depth of the Morton decomposition.  Each dimension gets
-            n_bits_per_dim bits of the block index.  block_width = n_taxa >>
-            n_bits_per_dim.  Typical value: 3 → 4^3 = 64 blocks per dimension,
-            4096 total Morton blocks.
-        M : int
-            Quartets per Morton block.  Computed by the host as
-            max(1, count // (1 << (4 * n_bits_per_dim))).
-        quartets_out : int32[count, 4]
-            Output device array.  Each row is a sorted quartet (a < b < c < d).
-        """
-        qi = cuda.grid(1)
-        if qi >= count:
-            return
-        a, b, c, d = get_quartet_morton_at_index(
-            qi, M, rng_seed, gid_sorted_by_dfs, n_taxa, n_bits_per_dim
         )
         quartets_out[qi, 0] = a
         quartets_out[qi, 1] = b
