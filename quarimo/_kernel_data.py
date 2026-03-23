@@ -133,6 +133,16 @@ class ForestKernelData:
     n_global_taxa: int
     n_groups: int
 
+    # [MORTON_SCHED] Consensus DFS ordering for Morton-key query scheduling.
+    # consensus_dfs_rank[gid]  — mean first-occurrence Euler-tour position of
+    #     global taxon gid across all trees (int32, in [0, max_tour_len)).
+    # gid_sorted_by_dfs[i]    — global taxon ID of the i-th taxon in ascending
+    #     consensus DFS order; the inverse of argsort(consensus_dfs_rank).
+    # Both arrays are optional (None when the Forest was built without building
+    # the Morton tables, e.g. in minimal test fixtures).
+    consensus_dfs_rank: np.ndarray  # int32[n_global_taxa] or None
+    gid_sorted_by_dfs: np.ndarray   # int32[n_global_taxa] or None
+
     # ------------------------------------------------------------------
     # Dispatch helpers
     # ------------------------------------------------------------------
@@ -213,6 +223,15 @@ class ForestKernelData:
         """
         from numba import cuda
 
+        # [MORTON_SCHED] Upload Morton tables only when present.
+        d_consensus = (
+            cuda.to_device(self.consensus_dfs_rank)
+            if self.consensus_dfs_rank is not None else None
+        )
+        d_gid_sorted = (
+            cuda.to_device(self.gid_sorted_by_dfs)
+            if self.gid_sorted_by_dfs is not None else None
+        )
         return ForestKernelData(
             global_to_local=cuda.to_device(self.global_to_local),
             all_first_occ=cuda.to_device(self.all_first_occ),
@@ -232,11 +251,13 @@ class ForestKernelData:
             n_trees=self.n_trees,
             n_global_taxa=self.n_global_taxa,
             n_groups=self.n_groups,
+            consensus_dfs_rank=d_consensus,   # [MORTON_SCHED]
+            gid_sorted_by_dfs=d_gid_sorted,   # [MORTON_SCHED]
         )
 
     def device_arrays(self) -> list:
         """Return all array attributes as a flat list (for GPU cleanup)."""
-        return [
+        arrays = [
             self.global_to_local,
             self.all_first_occ,
             self.all_root_distance,
@@ -253,6 +274,12 @@ class ForestKernelData:
             self.polytomy_offsets,
             self.polytomy_nodes,
         ]
+        # [MORTON_SCHED] Include Morton tables only when present.
+        if self.consensus_dfs_rank is not None:
+            arrays.append(self.consensus_dfs_rank)
+        if self.gid_sorted_by_dfs is not None:
+            arrays.append(self.gid_sorted_by_dfs)
+        return arrays
 
     @property
     def upload_bytes(self) -> int:

@@ -21,9 +21,15 @@ def _(mo):
     | 2 | `fixed_groups` | group count | total trees | kernel throughput vs. forest depth |
     | 3 | `fixed_trees`  | tree count  | leaves/tree | O(1) LCA hypothesis; cache-spill threshold |
 
-    Each plot draws one line per (backend, machine) combination.  Color encodes
-    backend; line style encodes machine.  Legend entries include hostname, CPU
-    architecture, and GPU name where applicable.
+    Each plot draws one line per (backend, morton_order, machine) combination.
+    Color encodes backend; line style encodes machine; marker encodes query
+    scheduling (○ = standard, □ = Morton-ordered).  Legend entries include
+    hostname, CPU architecture, and GPU name where applicable.
+
+    Morton-ordered scheduling (`morton_order=True`) sorts quartet queries by
+    4D Morton (Z-order) key computed from consensus DFS ranks before calling
+    the kernel, so spatially nearby quartet taxa access the same sparse-table
+    rows consecutively — potentially reducing cache misses at large leaf counts.
 
     ## Generating benchmark data
 
@@ -153,6 +159,7 @@ def _(json, json_dir_input, mo, pathlib, pl, re):
                                 "n_leaves":          ei.get("n_leaves"),
                                 "n_quartets":        ei.get("n_quartets"),
                                 "steiner":           ei.get("steiner", False),
+                                "morton_order":      ei.get("morton_order", False),  # [MORTON_SCHED]
                                 "t_device_load":     ei.get("t_device_load"),
                                 "t_query_load":      ei.get("t_query_load"),
                                 "t_calc":            ei.get("t_calc"),
@@ -191,6 +198,7 @@ def _(json, json_dir_input, mo, pathlib, pl, re):
                 "n_leaves": pl.Int64,
                 "n_quartets": pl.Int64,
                 "steiner": pl.Boolean,
+                "morton_order": pl.Boolean,   # [MORTON_SCHED]
                 "t_device_load": pl.Float64,
                 "t_query_load": pl.Float64,
                 "t_calc": pl.Float64,
@@ -271,6 +279,9 @@ def _(df, machines, mo, pl, plt):
             "mlx":          "MLX (Metal)",
         }
         _MACHINE_STYLES = ["solid", "dashed", "dotted", "dashdot"]
+        # [MORTON_SCHED] ○ = standard scheduling, □ = Morton-ordered scheduling
+        _MORTON_MARKERS = {False: "o", True: "s"}
+        _MORTON_LABELS  = {False: "standard", True: "Morton"}
 
         if len(df) == 0:
             return mo.callout(mo.md("No benchmark data available."), kind="neutral")
@@ -294,48 +305,53 @@ def _(df, machines, mo, pl, plt):
             )
 
         backends_present = [b for b in _BACKEND_ORDER if b in sub["backend"].to_list()]
+        morton_vals = sorted(sub["morton_order"].unique().to_list())
 
         fig, ax = plt.subplots(figsize=(8, 5))
+        n_lines = 0
 
         for mi, machine in enumerate(machines):
             ls = _MACHINE_STYLES[mi % len(_MACHINE_STYLES)]
             for backend in backends_present:
-                seg = (
-                    sub.filter(
-                        (pl.col("machine") == machine)
-                        & (pl.col("backend") == backend)
+                for morton in morton_vals:
+                    seg = (
+                        sub.filter(
+                            (pl.col("machine") == machine)
+                            & (pl.col("backend") == backend)
+                            & (pl.col("morton_order") == morton)
+                        )
+                        .sort("n_groups")
                     )
-                    .sort("n_groups")
-                )
-                if len(seg) == 0:
-                    continue
-                xs = seg["n_groups"].to_list()
-                ys = seg["quartets_per_second"].to_list()
-                hostname = machine.split("/")[0].strip()
-                arch_v = seg["arch"].drop_nulls().head(1).to_list()
-                arch = arch_v[0] if arch_v else ""
-                gpu_v = seg["gpu_name"].drop_nulls().head(1).to_list()
-                gpu = gpu_v[0] if gpu_v else None
-                hw_parts = [hostname]
-                if arch:
-                    hw_parts.append(arch)
-                if gpu:
-                    hw_parts.append(gpu)
-                label = f"{_BACKEND_LABELS.get(backend, backend)}\n({' / '.join(hw_parts)})"
-                ax.plot(
-                    xs, ys,
-                    color=_BACKEND_COLORS.get(backend, "grey"),
-                    linestyle=ls,
-                    marker="o",
-                    markersize=5,
-                    linewidth=1.8,
-                    label=label,
-                )
+                    if len(seg) == 0:
+                        continue
+                    xs = seg["n_groups"].to_list()
+                    ys = seg["quartets_per_second"].to_list()
+                    hostname = machine.split("/")[0].strip()
+                    arch_v = seg["arch"].drop_nulls().head(1).to_list()
+                    arch = arch_v[0] if arch_v else ""
+                    gpu_v = seg["gpu_name"].drop_nulls().head(1).to_list()
+                    gpu = gpu_v[0] if gpu_v else None
+                    hw_parts = [hostname]
+                    if arch:
+                        hw_parts.append(arch)
+                    if gpu:
+                        hw_parts.append(gpu)
+                    sched = _MORTON_LABELS[morton]
+                    label = (
+                        f"{_BACKEND_LABELS.get(backend, backend)} [{sched}]\n"
+                        f"({' / '.join(hw_parts)})"
+                    )
+                    ax.plot(
+                        xs, ys,
+                        color=_BACKEND_COLORS.get(backend, "grey"),
+                        linestyle=ls,
+                        marker=_MORTON_MARKERS[morton],
+                        markersize=5,
+                        linewidth=1.8,
+                        label=label,
+                    )
+                    n_lines += 1
 
-        n_lines = sum(
-            1 for m in machines for b in backends_present
-            if len(sub.filter((pl.col("machine") == m) & (pl.col("backend") == b))) > 0
-        )
         ax.set_xlabel("Number of tree groups", fontsize=10)
         ax.set_ylabel("Quartets / second  (calc phase)", fontsize=10)
         ax.set_title(
@@ -397,6 +413,9 @@ def _(df, machines, mo, pl, plt):
             "mlx":          "MLX (Metal)",
         }
         _MACHINE_STYLES = ["solid", "dashed", "dotted", "dashdot"]
+        # [MORTON_SCHED] ○ = standard scheduling, □ = Morton-ordered scheduling
+        _MORTON_MARKERS = {False: "o", True: "s"}
+        _MORTON_LABELS  = {False: "standard", True: "Morton"}
 
         if len(df) == 0:
             return mo.callout(mo.md("No benchmark data available."), kind="neutral")
@@ -420,48 +439,53 @@ def _(df, machines, mo, pl, plt):
             )
 
         backends_present = [b for b in _BACKEND_ORDER if b in sub["backend"].to_list()]
+        morton_vals = sorted(sub["morton_order"].unique().to_list())
 
         fig, ax = plt.subplots(figsize=(8, 5))
+        n_lines = 0
 
         for mi, machine in enumerate(machines):
             ls = _MACHINE_STYLES[mi % len(_MACHINE_STYLES)]
             for backend in backends_present:
-                seg = (
-                    sub.filter(
-                        (pl.col("machine") == machine)
-                        & (pl.col("backend") == backend)
+                for morton in morton_vals:
+                    seg = (
+                        sub.filter(
+                            (pl.col("machine") == machine)
+                            & (pl.col("backend") == backend)
+                            & (pl.col("morton_order") == morton)
+                        )
+                        .sort("n_trees")
                     )
-                    .sort("n_trees")
-                )
-                if len(seg) == 0:
-                    continue
-                xs = seg["n_trees"].to_list()
-                ys = seg["quartets_per_second"].to_list()
-                hostname = machine.split("/")[0].strip()
-                arch_v = seg["arch"].drop_nulls().head(1).to_list()
-                arch = arch_v[0] if arch_v else ""
-                gpu_v = seg["gpu_name"].drop_nulls().head(1).to_list()
-                gpu = gpu_v[0] if gpu_v else None
-                hw_parts = [hostname]
-                if arch:
-                    hw_parts.append(arch)
-                if gpu:
-                    hw_parts.append(gpu)
-                label = f"{_BACKEND_LABELS.get(backend, backend)}\n({' / '.join(hw_parts)})"
-                ax.plot(
-                    xs, ys,
-                    color=_BACKEND_COLORS.get(backend, "grey"),
-                    linestyle=ls,
-                    marker="o",
-                    markersize=5,
-                    linewidth=1.8,
-                    label=label,
-                )
+                    if len(seg) == 0:
+                        continue
+                    xs = seg["n_trees"].to_list()
+                    ys = seg["quartets_per_second"].to_list()
+                    hostname = machine.split("/")[0].strip()
+                    arch_v = seg["arch"].drop_nulls().head(1).to_list()
+                    arch = arch_v[0] if arch_v else ""
+                    gpu_v = seg["gpu_name"].drop_nulls().head(1).to_list()
+                    gpu = gpu_v[0] if gpu_v else None
+                    hw_parts = [hostname]
+                    if arch:
+                        hw_parts.append(arch)
+                    if gpu:
+                        hw_parts.append(gpu)
+                    sched = _MORTON_LABELS[morton]
+                    label = (
+                        f"{_BACKEND_LABELS.get(backend, backend)} [{sched}]\n"
+                        f"({' / '.join(hw_parts)})"
+                    )
+                    ax.plot(
+                        xs, ys,
+                        color=_BACKEND_COLORS.get(backend, "grey"),
+                        linestyle=ls,
+                        marker=_MORTON_MARKERS[morton],
+                        markersize=5,
+                        linewidth=1.8,
+                        label=label,
+                    )
+                    n_lines += 1
 
-        n_lines = sum(
-            1 for m in machines for b in backends_present
-            if len(sub.filter((pl.col("machine") == m) & (pl.col("backend") == b))) > 0
-        )
         ax.set_xlabel("Total number of trees", fontsize=10)
         ax.set_ylabel("Quartets / second  (calc phase)", fontsize=10)
         ax.set_title(
@@ -528,6 +552,13 @@ def _(df, machines, mo, pl, plt):
             "mlx":          "MLX (Metal)",
         }
         _MACHINE_STYLES = ["solid", "dashed", "dotted", "dashdot"]
+        # [MORTON_SCHED] ○ = standard scheduling, □ = Morton-ordered scheduling.
+        # This sweep is the primary indicator of Morton cache-efficiency gains:
+        # if Morton ordering reduces sparse-table cache misses, the □ lines will
+        # stay flat (or drop less steeply) as leaf count increases past the
+        # L2-cache escape threshold.
+        _MORTON_MARKERS = {False: "o", True: "s"}
+        _MORTON_LABELS  = {False: "standard", True: "Morton"}
 
         if len(df) == 0:
             return mo.callout(mo.md("No benchmark data available."), kind="neutral")
@@ -551,48 +582,53 @@ def _(df, machines, mo, pl, plt):
             )
 
         backends_present = [b for b in _BACKEND_ORDER if b in sub["backend"].to_list()]
+        morton_vals = sorted(sub["morton_order"].unique().to_list())
 
         fig, ax = plt.subplots(figsize=(8, 5))
+        n_lines = 0
 
         for mi, machine in enumerate(machines):
             ls = _MACHINE_STYLES[mi % len(_MACHINE_STYLES)]
             for backend in backends_present:
-                seg = (
-                    sub.filter(
-                        (pl.col("machine") == machine)
-                        & (pl.col("backend") == backend)
+                for morton in morton_vals:
+                    seg = (
+                        sub.filter(
+                            (pl.col("machine") == machine)
+                            & (pl.col("backend") == backend)
+                            & (pl.col("morton_order") == morton)
+                        )
+                        .sort("n_leaves")
                     )
-                    .sort("n_leaves")
-                )
-                if len(seg) == 0:
-                    continue
-                xs = seg["n_leaves"].to_list()
-                ys = seg["quartets_per_second"].to_list()
-                hostname = machine.split("/")[0].strip()
-                arch_v = seg["arch"].drop_nulls().head(1).to_list()
-                arch = arch_v[0] if arch_v else ""
-                gpu_v = seg["gpu_name"].drop_nulls().head(1).to_list()
-                gpu = gpu_v[0] if gpu_v else None
-                hw_parts = [hostname]
-                if arch:
-                    hw_parts.append(arch)
-                if gpu:
-                    hw_parts.append(gpu)
-                label = f"{_BACKEND_LABELS.get(backend, backend)}\n({' / '.join(hw_parts)})"
-                ax.plot(
-                    xs, ys,
-                    color=_BACKEND_COLORS.get(backend, "grey"),
-                    linestyle=ls,
-                    marker="o",
-                    markersize=5,
-                    linewidth=1.8,
-                    label=label,
-                )
+                    if len(seg) == 0:
+                        continue
+                    xs = seg["n_leaves"].to_list()
+                    ys = seg["quartets_per_second"].to_list()
+                    hostname = machine.split("/")[0].strip()
+                    arch_v = seg["arch"].drop_nulls().head(1).to_list()
+                    arch = arch_v[0] if arch_v else ""
+                    gpu_v = seg["gpu_name"].drop_nulls().head(1).to_list()
+                    gpu = gpu_v[0] if gpu_v else None
+                    hw_parts = [hostname]
+                    if arch:
+                        hw_parts.append(arch)
+                    if gpu:
+                        hw_parts.append(gpu)
+                    sched = _MORTON_LABELS[morton]
+                    label = (
+                        f"{_BACKEND_LABELS.get(backend, backend)} [{sched}]\n"
+                        f"({' / '.join(hw_parts)})"
+                    )
+                    ax.plot(
+                        xs, ys,
+                        color=_BACKEND_COLORS.get(backend, "grey"),
+                        linestyle=ls,
+                        marker=_MORTON_MARKERS[morton],
+                        markersize=5,
+                        linewidth=1.8,
+                        label=label,
+                    )
+                    n_lines += 1
 
-        n_lines = sum(
-            1 for m in machines for b in backends_present
-            if len(sub.filter((pl.col("machine") == m) & (pl.col("backend") == b))) > 0
-        )
         n_trees_val = df.filter(pl.col("sweep") == "fixed_trees")["n_trees"].max()
         ax.set_xlabel("Leaves per tree", fontsize=10)
         ax.set_ylabel("Quartets / second  (calc phase)", fontsize=10)
@@ -628,28 +664,30 @@ def _(df, mo, pl):
 
         summary = (
             df.filter(pl.col("quartets_per_second").is_not_null())
-            .group_by(["machine", "backend", "sweep", "steiner"])
+            .group_by(["machine", "backend", "sweep", "steiner", "morton_order"])
             .agg(
                 pl.col("quartets_per_second").mean().alias("mean_qps"),
                 pl.col("quartets_per_second").min().alias("min_qps"),
                 pl.col("quartets_per_second").max().alias("max_qps"),
                 pl.col("n_trees").n_unique().alias("n_sizes"),
             )
-            .sort(["sweep", "backend", "machine", "steiner"])
+            .sort(["sweep", "backend", "machine", "steiner", "morton_order"])
         )
 
         _header = (
-            "| sweep | backend | machine | steiner "
+            "| sweep | backend | machine | steiner | scheduling "
             "| mean Q/s | min Q/s | max Q/s | n sizes |"
         )
-        _sep = "|---|---|---|---|---:|---:|---:|---:|"
+        _sep = "|---|---|---|---|---|---:|---:|---:|---:|"
         _tbody = []
         for row in summary.to_dicts():
             steiner_str = "✓" if row["steiner"] else "✗"
+            sched_str = "Morton" if row["morton_order"] else "standard"
             _tbody.append(
                 f"| {row['sweep']} | {row['backend']} "
                 f"| {row['machine'].split('/')[0].strip()} "
                 f"| {steiner_str} "
+                f"| {sched_str} "
                 f"| {row['mean_qps']:,.0f} "
                 f"| {row['min_qps']:,.0f} "
                 f"| {row['max_qps']:,.0f} "
