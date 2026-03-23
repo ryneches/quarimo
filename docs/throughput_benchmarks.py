@@ -17,9 +17,10 @@ def _(mo):
 
     | Plot | Sweep | Fixed | Varying | What it measures |
     |---|---|---|---|---|
-    | 1 | `fixed_forest` | total trees | group count | per-group accumulation overhead |
-    | 2 | `fixed_groups` | group count | total trees | kernel throughput vs. forest depth |
-    | 3 | `fixed_trees`  | tree count  | leaves/tree | O(1) LCA hypothesis; cache-spill threshold |
+    | 1 | `fixed_forest`      | total trees | group count | per-group accumulation overhead |
+    | 2 | `fixed_groups`      | group count | total trees | kernel throughput vs. forest depth |
+    | 3 | `fixed_trees`       | tree count  | leaves/tree | O(1) LCA hypothesis; cache-spill threshold (random trees) |
+    | 4 | `correlated_trees`  | tree count  | leaves/tree | Morton vs standard on bootstrap-like NNI ensemble |
 
     Each plot draws one line per (backend, morton_order, machine) combination.
     Color encodes backend; line style encodes machine; marker encodes query
@@ -123,7 +124,7 @@ def _(json, json_dir_input, mo, pathlib, pl, re):
         return " / ".join(parts)
 
     def _is_throughput_bench(fullname: str) -> bool:
-        return "TestThroughputFixed" in fullname
+        return "TestThroughputFixed" in fullname or "TestThroughputCorrelated" in fullname
 
     # ── Load and flatten all JSON files ──────────────────────────────────────
 
@@ -160,6 +161,7 @@ def _(json, json_dir_input, mo, pathlib, pl, re):
                                 "n_quartets":        ei.get("n_quartets"),
                                 "steiner":           ei.get("steiner", False),
                                 "morton_order":      ei.get("morton_order", False),  # [MORTON_SCHED]
+                                "correlated":        ei.get("correlated", False),
                                 "t_device_load":     ei.get("t_device_load"),
                                 "t_query_load":      ei.get("t_query_load"),
                                 "t_calc":            ei.get("t_calc"),
@@ -199,6 +201,7 @@ def _(json, json_dir_input, mo, pathlib, pl, re):
                 "n_quartets": pl.Int64,
                 "steiner": pl.Boolean,
                 "morton_order": pl.Boolean,   # [MORTON_SCHED]
+                "correlated": pl.Boolean,
                 "t_device_load": pl.Float64,
                 "t_query_load": pl.Float64,
                 "t_calc": pl.Float64,
@@ -657,6 +660,146 @@ def _(df, machines, mo, pl, plt):
 
 
 @app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Plot 4 — Correlated trees (bootstrap ensemble): Morton vs standard
+
+    Same axis as Plot 3 (fixed tree count, varying leaf count), but built from
+    the five-template NNI ensemble instead of independently shuffled trees.
+    Because all trees share a common balanced-binary reference topology with
+    only a few NNI edits, the consensus DFS rank is predictive of individual-
+    tree sparse-table positions — the prerequisite for Morton-ordered scheduling
+    to reduce cache misses.
+
+    **How to read this plot:** compare □ (Morton) against ○ (standard) lines
+    of the same color (backend) and line style (machine).  If Morton ordering
+    helps, the □ lines will drop less steeply than the ○ lines at large leaf
+    counts.  If both are flat, the L2 cache is not the bottleneck.  If □ is
+    lower than ○, the Morton overhead exceeds its cache benefit even on
+    correlated trees — at which point the Morton path should be removed.
+    """)
+    return
+
+
+@app.cell
+def _(df, machines, mo, pl, plt):
+    def _plot_correlated_trees():
+        _BACKEND_ORDER = ["python", "cpu-parallel", "cuda", "mlx"]
+        _BACKEND_COLORS = {
+            "python":       "#4C72B0",
+            "cpu-parallel": "#DD8452",
+            "cuda":         "#55A868",
+            "mlx":          "#C44E52",
+        }
+        _BACKEND_LABELS = {
+            "python":       "Python",
+            "cpu-parallel": "CPU-parallel (Numba)",
+            "cuda":         "CUDA",
+            "mlx":          "MLX (Metal)",
+        }
+        _MACHINE_STYLES = ["solid", "dashed", "dotted", "dashdot"]
+        # [MORTON_SCHED] ○ = standard scheduling, □ = Morton-ordered scheduling.
+        # This is the primary sweep for evaluating whether Morton ordering pays off.
+        _MORTON_MARKERS = {False: "o", True: "s"}
+        _MORTON_LABELS  = {False: "standard", True: "Morton"}
+
+        if len(df) == 0:
+            return mo.callout(mo.md("No benchmark data available."), kind="neutral")
+
+        sub = (
+            df.filter(
+                (pl.col("sweep") == "correlated_trees")
+                & (pl.col("steiner") == False)  # noqa: E712
+                & pl.col("quartets_per_second").is_not_null()
+            )
+            .sort("n_leaves")
+        )
+
+        if len(sub) == 0:
+            return mo.callout(
+                mo.md(
+                    "No `correlated_trees` / `steiner=False` rows found.  "
+                    "Run `TestThroughputCorrelatedTrees` and save the JSON."
+                ),
+                kind="neutral",
+            )
+
+        backends_present = [b for b in _BACKEND_ORDER if b in sub["backend"].to_list()]
+        morton_vals = sorted(sub["morton_order"].unique().to_list())
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        n_lines = 0
+
+        for mi, machine in enumerate(machines):
+            ls = _MACHINE_STYLES[mi % len(_MACHINE_STYLES)]
+            for backend in backends_present:
+                for morton in morton_vals:
+                    seg = (
+                        sub.filter(
+                            (pl.col("machine") == machine)
+                            & (pl.col("backend") == backend)
+                            & (pl.col("morton_order") == morton)
+                        )
+                        .sort("n_leaves")
+                    )
+                    if len(seg) == 0:
+                        continue
+                    xs = seg["n_leaves"].to_list()
+                    ys = seg["quartets_per_second"].to_list()
+                    hostname = machine.split("/")[0].strip()
+                    arch_v = seg["arch"].drop_nulls().head(1).to_list()
+                    arch = arch_v[0] if arch_v else ""
+                    gpu_v = seg["gpu_name"].drop_nulls().head(1).to_list()
+                    gpu = gpu_v[0] if gpu_v else None
+                    hw_parts = [hostname]
+                    if arch:
+                        hw_parts.append(arch)
+                    if gpu:
+                        hw_parts.append(gpu)
+                    sched = _MORTON_LABELS[morton]
+                    label = (
+                        f"{_BACKEND_LABELS.get(backend, backend)} [{sched}]\n"
+                        f"({' / '.join(hw_parts)})"
+                    )
+                    ax.plot(
+                        xs, ys,
+                        color=_BACKEND_COLORS.get(backend, "grey"),
+                        linestyle=ls,
+                        marker=_MORTON_MARKERS[morton],
+                        markersize=5,
+                        linewidth=1.8,
+                        label=label,
+                    )
+                    n_lines += 1
+
+        n_trees_val = df.filter(pl.col("sweep") == "correlated_trees")["n_trees"].max()
+        ax.set_xlabel("Leaves per tree", fontsize=10)
+        ax.set_ylabel("Quartets / second  (calc phase)", fontsize=10)
+        ax.set_title(
+            f"Throughput vs. leaf count — correlated NNI ensemble  "
+            f"(fixed trees: {n_trees_val}, steiner=False)",
+            fontsize=10,
+        )
+        ax.set_xticks(sorted(sub["n_leaves"].unique().to_list()))
+        ax.tick_params(axis="x", rotation=45)
+        ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.3),
+            ncol=max(1, min(n_lines, 3)),
+            fontsize=8,
+            framealpha=0.8,
+        )
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="y", linestyle="--", alpha=0.4)
+        ax.semilogy()
+        fig.tight_layout()
+        return fig
+
+    _plot_correlated_trees()
+    return
+
+
+@app.cell(hide_code=True)
 def _(df, mo, pl):
     def _summary_table():
         if len(df) == 0:
@@ -664,30 +807,32 @@ def _(df, mo, pl):
 
         summary = (
             df.filter(pl.col("quartets_per_second").is_not_null())
-            .group_by(["machine", "backend", "sweep", "steiner", "morton_order"])
+            .group_by(["machine", "backend", "sweep", "steiner", "morton_order", "correlated"])
             .agg(
                 pl.col("quartets_per_second").mean().alias("mean_qps"),
                 pl.col("quartets_per_second").min().alias("min_qps"),
                 pl.col("quartets_per_second").max().alias("max_qps"),
                 pl.col("n_trees").n_unique().alias("n_sizes"),
             )
-            .sort(["sweep", "backend", "machine", "steiner", "morton_order"])
+            .sort(["sweep", "backend", "machine", "steiner", "morton_order", "correlated"])
         )
 
         _header = (
-            "| sweep | backend | machine | steiner | scheduling "
+            "| sweep | backend | machine | steiner | scheduling | trees "
             "| mean Q/s | min Q/s | max Q/s | n sizes |"
         )
-        _sep = "|---|---|---|---|---|---:|---:|---:|---:|"
+        _sep = "|---|---|---|---|---|---|---:|---:|---:|---:|"
         _tbody = []
         for row in summary.to_dicts():
             steiner_str = "✓" if row["steiner"] else "✗"
             sched_str = "Morton" if row["morton_order"] else "standard"
+            trees_str = "correlated" if row["correlated"] else "random"
             _tbody.append(
                 f"| {row['sweep']} | {row['backend']} "
                 f"| {row['machine'].split('/')[0].strip()} "
                 f"| {steiner_str} "
                 f"| {sched_str} "
+                f"| {trees_str} "
                 f"| {row['mean_qps']:,.0f} "
                 f"| {row['min_qps']:,.0f} "
                 f"| {row['max_qps']:,.0f} "

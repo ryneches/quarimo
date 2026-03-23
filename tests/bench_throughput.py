@@ -23,11 +23,22 @@ fixed_groups  (TestThroughputFixedGroups)
 fixed_trees  (TestThroughputFixedTrees)
     Tree count is held constant (FIXED_TREES_N_TREES trees, one group).
     Leaf count per tree varies across FIXED_TREES_N_LEAVES.
-    Tests the O(1) LCA hypothesis: calculation-phase throughput should be
-    independent of tree size because each quartet query requires exactly
-    four sparse-table lookups regardless of n_leaves.  A throughput drop
-    at larger leaf counts indicates sparse-table cache spill (O(n log n)
-    per tree).
+    Trees use independently shuffled leaf orders (worst case for Morton
+    scheduling).  Tests the O(1) LCA hypothesis: calculation-phase
+    throughput should be independent of tree size because each quartet
+    query requires exactly four sparse-table lookups regardless of
+    n_leaves.  A throughput drop at larger leaf counts indicates
+    sparse-table cache spill (O(n log n) per tree).
+
+correlated_trees  (TestThroughputCorrelatedTrees)
+    Same axis as fixed_trees but trees are drawn from a five-template
+    NNI ensemble that approximates a bootstrap phylogenetic analysis.
+    All trees share a common balanced-binary reference topology; only a
+    few NNI edits per template perturb it.  The consensus DFS rank is
+    predictive of individual-tree sparse-table positions, satisfying the
+    prerequisite for Morton-ordered quartet scheduling to reduce cache
+    misses.  This is the primary sweep for evaluating whether the Morton
+    path provides a throughput benefit.
 
 Timing phases
 -------------
@@ -166,6 +177,156 @@ def _balanced_newick(
     return _build(leaf_names) + ";"
 
 
+# ======================================================================== #
+# Correlated tree generator (bootstrap-like ensemble)                      #
+# ======================================================================== #
+#
+# Five topology templates, each derived from the same balanced binary
+# reference tree by applying a fixed set of NNI moves.  Round-robin
+# assignment gives ≈20% of trees per template, producing bootstrap-style
+# support scores:
+#
+#   Branches hit by 0 templates' NNI moves  → 100% support
+#   Branches hit by 1 template's NNI move   →  80% support
+#   Branches hit by 2 templates' NNI moves  →  60% support  (target range)
+#   Branches hit by 3 templates' NNI moves  →  40% support  (rare)
+#
+# Template definitions (see _nni_move_paths for path semantics):
+#   T0: reference — no moves
+#   T1: 2 NNI moves near leaves (affects specific shallow branches)
+#   T2: 2 NNI moves at mid-depth (affects specific mid-clade branches)
+#   T3: 1 NNI move near root    (affects one deep high-level split)
+#   T4: root NNI + 1 near-leaf NNI (combines T3 and part of T1)
+#
+# Unlike _make_grouped_forest (independently shuffled leaves), all five
+# templates share a common reference DFS order.  The consensus DFS rank
+# is predictive of individual tree sparse-table positions for most taxa,
+# which is the prerequisite for Morton-ordered query scheduling to reduce
+# cache misses in the fixed_trees sweep.
+
+
+def _build_tree_struct(leaf_names: list[str]) -> list | str:
+    """Balanced binary tree as a nested mutable list.  Leaves are strings."""
+    if len(leaf_names) == 1:
+        return leaf_names[0]
+    mid = len(leaf_names) // 2
+    return [_build_tree_struct(leaf_names[:mid]), _build_tree_struct(leaf_names[mid:])]
+
+
+def _deep_copy_tree(tree: list | str) -> list | str:
+    if isinstance(tree, str):
+        return tree
+    return [_deep_copy_tree(tree[0]), _deep_copy_tree(tree[1])]
+
+
+def _struct_to_newick(tree: list | str, bl: float = 1.0) -> str:
+    if isinstance(tree, str):
+        return f"{tree}:{bl}"
+    return f"({_struct_to_newick(tree[0], bl)},{_struct_to_newick(tree[1], bl)}):{bl}"
+
+
+def _apply_nni(tree: list | str, path: tuple[int, ...], child_idx: int) -> bool:
+    """
+    Apply one NNI move in-place on a mutable nested-list tree.
+
+    Navigates to the node V at *path*, then swaps V's *child_idx*-th
+    child with V's sibling (the other child of V's parent at path[:-1]).
+
+    Returns True on success, False when the path leads to a leaf (move
+    skipped safely).
+    """
+    parent: list | str = tree
+    for step in path[:-1]:
+        if isinstance(parent, str):
+            return False
+        parent = parent[step]           # type: ignore[index]
+    if isinstance(parent, str):
+        return False
+    node_idx = path[-1]
+    node = parent[node_idx]             # type: ignore[index]
+    if isinstance(node, str):
+        return False                    # target is a leaf — skip
+    sibling_idx = 1 - node_idx
+    sibling = parent[sibling_idx]       # type: ignore[index]
+    child = node[child_idx]
+    node[child_idx] = sibling
+    parent[sibling_idx] = child         # type: ignore[index]
+    return True
+
+
+def _nni_move_paths(
+    n_leaves: int,
+) -> list[list[tuple[tuple[int, ...], int]]]:
+    """
+    Return NNI move lists for the 5 topology templates.
+
+    Each move is ``(path_from_root, child_idx_to_swap)``.  Paths are
+    tuples of 0/1 branch choices from the root; ``child_idx`` selects
+    which grandchild to swap with the node's sibling.
+
+    Paths are chosen so that:
+      - ``root_path`` reaches depth 1 (always an internal node for n ≥ 2)
+      - ``mid_path_*`` reach depth d//2 (internal for n ≥ 4)
+      - ``leaf_path_*`` reach depth d-1 (internal for n ≥ 4 by construction)
+
+    ``_apply_nni`` returns False and skips gracefully if a path happens to
+    lead to a leaf (can occur for very small n_leaves).
+    """
+    d = max(2, int(np.log2(max(n_leaves, 4))))
+
+    root_path:   tuple[int, ...] = (0,)
+    mid_path_a:  tuple[int, ...] = (0,) * (d // 2)
+    mid_path_b:  tuple[int, ...] = (0,) * (d // 2 - 1) + (1,)
+    leaf_path_a: tuple[int, ...] = (0,) * (d - 1)
+    leaf_path_b: tuple[int, ...] = (1,) * (d - 1)
+
+    return [
+        [],                                                    # T0: reference
+        [(leaf_path_a, 0), (leaf_path_b, 0)],                 # T1: 2 near-leaf
+        [(mid_path_a, 1), (mid_path_b, 0)],                   # T2: 2 mid-depth
+        [(root_path, 0)],                                      # T3: 1 sub-root
+        [(root_path, 0), (leaf_path_a, 1)],                   # T4: root + leaf
+    ]
+
+
+def _make_correlated_grouped_forest(
+    n_total_trees: int,
+    n_groups: int,
+    n_leaves: int = N_LEAVES,
+    seed: int = RANDOM_SEED,
+) -> Forest:
+    """
+    Build a Forest of trees drawn from a bootstrap-like correlated ensemble.
+
+    All trees share the same leaf set and a common balanced binary reference
+    topology; the five NNI-derived templates are assigned in round-robin order
+    (≈20% each).  Unlike _make_grouped_forest, the DFS order of leaves is
+    correlated across trees — the prerequisite for Morton query scheduling to
+    reduce sparse-table cache misses.
+    """
+    canonical = [_leaf_name(i) for i in range(n_leaves)]
+    ref_tree = _build_tree_struct(canonical)
+    templates = _nni_move_paths(n_leaves)
+
+    groups: dict[str, list[str]] = {}
+    base, remainder = divmod(n_total_trees, n_groups)
+    tree_idx = 0
+    for g in range(n_groups):
+        count = base + (1 if g < remainder else 0)
+        trees = []
+        for _ in range(count):
+            moves = templates[tree_idx % len(templates)]
+            variant = _deep_copy_tree(ref_tree)
+            for path, child_idx in moves:
+                _apply_nni(variant, path, child_idx)
+            trees.append(_struct_to_newick(variant) + ";")
+            tree_idx += 1
+        groups[f"g{g}"] = trees
+
+    with quiet():
+        return Forest(groups)
+
+
 def _detect_gpu(backend: str) -> str | None:
     """Return a short GPU name string for the active backend, or None."""
     if backend == "cuda":
@@ -269,9 +430,10 @@ def _run_trial(
     n_groups: int,
     backend: str,
     steiner: bool,
-    sweep: str,         # 'fixed_forest', 'fixed_groups', or 'fixed_trees'
+    sweep: str,         # 'fixed_forest', 'fixed_groups', 'fixed_trees', or 'correlated_trees'
     n_leaves: int = N_LEAVES,
     morton_order: bool = False,  # [MORTON_SCHED]
+    correlated: bool = False,
 ) -> None:
     """
     Build a forest, warm up the kernel, then run BENCH_ROUNDS timed calls
@@ -284,7 +446,10 @@ def _run_trial(
 
     # ── Phase 1: device load (Forest construction + optional GPU upload) ──
     t0 = perf_counter()
-    forest = _make_grouped_forest(n_total_trees, n_groups, n_leaves=n_leaves)
+    if correlated:
+        forest = _make_correlated_grouped_forest(n_total_trees, n_groups, n_leaves=n_leaves)
+    else:
+        forest = _make_grouped_forest(n_total_trees, n_groups, n_leaves=n_leaves)
     t_device_load = perf_counter() - t0
 
     q = Quartets.random(forest, count=n_quartets, seed=QUARTET_SEED)
@@ -329,6 +494,7 @@ def _run_trial(
             "n_quartets":          n_quartets,
             "steiner":             steiner,
             "morton_order":        morton_order,         # [MORTON_SCHED]
+            "correlated":          correlated,
             "t_device_load":       t_device_load,
             "t_query_load":        phases["t_query_load"],
             "t_calc":              t_calc,
@@ -581,4 +747,97 @@ class TestThroughputFixedTrees:
             sweep="fixed_trees",
             n_leaves=n_leaves,
             morton_order=morton_order,
+        )
+
+
+# ======================================================================== #
+# 4. Correlated trees: Morton vs standard on bootstrap-like ensemble       #
+# ======================================================================== #
+
+
+class TestThroughputCorrelatedTrees:
+    """
+    Sweep 4: correlated bootstrap-like ensemble, standard vs Morton scheduling.
+
+    Holds the tree count constant at FIXED_TREES_N_TREES (one group) and
+    sweeps n_leaves across FIXED_TREES_N_LEAVES, but builds each forest from
+    the five-template NNI ensemble rather than independently shuffled trees.
+
+    Because all trees share a common balanced-binary reference topology with
+    only a few NNI edits, the consensus DFS rank is predictive of individual-
+    tree sparse-table positions.  This is the prerequisite for Morton-ordered
+    quartet scheduling to reduce cache misses; the fixed_trees sweep (with
+    randomly shuffled trees) tests the worst case.
+
+    Expected result: morton_order=True should show higher throughput than
+    morton_order=False at large leaf counts where the sparse table overflows
+    GPU L2.  If no benefit appears here either, the Morton path should be
+    removed.
+    """
+
+    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
+    @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
+    @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
+    def test_python(self, benchmark, n_leaves, steiner, morton_order):
+        _run_trial(
+            benchmark,
+            n_total_trees=FIXED_TREES_N_TREES,
+            n_groups=1,
+            backend="python",
+            steiner=steiner,
+            sweep="correlated_trees",
+            n_leaves=n_leaves,
+            morton_order=morton_order,
+            correlated=True,
+        )
+
+    @pytest.mark.requires_cpu_parallel
+    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
+    @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
+    @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
+    def test_cpu_parallel(self, benchmark, n_leaves, steiner, morton_order):
+        _run_trial(
+            benchmark,
+            n_total_trees=FIXED_TREES_N_TREES,
+            n_groups=1,
+            backend="cpu-parallel",
+            steiner=steiner,
+            sweep="correlated_trees",
+            n_leaves=n_leaves,
+            morton_order=morton_order,
+            correlated=True,
+        )
+
+    @pytest.mark.requires_cuda
+    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
+    @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
+    @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
+    def test_cuda(self, benchmark, n_leaves, steiner, morton_order):
+        _run_trial(
+            benchmark,
+            n_total_trees=FIXED_TREES_N_TREES,
+            n_groups=1,
+            backend="cuda",
+            steiner=steiner,
+            sweep="correlated_trees",
+            n_leaves=n_leaves,
+            morton_order=morton_order,
+            correlated=True,
+        )
+
+    @pytest.mark.requires_mlx
+    @pytest.mark.parametrize("morton_order", [False, True], ids=["standard", "morton"])  # [MORTON_SCHED]
+    @pytest.mark.parametrize("steiner", [False, True], ids=["counts", "steiner"])
+    @pytest.mark.parametrize("n_leaves", FIXED_TREES_N_LEAVES)
+    def test_mlx(self, benchmark, n_leaves, steiner, morton_order):
+        _run_trial(
+            benchmark,
+            n_total_trees=FIXED_TREES_N_TREES,
+            n_groups=1,
+            backend="mlx",
+            steiner=steiner,
+            sweep="correlated_trees",
+            n_leaves=n_leaves,
+            morton_order=morton_order,
+            correlated=True,
         )
