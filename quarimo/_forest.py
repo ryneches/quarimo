@@ -2579,6 +2579,7 @@ class Forest:
                 ckd.tree_to_group_idx,
                 ckd.polytomy_offsets,
                 ckd.polytomy_nodes,
+                ckd.tree_multiplicities,
                 d_counts,
             )
             d_counts.copy_to_host(counts_out)

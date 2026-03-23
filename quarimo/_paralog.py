@@ -357,7 +357,7 @@ class ParalogOptimizer:
             ckd.all_euler_depth, ckd.all_sparse_table, ckd.all_log2_table,
             ckd.node_offsets, ckd.tour_offsets, ckd.sp_offsets, ckd.lg_offsets,
             ckd.sp_tour_widths, ckd.tree_to_group_idx,
-            ckd.polytomy_offsets, ckd.polytomy_nodes,
+            ckd.polytomy_offsets, ckd.polytomy_nodes, ckd.tree_multiplicities,
             d_counts_target,
         )
         return trial_g2l

@@ -708,10 +708,11 @@ if _CUDA_AVAILABLE:
         tree_to_group_idx,
         polytomy_offsets,
         polytomy_nodes,
+        tree_multiplicities,        # int32[n_trees]
         counts_out,                 # int32[n_quartets, n_groups, 4]
     ):
         """
-        CUDA delta kernel: incremental ±1 updates to ``counts_out`` after a
+        CUDA delta kernel: incremental ±mult updates to ``counts_out`` after a
         paralog copy-slot permutation.
 
         Grid is 2D: x over ``qi_local`` (affected quartet index, 0 …
@@ -832,8 +833,9 @@ if _CUDA_AVAILABLE:
 
         # ── Apply signed delta ───────────────────────────────────────────── #
         if old_topo != new_topo:
-            cuda.atomic.add(counts_out, (qi, gi, old_topo), -1)
-            cuda.atomic.add(counts_out, (qi, gi, new_topo), 1)
+            mult = tree_multiplicities[ti]
+            cuda.atomic.add(counts_out, (qi, gi, old_topo), -mult)
+            cuda.atomic.add(counts_out, (qi, gi, new_topo), mult)
 
     @cuda.jit
     def _counts_d2d_copy_cuda(src, dst):

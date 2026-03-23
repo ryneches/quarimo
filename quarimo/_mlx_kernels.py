@@ -872,8 +872,9 @@ inline int32_t resolve_topo_msl(
         }
 
         if (old_topo != new_topo) {
-            counts_out[qi_base_out + gi * 4 + old_topo] -= 1;
-            counts_out[qi_base_out + gi * 4 + new_topo] += 1;
+            int32_t mult = tree_multiplicities[ti];
+            counts_out[qi_base_out + gi * 4 + old_topo] -= mult;
+            counts_out[qi_base_out + gi * 4 + new_topo] += mult;
         }
     }
 """
@@ -899,6 +900,7 @@ inline int32_t resolve_topo_msl(
         "tree_to_group_idx",        # int32[n_trees]
         "polytomy_offsets",         # int32[n_trees + 1]
         "polytomy_nodes",           # int32[total_polytomy] (at least 1 element)
+        "tree_multiplicities",      # int32[n_trees]
         "n_affected_arr",           # int32[1]
         "n_affected_trees_arr",     # int32[1]
         "n_groups_arr",             # int32[1]
@@ -988,6 +990,7 @@ inline int32_t resolve_topo_msl(
                 mx.array(kd.tree_to_group_idx,               dtype=mx.int32),
                 mx.array(kd.polytomy_offsets,                dtype=mx.int32),
                 mx.array(poly_nodes,                         dtype=mx.int32),
+                mx.array(kd.tree_multiplicities,             dtype=mx.int32),
                 mx.array([n_affected],                       dtype=mx.int32),
                 mx.array([n_affected_trees],                 dtype=mx.int32),
                 mx.array([n_groups],                         dtype=mx.int32),
