@@ -507,6 +507,10 @@ class Forest:
             for t in self._trees:
                 t._apply_taxon_map(taxon_map)
 
+        # Deduplicate completely identical trees (same topology + branch lengths)
+        # within each group.  Sets self.tree_multiplicities and self.n_input_trees.
+        self._deduplicate_trees()
+
         # Build group mappings
         self._build_group_mappings()
 
@@ -561,6 +565,57 @@ class Forest:
             [group_to_idx[g] for g in self.group_labels], dtype=np.int32
         )
 
+    def _deduplicate_trees(self) -> None:
+        """
+        Remove completely identical trees (same topology and branch lengths)
+        within each group, recording how many copies each unique tree represents.
+
+        Sets:
+            ``self.tree_multiplicities`` — int32[n_trees] weight for each tree.
+            ``self.n_input_trees``       — original tree count before deduplication.
+
+        Two trees are considered identical iff ``tree_hash()`` matches AND they
+        belong to the same group (cross-group trees are never merged because they
+        accumulate into different output slots).
+
+        The order of trees is preserved (first occurrence wins).
+        """
+        self.n_input_trees = self.n_trees
+
+        seen: dict = {}          # (hash_bytes, group_label) -> first occurrence index
+        keep_indices: list = []  # indices into self._trees / self.group_labels
+
+        for i, (tree, grp) in enumerate(zip(self._trees, self.group_labels)):
+            key = (tree.tree_hash(), grp)
+            if key not in seen:
+                seen[key] = len(keep_indices)
+                keep_indices.append(i)
+
+        n_dupes = self.n_input_trees - len(keep_indices)
+        if n_dupes > 0:
+            logger.info(
+                "🔁 Deduplication: removed %d/%d duplicate trees (%d unique).",
+                n_dupes, self.n_input_trees, len(keep_indices),
+            )
+
+        # Compute multiplicities: count how many input trees map to each unique tree.
+        # seen[key] = the sequential index in keep_indices (0, 1, 2, ...).
+        mult: dict = {}  # new sequential index -> count
+        for tree, grp in zip(self._trees, self.group_labels):
+            key = (tree.tree_hash(), grp)
+            new_idx = seen[key]
+            mult[new_idx] = mult.get(new_idx, 0) + 1
+
+        # Rebuild _trees and group_labels to contain only unique trees
+        self._trees = [self._trees[i] for i in keep_indices]
+        self.group_labels = [self.group_labels[i] for i in keep_indices]
+        self.n_trees = len(self._trees)
+
+        # Build the multiplicities array in the new tree order
+        self.tree_multiplicities = np.array(
+            [mult[new_i] for new_i in range(len(keep_indices))], dtype=np.int32
+        )
+
     def _build_kernel_data(self) -> None:
         """Package all forest arrays into a ``ForestKernelData`` for kernel dispatch."""
         self._kernel_data = ForestKernelData(
@@ -579,6 +634,7 @@ class Forest:
             tree_to_group_idx=self.tree_to_group_idx,
             polytomy_offsets=self.polytomy_offsets,
             polytomy_nodes=self.polytomy_nodes,
+            tree_multiplicities=self.tree_multiplicities,
             n_trees=self.n_trees,
             n_global_taxa=self.n_global_taxa,
             n_groups=self.n_groups,
@@ -1935,6 +1991,7 @@ class Forest:
         tree_to_group_idx: np.ndarray,
         polytomy_offsets: np.ndarray,
         polytomy_nodes: np.ndarray,
+        tree_multiplicities: np.ndarray,
         counts_out: np.ndarray,
         steiner_out: np.ndarray,
         steiner_min_out: np.ndarray,
@@ -2035,14 +2092,15 @@ class Forest:
                 )
 
                 gi = int(tree_to_group_idx[ti])
-                counts_out[qi, gi, topo] += 1
+                mult = int(tree_multiplicities[ti])
+                counts_out[qi, gi, topo] += mult
 
                 if compute_steiner:
                     sl = Forest._steiner_length(
                         ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance,
                     )
                     Forest._accumulate_steiner(
-                        qi, gi, topo, sl,
+                        qi, gi, topo, sl, mult,
                         steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
                     )
 
@@ -2315,7 +2373,7 @@ class Forest:
 
     @staticmethod
     def _accumulate_steiner(
-        qi, gi, topo, sl,
+        qi, gi, topo, sl, mult,
         steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
     ):
         """
@@ -2324,13 +2382,17 @@ class Forest:
         Pure-Python counterpart of ``_accumulate_steiner_nb`` and
         ``_accumulate_steiner_cuda``.  No atomics — called from the
         single-threaded Python fallback kernel.
+
+        ``mult`` is the tree multiplicity weight.  ``steiner_out`` and
+        ``steiner_sum_sq_out`` are weighted; min/max are not (identical
+        duplicate trees have the same Steiner length).
         """
-        steiner_out[qi, gi, topo] += sl
+        steiner_out[qi, gi, topo] += sl * mult
         if sl < steiner_min_out[qi, gi, topo]:
             steiner_min_out[qi, gi, topo] = sl
         if sl > steiner_max_out[qi, gi, topo]:
             steiner_max_out[qi, gi, topo] = sl
-        steiner_sum_sq_out[qi, gi, topo] += sl * sl
+        steiner_sum_sq_out[qi, gi, topo] += sl * sl * mult
 
     @staticmethod
     def _python_quartet_counts_delta(
@@ -2353,14 +2415,16 @@ class Forest:
         tree_to_group_idx,
         polytomy_offsets,
         polytomy_nodes,
+        tree_multiplicities,
         counts_out,
     ):
         """
         Pure-Python fallback for the accelerated delta kernels.
 
-        Applies signed ±1 updates to ``counts_out`` in-place for each
+        Applies signed ±mult updates to ``counts_out`` in-place for each
         (affected_quartet, affected_tree) pair where the topology changes
-        between the old and new copy-slot assignments.
+        between the old and new copy-slot assignments.  ``mult`` is the
+        tree multiplicity weight from ``tree_multiplicities[ti]``.
         """
         n_affected_quartets = delta_quartet_ids.shape[0]
         for qi_local in range(n_affected_quartets):
@@ -2421,8 +2485,9 @@ class Forest:
 
                 # ---- Apply signed delta ----------------------------------- #
                 if old_topo != new_topo:
-                    counts_out[qi, gi, old_topo] -= 1
-                    counts_out[qi, gi, new_topo] += 1
+                    mult = int(tree_multiplicities[ti])
+                    counts_out[qi, gi, old_topo] -= mult
+                    counts_out[qi, gi, new_topo] += mult
 
     def apply_quartet_counts_delta(
         self,
@@ -2552,6 +2617,7 @@ class Forest:
                 kd.tree_to_group_idx,
                 kd.polytomy_offsets,
                 kd.polytomy_nodes,
+                kd.tree_multiplicities,
                 counts_out,
             )
         else:
@@ -2575,6 +2641,7 @@ class Forest:
                 kd.tree_to_group_idx,
                 kd.polytomy_offsets,
                 kd.polytomy_nodes,
+                kd.tree_multiplicities,
                 counts_out,
             )
 

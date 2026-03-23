@@ -92,7 +92,7 @@ class TestForestInputNormalization:
     def test_list_of_paths_to_multitree_files(self):
         """Each Path in the list may point to a multi-tree file; trees are concatenated."""
         f = Forest([COLLECTION, COLLECTION])
-        assert f.n_trees == 6  # 3 trees × 2 files
+        assert f.n_input_trees == 6  # 3 trees × 2 files (6 loaded, duplicates deduped)
         assert f.n_groups == 1
 
     def test_list_mixing_strings_and_paths(self):
@@ -152,7 +152,7 @@ class TestForestInputNormalization:
     def test_dict_list_of_paths_multitree_files(self):
         """A dict value may be a list of Paths each containing multiple trees."""
         f = Forest({"grp": [COLLECTION, COLLECTION]})
-        assert f.n_trees == 6
+        assert f.n_input_trees == 6  # 6 loaded, duplicates deduped
 
     def test_dict_multiple_groups_list_of_paths(self):
         """Multiple groups, each given as a list of Paths."""
@@ -980,10 +980,18 @@ class TestGroupOffsets:
 
     def test_group_offsets_construction(self):
         """Test that group_offsets array is correct."""
+        # Use distinct trees within each group to avoid deduplication collapsing them.
         groups = {
-            "A": ["((a:1,b:1):1,(c:1,d:1):1);"] * 2,
-            "B": ["((e:1,f:1):1,(g:1,h:1):1);"] * 3,
-            "C": ["((i:1,j:1):1,(k:1,l:1):1);"] * 1,
+            "A": [
+                "((a:1.0,b:1.0):1,(c:1.0,d:1.0):1);",
+                "((a:1.1,b:0.9):1,(c:0.8,d:1.2):1);",
+            ],
+            "B": [
+                "((e:1.0,f:1.0):1,(g:1.0,h:1.0):1);",
+                "((e:1.1,f:0.9):1,(g:0.8,h:1.2):1);",
+                "((e:0.7,f:1.3):1,(g:1.4,h:0.6):1);",
+            ],
+            "C": ["((i:1,j:1):1,(k:1,l:1):1);"],
         }
 
         c = Forest(groups)
@@ -1001,8 +1009,14 @@ class TestGroupOffsets:
         assert c.group_offsets[3] - c.group_offsets[2] == 1  # Group C: 1 tree
 
     def test_group_offsets_single_group(self):
-        """Test group_offsets with single group."""
-        trees = ["((A:1,B:1):1,(C:1,D:1):1);"] * 5
+        """Test group_offsets with single group (distinct trees, no deduplication)."""
+        trees = [
+            "((A:1.0,B:1.0):1,(C:1.0,D:1.0):1);",
+            "((A:1.1,B:0.9):1,(C:0.8,D:1.2):1);",
+            "((A:0.7,B:1.3):1,(C:1.4,D:0.6):1);",
+            "((A:1.5,B:0.5):1,(C:0.9,D:1.1):1);",
+            "((A:0.8,B:1.2):1,(C:1.3,D:0.7):1);",
+        ]
         c = Forest(trees)
 
         expected = np.array([0, 5], dtype=np.int64)

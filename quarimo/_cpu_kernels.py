@@ -307,7 +307,7 @@ def _steiner_length_nb(ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_
 
 
 @njit(cache=True)
-def _accumulate_steiner_nb(qi, gi, topo, sl,
+def _accumulate_steiner_nb(qi, gi, topo, sl, mult,
                             steiner_out, steiner_min_out,
                             steiner_max_out, steiner_sum_sq_out):
     """
@@ -324,21 +324,25 @@ def _accumulate_steiner_nb(qi, gi, topo, sl,
         Output cell indices.
     sl : float64
         Steiner spanning length for this (tree, quartet) observation.
+    mult : int32
+        Tree multiplicity weight.  ``steiner_out`` and ``steiner_sum_sq_out``
+        are scaled by ``mult``; min/max are not (identical duplicate trees
+        have the same Steiner length).
     steiner_out : float64[n_quartets, n_groups, 4]
-        Accumulates the sum of Steiner lengths.
+        Accumulates the weighted sum of Steiner lengths.
     steiner_min_out : float64[n_quartets, n_groups, 4]
         Accumulates the per-cell minimum; pre-filled with +inf by caller.
     steiner_max_out : float64[n_quartets, n_groups, 4]
         Accumulates the per-cell maximum; pre-filled with -inf by caller.
     steiner_sum_sq_out : float64[n_quartets, n_groups, 4]
-        Accumulates the sum of squared lengths (used for variance).
+        Accumulates the weighted sum of squared lengths (used for variance).
     """
-    steiner_out[qi, gi, topo] += sl
+    steiner_out[qi, gi, topo] += sl * mult
     if sl < steiner_min_out[qi, gi, topo]:
         steiner_min_out[qi, gi, topo] = sl
     if sl > steiner_max_out[qi, gi, topo]:
         steiner_max_out[qi, gi, topo] = sl
-    steiner_sum_sq_out[qi, gi, topo] += sl * sl
+    steiner_sum_sq_out[qi, gi, topo] += sl * sl * mult
 
 
 @njit(parallel=True, cache=True)
@@ -361,6 +365,7 @@ def _quartet_counts_njit(
         tree_to_group_idx,
         polytomy_offsets,
         polytomy_nodes,
+        tree_multiplicities,
         counts_out):
     """
     Numba-compiled counts-only quartet kernel.
@@ -417,7 +422,7 @@ def _quartet_counts_njit(
                 all_log2_table, all_euler_tour,
                 poly_start, poly_end, polytomy_nodes,
             )
-            counts_out[qi, tree_to_group_idx[ti], topo] += 1
+            counts_out[qi, tree_to_group_idx[ti], topo] += tree_multiplicities[ti]
 
 
 @njit(parallel=True, cache=True)
@@ -440,6 +445,7 @@ def _quartet_steiner_njit(
         tree_to_group_idx,
         polytomy_offsets,
         polytomy_nodes,
+        tree_multiplicities,
         counts_out,
         steiner_out,
         steiner_min_out,
@@ -505,12 +511,13 @@ def _quartet_steiner_njit(
                 poly_start, poly_end, polytomy_nodes,
             )
             gi = tree_to_group_idx[ti]
+            mult = tree_multiplicities[ti]
             sl = _steiner_length_nb(
                 ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance,
             )
-            counts_out[qi, gi, topo] += 1
+            counts_out[qi, gi, topo] += mult
             _accumulate_steiner_nb(
-                qi, gi, topo, sl,
+                qi, gi, topo, sl, mult,
                 steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
             )
 
@@ -543,6 +550,7 @@ def _quartet_counts_delta_nb(
         tree_to_group_idx,
         polytomy_offsets,
         polytomy_nodes,
+        tree_multiplicities,
         counts_out):
     """
     Incremental update to ``counts_out`` after a paralog copy-slot
@@ -550,7 +558,8 @@ def _quartet_counts_delta_nb(
 
     For each affected (quartet, tree) pair, computes the topology under both
     the old and new copy-slot assignments.  If the topology changed, applies
-    a signed ±1 update to ``counts_out`` in-place.
+    a signed ±mult update to ``counts_out`` in-place, where ``mult`` is
+    ``tree_multiplicities[ti]``.
 
     Thread safety
     -------------
@@ -641,8 +650,9 @@ def _quartet_counts_delta_nb(
 
             # ---- Apply signed delta ------------------------------------- #
             if old_topo != new_topo:
-                counts_out[qi, gi, old_topo] -= 1
-                counts_out[qi, gi, new_topo] += 1
+                mult = tree_multiplicities[ti]
+                counts_out[qi, gi, old_topo] -= mult
+                counts_out[qi, gi, new_topo] += mult
 
 
 # ======================================================================== #

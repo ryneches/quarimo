@@ -128,6 +128,9 @@ class ForestKernelData:
     polytomy_offsets: np.ndarray   # int32[n_trees + 1]
     polytomy_nodes: np.ndarray     # int32[total_polytomy]
 
+    # Deduplication weights
+    tree_multiplicities: np.ndarray  # int32[n_trees]
+
     # Scalars
     n_trees: int
     n_global_taxa: int
@@ -171,6 +174,7 @@ class ForestKernelData:
             self.tree_to_group_idx,
             self.polytomy_offsets,
             self.polytomy_nodes,
+            self.tree_multiplicities,
         )
 
     def cuda_forest_args(self) -> tuple:
@@ -198,6 +202,7 @@ class ForestKernelData:
             self.tree_to_group_idx,
             self.polytomy_offsets,
             self.polytomy_nodes,
+            self.tree_multiplicities,
         )
 
     # ------------------------------------------------------------------
@@ -229,6 +234,7 @@ class ForestKernelData:
             tree_to_group_idx=cuda.to_device(self.tree_to_group_idx),
             polytomy_offsets=cuda.to_device(self.polytomy_offsets),
             polytomy_nodes=cuda.to_device(self.polytomy_nodes),
+            tree_multiplicities=cuda.to_device(self.tree_multiplicities),
             n_trees=self.n_trees,
             n_global_taxa=self.n_global_taxa,
             n_groups=self.n_groups,
@@ -252,6 +258,7 @@ class ForestKernelData:
             self.tree_to_group_idx,
             self.polytomy_offsets,
             self.polytomy_nodes,
+            self.tree_multiplicities,
         ]
         return arrays
 

@@ -382,8 +382,9 @@ inline int32_t rmq_msl(
             else                           topo = 2;
         }
 
-        int32_t gi = tree_to_group_idx[ti];
-        counts_out[out_base + gi * 4 + topo] += 1;
+        int32_t gi   = tree_to_group_idx[ti];
+        int32_t mult = tree_multiplicities[ti];
+        counts_out[out_base + gi * 4 + topo] += mult;
     }
 """
 
@@ -499,13 +500,14 @@ inline int32_t rmq_msl(
         float sl = (leaf_rd0 + leaf_rd1 + leaf_rd2 + leaf_rd3)
                    - 0.5f * (r_winner + r0 + r1 + r2);
 
-        int32_t gi  = tree_to_group_idx[ti];
-        int32_t idx = out_base + gi * 4 + topo;
-        counts_out[idx]  += 1;
-        steiner_out[idx] += sl;
+        int32_t gi   = tree_to_group_idx[ti];
+        int32_t mult = tree_multiplicities[ti];
+        int32_t idx  = out_base + gi * 4 + topo;
+        counts_out[idx]  += mult;
+        steiner_out[idx] += sl * (float)mult;
         if (sl < steiner_min_out[idx]) steiner_min_out[idx] = sl;
         if (sl > steiner_max_out[idx]) steiner_max_out[idx] = sl;
-        steiner_ssq_out[idx] += sl * sl;
+        steiner_ssq_out[idx] += sl * sl * (float)mult;
     }
 """
 
@@ -530,6 +532,7 @@ inline int32_t rmq_msl(
         "tree_to_group_idx",    # int32[n_trees]
         "polytomy_offsets",     # int32[n_trees + 1]
         "polytomy_nodes",       # int32[total_polytomy] (at least 1 element)
+        "tree_multiplicities",  # int32[n_trees]
         "n_quartets_arr",       # int32[1]
         "n_trees_arr",          # int32[1]
         "n_groups_arr",         # int32[1]
@@ -590,6 +593,7 @@ inline int32_t rmq_msl(
             mx.array(kd.tree_to_group_idx,               dtype=mx.int32),
             mx.array(kd.polytomy_offsets,                dtype=mx.int32),
             mx.array(poly_nodes,                         dtype=mx.int32),
+            mx.array(kd.tree_multiplicities,             dtype=mx.int32),
             mx.array([n_quartets],                       dtype=mx.int32),
             mx.array([kd.n_trees],                       dtype=mx.int32),
             mx.array([n_groups],                         dtype=mx.int32),

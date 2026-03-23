@@ -134,6 +134,28 @@ class Tree:
         # Empty for trees where no taxon_map was applied.
         self.paralog_groups: dict = {}
 
+    def tree_hash(self) -> bytes:
+        """
+        SHA-256 digest over topology, branch lengths, leaf names, and polytomy
+        node IDs.  Two trees are considered identical (Case A deduplication) iff
+        their digests match.
+
+        Bootstrap ``support`` values are deliberately excluded — trees that
+        differ only in support values are topologically and metrically identical
+        and produce the same quartet counts and Steiner statistics.
+        """
+        import hashlib
+        h = hashlib.sha256()
+        h.update(self.parent.tobytes())
+        h.update(self.left_child.tobytes())
+        h.update(self.right_child.tobytes())
+        h.update(self.distance.tobytes())
+        for i in range(self.n_leaves):
+            h.update(self.names[i].encode("utf-8") + b"\x00")
+        poly_bytes = np.array(sorted(self.polytomy_node_ids), dtype=np.int32).tobytes()
+        h.update(poly_bytes)
+        return h.digest()
+
     def _apply_taxon_map(self, taxon_map: dict) -> None:
         """
         **Private.**  Rename leaves according to *taxon_map* (leaf_name →

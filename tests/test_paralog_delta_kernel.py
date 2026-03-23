@@ -244,6 +244,7 @@ def test_double_swap_recovers_original(backend):
             kd.tree_to_group_idx,
             kd.polytomy_offsets,
             kd.polytomy_nodes,
+            kd.tree_multiplicities,
             counts_work,
         )
 

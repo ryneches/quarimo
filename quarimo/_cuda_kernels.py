@@ -211,7 +211,7 @@ if _CUDA_AVAILABLE:
         return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
 
     @cuda.jit(device=True)
-    def _accumulate_steiner_cuda(qi, gi, topo, sl,
+    def _accumulate_steiner_cuda(qi, gi, topo, sl, mult,
                                   steiner_out, steiner_min_out,
                                   steiner_max_out, steiner_sum_sq_out):
         """
@@ -228,15 +228,18 @@ if _CUDA_AVAILABLE:
             Output cell indices.
         sl : float64
             Steiner spanning length for this (tree, quartet) observation.
+        mult : int32
+            Tree multiplicity weight.  ``steiner_out`` and ``steiner_sum_sq_out``
+            are scaled by ``mult``; min/max are not.
         steiner_out : float64 device array [n_quartets, n_groups, 4]
         steiner_min_out : float64 device array [n_quartets, n_groups, 4]
         steiner_max_out : float64 device array [n_quartets, n_groups, 4]
         steiner_sum_sq_out : float64 device array [n_quartets, n_groups, 4]
         """
-        cuda.atomic.add(steiner_out, (qi, gi, topo), sl)
+        cuda.atomic.add(steiner_out, (qi, gi, topo), sl * mult)
         cuda.atomic.min(steiner_min_out, (qi, gi, topo), sl)
         cuda.atomic.max(steiner_max_out, (qi, gi, topo), sl)
-        cuda.atomic.add(steiner_sum_sq_out, (qi, gi, topo), sl * sl)
+        cuda.atomic.add(steiner_sum_sq_out, (qi, gi, topo), sl * sl * mult)
 
     @cuda.jit(device=True)
     def _polytomy_check_cuda(fo0, fo1, fo2, fo3,
@@ -506,6 +509,7 @@ if _CUDA_AVAILABLE:
         tree_to_group_idx,  # [n_trees] int32 - maps tree to group index
         polytomy_offsets,   # [n_trees + 1] int32 - CSR offsets for polytomy nodes
         polytomy_nodes,     # [total_polytomy] int32 - local node IDs of polytomy internals
+        tree_multiplicities,  # [n_trees] int32 - deduplication weights
         # Output
         counts              # [count, n_groups, 4] int32 - topology counts per group
     ):
@@ -560,8 +564,9 @@ if _CUDA_AVAILABLE:
             all_sparse_table, all_euler_depth, all_log2_table,
             all_euler_tour, all_root_distance,
         )
+        mult = tree_multiplicities[ti]
         if found:
-            cuda.atomic.add(counts, (qi, tree_to_group_idx[ti], topo), 1)
+            cuda.atomic.add(counts, (qi, tree_to_group_idx[ti], topo), mult)
             return
 
         topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
@@ -571,7 +576,7 @@ if _CUDA_AVAILABLE:
         )
 
         gi = tree_to_group_idx[ti]
-        cuda.atomic.add(counts, (qi, gi, topo), 1)
+        cuda.atomic.add(counts, (qi, gi, topo), mult)
 
     @cuda.jit
     def quartet_steiner_cuda_unified(
@@ -598,6 +603,7 @@ if _CUDA_AVAILABLE:
         tree_to_group_idx,  # [n_trees] int32 - maps tree to group index
         polytomy_offsets,   # [n_trees + 1] int32 - CSR offsets for polytomy nodes
         polytomy_nodes,     # [total_polytomy] int32 - local node IDs of polytomy internals
+        tree_multiplicities,  # [n_trees] int32 - deduplication weights
         # Outputs
         counts,             # [count, n_groups, 4] int32
         steiner_out,        # [count, n_groups, 4] float64 — summed Steiner
@@ -649,14 +655,15 @@ if _CUDA_AVAILABLE:
             all_sparse_table, all_euler_depth, all_log2_table,
             all_euler_tour, all_root_distance,
         )
+        mult = tree_multiplicities[ti]
         if found:
             gi = tree_to_group_idx[ti]
             sl = _steiner_length_cuda(
                 ln0, ln1, ln2, ln3, node_base, r0, r1, r2, rw, all_root_distance,
             )
-            cuda.atomic.add(counts, (qi, gi, topo), 1)
+            cuda.atomic.add(counts, (qi, gi, topo), mult)
             _accumulate_steiner_cuda(
-                qi, gi, topo, sl,
+                qi, gi, topo, sl, mult,
                 steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
             )
             return
@@ -671,9 +678,9 @@ if _CUDA_AVAILABLE:
         sl = _steiner_length_cuda(
             ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance,
         )
-        cuda.atomic.add(counts, (qi, gi, topo), 1)
+        cuda.atomic.add(counts, (qi, gi, topo), mult)
         _accumulate_steiner_cuda(
-            qi, gi, topo, sl,
+            qi, gi, topo, sl, mult,
             steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
         )
 
