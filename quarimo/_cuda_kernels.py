@@ -30,14 +30,11 @@ Kernels (called from _forest.py via the cuda backend)
 generate_quartets_cuda
     1D kernel: materialise quartets from the deterministic sequence.
 
-quartet_counts_cuda_unified
+quartet_counts_cuda
     2D kernel: topology counts, on-GPU quartet generation, per-group output.
 
-quartet_steiner_cuda_unified
+quartet_steiner_cuda
     2D kernel: topology counts + Steiner distances, per-group output.
-
-_quartet_counts_cuda, _quartet_steiner_cuda
-    Pre-materialized variants (legacy; not used by the main dispatch path).
 
 _quartet_counts_delta_cuda
     2D kernel: signed ±1 delta updates to counts for a paralog permutation.
@@ -391,133 +388,6 @@ if _CUDA_AVAILABLE:
 
         return False, 0, 0.0, 0.0, 0.0, 0.0
 
-    @cuda.jit
-    def _quartet_counts_cuda(
-            sorted_quartet_ids,
-            global_to_local,
-            all_first_occ,
-            all_root_distance,
-            all_euler_tour,
-            all_euler_depth,
-            all_sparse_table,
-            all_log2_table,
-            node_offsets,
-            tour_offsets,
-            sp_offsets,
-            lg_offsets,
-            sp_tour_widths,
-            n_quartets,
-            n_trees,
-            counts_out):
-        """
-        Pre-materialized counts-only quartet kernel (legacy).
-
-        Not used by the main dispatch path in ``_forest.py``; superseded by
-        ``quartet_counts_cuda_unified``.  Output shape is ``(n_quartets, 3)``
-        — no per-group axis.
-        """
-        # 2D thread grid: (qi, ti)
-        qi = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
-        ti = cuda.blockIdx.y * cuda.blockDim.y + cuda.threadIdx.y
-
-        # Bounds check
-        if qi >= n_quartets or ti >= n_trees:
-            return
-
-        # Get quartet taxa and resolve to tree-local positions
-        t0 = sorted_quartet_ids[qi, 0]
-        t1 = sorted_quartet_ids[qi, 1]
-        t2 = sorted_quartet_ids[qi, 2]
-        t3 = sorted_quartet_ids[qi, 3]
-        ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride = \
-            _resolve_quartet_cuda(
-                t0, t1, t2, t3, ti,
-                global_to_local, node_offsets, tour_offsets, sp_offsets,
-                lg_offsets, sp_tour_widths,
-            )
-        if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
-            return
-
-        fo0 = all_first_occ[node_base + ln0]
-        fo1 = all_first_occ[node_base + ln1]
-        fo2 = all_first_occ[node_base + ln2]
-        fo3 = all_first_occ[node_base + ln3]
-        topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
-            fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
-            all_root_distance, all_sparse_table, all_euler_depth,
-            all_log2_table, all_euler_tour,
-        )
-
-        # Atomic increment (multiple threads may write to same (qi, topo))
-        cuda.atomic.add(counts_out, (qi, topo), 1)
-
-    @cuda.jit
-    def _quartet_steiner_cuda(
-            sorted_quartet_ids,
-            global_to_local,
-            all_first_occ,
-            all_root_distance,
-            all_euler_tour,
-            all_euler_depth,
-            all_sparse_table,
-            all_log2_table,
-            node_offsets,
-            tour_offsets,
-            sp_offsets,
-            lg_offsets,
-            sp_tour_widths,
-            n_quartets,
-            n_trees,
-            counts_out,
-            steiner_out):
-        """
-        Pre-materialized Steiner quartet kernel (legacy).
-
-        Not used by the main dispatch path in ``_forest.py``; superseded by
-        ``quartet_steiner_cuda_unified``.  Output shapes are ``(n_quartets, 3)``
-        — no per-group axis.
-        """
-        # 2D thread grid: (qi, ti)
-        qi = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
-        ti = cuda.blockIdx.y * cuda.blockDim.y + cuda.threadIdx.y
-
-        # Bounds check
-        if qi >= n_quartets or ti >= n_trees:
-            return
-
-        # Get quartet taxa and resolve to tree-local positions
-        t0 = sorted_quartet_ids[qi, 0]
-        t1 = sorted_quartet_ids[qi, 1]
-        t2 = sorted_quartet_ids[qi, 2]
-        t3 = sorted_quartet_ids[qi, 3]
-        ln0, ln1, ln2, ln3, node_base, tour_base, sp_base, lg_base, sp_stride = \
-            _resolve_quartet_cuda(
-                t0, t1, t2, t3, ti,
-                global_to_local, node_offsets, tour_offsets, sp_offsets,
-                lg_offsets, sp_tour_widths,
-            )
-        if ln0 < 0 or ln1 < 0 or ln2 < 0 or ln3 < 0:
-            return
-
-        fo0 = all_first_occ[node_base + ln0]
-        fo1 = all_first_occ[node_base + ln1]
-        fo2 = all_first_occ[node_base + ln2]
-        fo3 = all_first_occ[node_base + ln3]
-        topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
-            fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
-            all_root_distance, all_sparse_table, all_euler_depth,
-            all_log2_table, all_euler_tour,
-        )
-
-        # Atomic increment for counts
-        cuda.atomic.add(counts_out, (qi, topo), 1)
-
-        # Compute and store Steiner distance (conflict-free write)
-        steiner_out[qi, ti, topo] = _steiner_length_cuda(
-            ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance,
-        )
-
-
     # ======================================================================== #
     # 1D Generation Kernel                                                    #
     # ======================================================================== #
@@ -555,11 +425,11 @@ if _CUDA_AVAILABLE:
         quartets_out[qi, 3] = d
 
     # ======================================================================== #
-    # Unified Kernels with On-GPU Quartet Generation                          #
+    # 2D Processing Kernels with On-GPU Quartet Generation                   #
     # ======================================================================== #
 
     @cuda.jit
-    def quartet_counts_cuda_unified(
+    def quartet_counts_cuda(
         # Quartet generation parameters
         seed_quartets,      # [n_seed, 4] int32 - explicit seed quartets
         n_seed,             # int - number of seed quartets
@@ -657,7 +527,7 @@ if _CUDA_AVAILABLE:
         cuda.atomic.add(counts, (qi, gi, topo), mult)
 
     @cuda.jit
-    def quartet_steiner_cuda_unified(
+    def quartet_steiner_cuda(
         # Quartet generation parameters
         seed_quartets,      # [n_seed, 4] int32
         n_seed,             # int

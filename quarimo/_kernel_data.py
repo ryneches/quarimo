@@ -192,7 +192,7 @@ class ForestKernelData:
         The 15 static forest arrays for CUDA kernel calls.
 
         Matches the ``# Forest data (CSR format)`` parameter block in
-        ``quartet_counts_cuda_unified`` and ``quartet_steiner_cuda_unified``.
+        ``quartet_counts_cuda`` and ``quartet_steiner_cuda``.
         Prepend ``(d_seed, n_seed, offset, count, rng_seed, n_global_taxa)``
         and append output arrays to form the complete kernel argument list.
         """
@@ -343,7 +343,7 @@ class QuartetKernelArgs:
         Quartet-generation argument block for one CUDA batch.
 
         Matches the ``# Quartet generation parameters`` block at the top of
-        ``quartet_counts_cuda_unified`` / ``quartet_steiner_cuda_unified``.
+        ``quartet_counts_cuda`` / ``quartet_steiner_cuda``.
         Append ``n_global_taxa``, the forest args tuple, and output arrays to
         form the complete kernel argument list.
 

@@ -21,8 +21,8 @@ from quarimo._cuda_kernels import _compute_cuda_grid
 if backends.cuda:
     from quarimo._cuda_kernels import (
         _rmq_csr_cuda,
-        _quartet_counts_cuda,
-        _quartet_steiner_cuda,
+        quartet_counts_cuda,
+        quartet_steiner_cuda,
         _quartet_counts_delta_cuda,
         _counts_d2d_copy_cuda,
     )
@@ -113,13 +113,13 @@ class TestCUDAKernelStructure:
 
     def test_counts_cuda_kernel_exists(self):
         """Test that CUDA counts kernel exists."""
-        assert callable(_quartet_counts_cuda)
-        assert hasattr(_quartet_counts_cuda, "__name__")
+        assert callable(quartet_counts_cuda)
+        assert hasattr(quartet_counts_cuda, "__name__")
 
     def test_steiner_cuda_kernel_exists(self):
         """Test that CUDA Steiner kernel exists."""
-        assert callable(_quartet_steiner_cuda)
-        assert hasattr(_quartet_steiner_cuda, "__name__")
+        assert callable(quartet_steiner_cuda)
+        assert hasattr(quartet_steiner_cuda, "__name__")
 
     def test_delta_cuda_kernel_exists(self):
         """Test that the paralog delta kernel exists."""
@@ -135,8 +135,8 @@ class TestCUDAKernelStructure:
         """Test that kernels have CUDA JIT attributes."""
         # numba.cuda.jit decorated functions have special attributes
         # We just check they have some kind of dispatcher/compile attributes
-        assert hasattr(_quartet_counts_cuda, "__name__")
-        assert hasattr(_quartet_steiner_cuda, "__name__")
+        assert hasattr(quartet_counts_cuda, "__name__")
+        assert hasattr(quartet_steiner_cuda, "__name__")
         assert hasattr(_quartet_counts_delta_cuda, "__name__")
         assert hasattr(_counts_d2d_copy_cuda, "__name__")
 
@@ -147,8 +147,8 @@ class TestCUDAKernelStructure:
         import quarimo._cuda_kernels as _cuda_kernels
 
         assert hasattr(_cuda_kernels, "_rmq_csr_cuda")
-        assert hasattr(_cuda_kernels, "_quartet_counts_cuda")
-        assert hasattr(_cuda_kernels, "_quartet_steiner_cuda")
+        assert hasattr(_cuda_kernels, "quartet_counts_cuda")
+        assert hasattr(_cuda_kernels, "quartet_steiner_cuda")
         assert hasattr(_cuda_kernels, "_quartet_counts_delta_cuda")
         assert hasattr(_cuda_kernels, "_counts_d2d_copy_cuda")
 

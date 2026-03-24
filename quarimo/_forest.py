@@ -235,8 +235,6 @@ install_numba_warning_filter(backends.numba)
 if backends.cuda:
     from quarimo._cuda_kernels import (
         _rmq_csr_cuda,
-        _quartet_counts_cuda,
-        _quartet_steiner_cuda,
         _compute_cuda_grid,
         _quartet_counts_delta_cuda,
     )
@@ -1072,7 +1070,7 @@ class Forest:
 
             if resolved_backend == "cuda":
                 counts_out, steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out = (
-                    self._quartet_topology_cuda_unified(quartets, steiner)
+                    self._quartet_topology_cuda(quartets, steiner)
                 )
 
             elif resolved_backend == "mlx":
@@ -1446,7 +1444,7 @@ class Forest:
         bpq = self._cuda_output_bytes_per_quartet(steiner)
         return max(1, available // bpq)
 
-    def _quartet_topology_cuda_unified(
+    def _quartet_topology_cuda(
         self, quartets: Quartets, steiner: bool,
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
@@ -1475,14 +1473,14 @@ class Forest:
         from quarimo._cuda_kernels import (
             _compute_cuda_grid,
             generate_quartets_cuda,
-            quartet_counts_cuda_unified,
-            quartet_steiner_cuda_unified,
+            quartet_counts_cuda,
+            quartet_steiner_cuda,
         )
 
         n_quartets = len(quartets)
 
         # Track first-call compilation
-        kernel_key = f"cuda-unified-{'steiner' if steiner else 'counts'}"
+        kernel_key = f"cuda-{'steiner' if steiner else 'counts'}"
         if _kernel_first_call.get(kernel_key, False):
             logger.info("  🔨 Compiling %s kernel (cached for future calls)", kernel_key)
             _kernel_first_call[kernel_key] = False
@@ -1605,7 +1603,7 @@ class Forest:
                 )
                 logger.info("  🧮 launching Steiner kernel...")
                 _t_c0b = perf_counter()
-                quartet_steiner_cuda_unified[blocks, tpb](
+                quartet_steiner_cuda[blocks, tpb](
                     *batch_args, d_fkd.n_global_taxa, *d_forest_args,
                     d_counts_b, d_steiner_b, d_steiner_min_b, d_steiner_max_b,
                     d_steiner_sum_sq_b,
@@ -1630,7 +1628,7 @@ class Forest:
             else:
                 logger.info("  🧮 launching counts kernel...")
                 _t_c0b = perf_counter()
-                quartet_counts_cuda_unified[blocks, tpb](
+                quartet_counts_cuda[blocks, tpb](
                     *batch_args, d_fkd.n_global_taxa, *d_forest_args,
                     d_counts_b,
                 )
