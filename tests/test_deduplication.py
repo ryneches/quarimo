@@ -317,14 +317,20 @@ class TestCaseBBLVariants:
         expected = float(r_v1.steiner[0, 0, topo]) + float(r_v2.steiner[0, 0, topo])
         np.testing.assert_allclose(float(r_both.steiner[0, 0, topo]), expected, rtol=1e-10)
 
-    def test_python_cpu_parallel_agree_on_bl_variant_steiner(self):
-        """Python fallback and CPU-parallel Numba kernel agree for BL-variant Steiner."""
+    def test_all_available_backends_agree_on_bl_variant_steiner(self):
+        """All available backends agree on counts and Steiner for BL-variant forests."""
+        from quarimo._backend import backends
         from quarimo._context import use_backend
         f = Forest([self.TREE_V1, self.TREE_V1, self.TREE_V2])
         q = self._q(f)
         with use_backend("python"):
-            r_py = f.quartet_topology(q, steiner=True)
-        with use_backend("cpu-parallel"):
-            r_cpu = f.quartet_topology(q, steiner=True)
-        np.testing.assert_array_equal(r_py.counts, r_cpu.counts)
-        np.testing.assert_allclose(r_py.steiner, r_cpu.steiner, equal_nan=True, rtol=1e-12)
+            r_ref = f.quartet_topology(q, steiner=True)
+        for backend in backends.available():
+            if backend == "python":
+                continue
+            with use_backend(backend):
+                r = f.quartet_topology(q, steiner=True)
+            np.testing.assert_array_equal(r_ref.counts, r.counts,
+                                          err_msg=f"counts mismatch: python vs {backend}")
+            np.testing.assert_allclose(r_ref.steiner, r.steiner, equal_nan=True, rtol=1e-12,
+                                       err_msg=f"steiner mismatch: python vs {backend}")
