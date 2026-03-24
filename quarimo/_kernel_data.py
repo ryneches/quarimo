@@ -128,8 +128,14 @@ class ForestKernelData:
     polytomy_offsets: np.ndarray   # int32[n_trees + 1]
     polytomy_nodes: np.ndarray     # int32[total_polytomy]
 
-    # Deduplication weights
-    tree_multiplicities: np.ndarray  # int32[n_trees]
+    # Deduplication weights (topology-class level)
+    tree_multiplicities: np.ndarray  # int32[n_trees]  — total input trees per topology class
+
+    # BL-variant CSR (for weighted Steiner computation)
+    bl_variant_offsets: np.ndarray        # int32[n_trees + 1]
+    bl_variant_multiplicities: np.ndarray # int32[total_variants]
+    bl_node_offsets: np.ndarray           # int32[total_variants + 1]
+    all_rd_variants: np.ndarray           # float64[total_variant_nodes]
 
     # Scalars
     n_trees: int
@@ -175,6 +181,10 @@ class ForestKernelData:
             self.polytomy_offsets,
             self.polytomy_nodes,
             self.tree_multiplicities,
+            self.bl_variant_offsets,
+            self.bl_variant_multiplicities,
+            self.bl_node_offsets,
+            self.all_rd_variants,
         )
 
     def cuda_forest_args(self) -> tuple:
@@ -203,6 +213,10 @@ class ForestKernelData:
             self.polytomy_offsets,
             self.polytomy_nodes,
             self.tree_multiplicities,
+            self.bl_variant_offsets,
+            self.bl_variant_multiplicities,
+            self.bl_node_offsets,
+            self.all_rd_variants,
         )
 
     # ------------------------------------------------------------------
@@ -235,6 +249,10 @@ class ForestKernelData:
             polytomy_offsets=cuda.to_device(self.polytomy_offsets),
             polytomy_nodes=cuda.to_device(self.polytomy_nodes),
             tree_multiplicities=cuda.to_device(self.tree_multiplicities),
+            bl_variant_offsets=cuda.to_device(self.bl_variant_offsets),
+            bl_variant_multiplicities=cuda.to_device(self.bl_variant_multiplicities),
+            bl_node_offsets=cuda.to_device(self.bl_node_offsets),
+            all_rd_variants=cuda.to_device(self.all_rd_variants),
             n_trees=self.n_trees,
             n_global_taxa=self.n_global_taxa,
             n_groups=self.n_groups,
@@ -259,6 +277,10 @@ class ForestKernelData:
             self.polytomy_offsets,
             self.polytomy_nodes,
             self.tree_multiplicities,
+            self.bl_variant_offsets,
+            self.bl_variant_multiplicities,
+            self.bl_node_offsets,
+            self.all_rd_variants,
         ]
         return arrays
 

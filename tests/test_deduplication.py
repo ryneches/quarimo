@@ -5,6 +5,14 @@ Tests for automatic deduplication of identical trees during Forest construction.
 
 Case A: trees with identical topology AND identical branch lengths are merged
 into a single stored representative; ``_tree_multiplicities`` records the weight.
+
+Case B (subsumes Case A): trees with identical topology but different branch
+lengths are merged into one topology class.  Each distinct branch-length pattern
+is tracked as a BL variant in a second CSR layer (``_bl_variant_offsets``,
+``_bl_variant_multiplicities``, ``_bl_node_offsets``, ``_all_rd_variants``).
+Counts use ``_tree_multiplicities`` (total weight of the topology class); Steiner
+loops over BL variants for variant-specific root distances.
+
 Public ``n_trees`` always reflects the number of input trees loaded by the user.
 
 Correctness criterion: a Forest constructed from k copies of the same tree
@@ -98,12 +106,16 @@ class TestDeduplicationMetadata:
         assert forest._tree_multiplicities[0] == 2  # TREE_A x2
         assert forest._tree_multiplicities[1] == 1  # TREE_B x1
 
-    def test_different_bl_not_deduplicated(self):
-        """Trees with different branch lengths must NOT be merged."""
+    def test_different_bl_same_topology_deduplicated(self):
+        """Trees with different branch lengths but same topology ARE merged (Case B)."""
         forest = Forest([TREE_A, TREE_A_DIFF_BL])
         assert forest.n_trees == 2
-        assert forest._n_stored_trees == 2
-        np.testing.assert_array_equal(forest._tree_multiplicities, [1, 1])
+        assert forest._n_stored_trees == 1  # one topology class
+        # total multiplicity equals n_trees
+        assert int(forest._tree_multiplicities[0]) == 2
+        # two distinct BL variants, each with multiplicity 1
+        assert int(forest._bl_variant_offsets[1]) == 2
+        np.testing.assert_array_equal(forest._bl_variant_multiplicities, [1, 1])
 
     def test_different_support_deduplicated(self):
         """Trees differing only in support values ARE merged (support excluded from hash)."""
@@ -241,3 +253,78 @@ class TestCSRIntegrityAfterDeduplication:
         kd = forest._kernel_data
         assert hasattr(kd, "tree_multiplicities")
         np.testing.assert_array_equal(kd.tree_multiplicities, forest._tree_multiplicities)
+
+
+# ---------------------------------------------------------------------------
+# Case B: topology-level deduplication with BL-variant Steiner
+# ---------------------------------------------------------------------------
+
+class TestCaseBBLVariants:
+    """Topology-class deduplication: same topology, different branch lengths."""
+
+    TREE_V1 = "((A:1,B:2):1,(C:3,D:4):1);"
+    TREE_V2 = "((A:9,B:1):2,(C:2,D:5):3);"  # same topology as V1, different BL
+
+    def _q(self, f):
+        return Quartets(f, seed=[(0, 1, 2, 3)], offset=0, count=1)
+
+    def test_bl_variants_merged_into_one_stored_tree(self):
+        f = Forest([self.TREE_V1, self.TREE_V2])
+        assert f.n_trees == 2
+        assert f._n_stored_trees == 1
+        assert int(f._tree_multiplicities[0]) == 2
+
+    def test_bl_variant_csr_structure(self):
+        f = Forest([self.TREE_V1, self.TREE_V2])
+        # One topology class, two BL variants
+        assert int(f._bl_variant_offsets[0]) == 0
+        assert int(f._bl_variant_offsets[1]) == 2
+        np.testing.assert_array_equal(f._bl_variant_multiplicities, [1, 1])
+
+    def test_bl_variant_multiplicities_when_repeated(self):
+        """Repeated trees with same BL are tracked as one variant with higher mult."""
+        f = Forest([self.TREE_V1, self.TREE_V1, self.TREE_V2])
+        assert f._n_stored_trees == 1
+        assert int(f._tree_multiplicities[0]) == 3
+        # Two variants: V1 (mult=2) and V2 (mult=1)
+        assert int(f._bl_variant_offsets[1]) == 2
+        np.testing.assert_array_equal(sorted(f._bl_variant_multiplicities), [1, 2])
+
+    def test_counts_equal_sum_of_variants(self):
+        """Counts kernel uses tree_multiplicities (total), not per-variant."""
+        f = Forest([self.TREE_V1, self.TREE_V2])
+        q = self._q(f)
+        r = f.quartet_topology(q)
+        # Both trees resolve to the same topology — total count = 2
+        assert r.counts[0, 0].sum() == 2
+
+    def test_steiner_is_weighted_sum_of_variants(self):
+        """Steiner sum is weighted sum over BL variants."""
+        f_v1 = Forest([self.TREE_V1])
+        f_v2 = Forest([self.TREE_V2])
+        f_both = Forest([self.TREE_V1, self.TREE_V2])
+
+        q_v1 = self._q(f_v1)
+        q_v2 = self._q(f_v2)
+        q_both = self._q(f_both)
+
+        r_v1 = f_v1.quartet_topology(q_v1, steiner=True)
+        r_v2 = f_v2.quartet_topology(q_v2, steiner=True)
+        r_both = f_both.quartet_topology(q_both, steiner=True)
+
+        # Steiner[both] = Steiner[v1] * 1 + Steiner[v2] * 1
+        topo = r_both.counts[0, 0].argmax()
+        expected = float(r_v1.steiner[0, 0, topo]) + float(r_v2.steiner[0, 0, topo])
+        np.testing.assert_allclose(float(r_both.steiner[0, 0, topo]), expected, rtol=1e-10)
+
+    def test_python_cpu_parallel_agree_on_bl_variant_steiner(self):
+        """Python fallback and CPU-parallel Numba kernel agree for BL-variant Steiner."""
+        from quarimo._context import use_backend
+        f = Forest([self.TREE_V1, self.TREE_V1, self.TREE_V2])
+        q = self._q(f)
+        with use_backend("python"):
+            r_py = f.quartet_topology(q, steiner=True)
+        with use_backend("cpu-parallel"):
+            r_cpu = f.quartet_topology(q, steiner=True)
+        np.testing.assert_array_equal(r_py.counts, r_cpu.counts)
+        np.testing.assert_allclose(r_py.steiner, r_cpu.steiner, equal_nan=True, rtol=1e-12)

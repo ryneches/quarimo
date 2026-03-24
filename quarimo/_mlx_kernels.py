@@ -492,22 +492,35 @@ inline int32_t rmq_msl(
             else                           { topo = 2; r_winner = r2; }
         }
 
-        // Steiner spanning length: S = sum(rd[leaf_i]) - 0.5*(r_winner+r0+r1+r2)
-        float leaf_rd0 = all_root_distance[node_base + ln0];
-        float leaf_rd1 = all_root_distance[node_base + ln1];
-        float leaf_rd2 = all_root_distance[node_base + ln2];
-        float leaf_rd3 = all_root_distance[node_base + ln3];
-        float sl = (leaf_rd0 + leaf_rd1 + leaf_rd2 + leaf_rd3)
-                   - 0.5f * (r_winner + r0 + r1 + r2);
-
         int32_t gi   = tree_to_group_idx[ti];
         int32_t mult = tree_multiplicities[ti];
         int32_t idx  = out_base + gi * 4 + topo;
-        counts_out[idx]  += mult;
-        steiner_out[idx] += sl * (float)mult;
-        if (sl < steiner_min_out[idx]) steiner_min_out[idx] = sl;
-        if (sl > steiner_max_out[idx]) steiner_max_out[idx] = sl;
-        steiner_ssq_out[idx] += sl * sl * (float)mult;
+        counts_out[idx] += mult;
+
+        // Topology is fixed for all BL variants of this stored tree.
+        // Compute the 6 LCA node IDs once, then loop over BL variants for
+        // variant-specific Steiner lengths (per-variant root distances from
+        // all_rd_variants).
+        int32_t v_start = bl_variant_offsets[ti];
+        int32_t v_end   = bl_variant_offsets[ti + 1];
+        for (int32_t vi = v_start; vi < v_end; vi++) {
+            int32_t mult_v  = bl_variant_multiplicities[vi];
+            int32_t rd_base = bl_node_offsets[vi];
+            float r0_v = all_rd_variants[rd_base + lca01] + all_rd_variants[rd_base + lca23];
+            float r1_v = all_rd_variants[rd_base + lca02] + all_rd_variants[rd_base + lca13];
+            float r2_v = all_rd_variants[rd_base + lca03] + all_rd_variants[rd_base + lca12];
+            float leaf_sum = all_rd_variants[rd_base + ln0] + all_rd_variants[rd_base + ln1]
+                           + all_rd_variants[rd_base + ln2] + all_rd_variants[rd_base + ln3];
+            float rw_v;
+            if      (r0_v >= r1_v && r0_v >= r2_v) rw_v = r0_v;
+            else if (r1_v >= r0_v && r1_v >= r2_v) rw_v = r1_v;
+            else                                    rw_v = r2_v;
+            float sl_v = leaf_sum - 0.5f * (rw_v + r0_v + r1_v + r2_v);
+            steiner_out[idx] += sl_v * (float)mult_v;
+            if (sl_v < steiner_min_out[idx]) steiner_min_out[idx] = sl_v;
+            if (sl_v > steiner_max_out[idx]) steiner_max_out[idx] = sl_v;
+            steiner_ssq_out[idx] += sl_v * sl_v * (float)mult_v;
+        }
     }
 """
 
@@ -515,7 +528,7 @@ inline int32_t rmq_msl(
     # Compile kernels once at import time (Metal JIT — fast, sub-ms)         #
 
     # Shared input names for both topology kernels
-    _TOPOLOGY_INPUT_NAMES = [
+    _COUNTS_INPUT_NAMES = [
         "sorted_quartet_ids",   # int32[n_quartets * 4]
         "global_to_local",      # int32[n_trees * n_global_taxa]
         "all_first_occ",        # int32[total_nodes]
@@ -539,9 +552,17 @@ inline int32_t rmq_msl(
         "n_global_taxa_arr",    # int32[1]
     ]
 
+    # Steiner kernel adds BL-variant CSR arrays for per-variant Steiner computation.
+    _STEINER_INPUT_NAMES = _COUNTS_INPUT_NAMES + [
+        "bl_variant_offsets",        # int32[n_trees + 1]
+        "bl_variant_multiplicities", # int32[total_variants]
+        "bl_node_offsets",           # int32[total_variants + 1]
+        "all_rd_variants",           # float32[total_variant_nodes]  (conv from float64)
+    ]
+
     _counts_topology_kernel = mx.fast.metal_kernel(
         name="quartet_counts",
-        input_names=_TOPOLOGY_INPUT_NAMES,
+        input_names=_COUNTS_INPUT_NAMES,
         output_names=["counts_out"],
         header=_TOPOLOGY_HEADER,
         source=_QUARTET_COUNTS_BODY,
@@ -549,16 +570,16 @@ inline int32_t rmq_msl(
 
     _steiner_topology_kernel = mx.fast.metal_kernel(
         name="quartet_steiner",
-        input_names=_TOPOLOGY_INPUT_NAMES,
+        input_names=_STEINER_INPUT_NAMES,
         output_names=["counts_out", "steiner_out", "steiner_min_out",
                       "steiner_max_out", "steiner_ssq_out"],
         header=_TOPOLOGY_HEADER,
         source=_QUARTET_STEINER_BODY,
     )
 
-    def _topology_inputs(kd, sorted_ids, n_quartets, n_groups):
+    def _counts_inputs(kd, sorted_ids, n_quartets, n_groups):
         """
-        Build the shared MLX input list for both topology kernels.
+        Build the MLX input list for the counts topology kernel.
 
         Converts ``all_root_distance`` from float64 to float32 (Metal
         does not support float64).  An empty ``polytomy_nodes`` array is
@@ -583,7 +604,7 @@ inline int32_t rmq_msl(
             mx.array(kd.all_root_distance.astype("f4"),  dtype=mx.float32),
             mx.array(kd.all_euler_tour,                  dtype=mx.int32),
             mx.array(kd.all_euler_depth,                 dtype=mx.int32),
-            mx.array(kd.all_sparse_table,               dtype=mx.int32),
+            mx.array(kd.all_sparse_table,                dtype=mx.int32),
             mx.array(kd.all_log2_table,                  dtype=mx.int32),
             mx.array(kd.node_offsets,                    dtype=mx.int64),
             mx.array(kd.tour_offsets,                    dtype=mx.int64),
@@ -598,6 +619,31 @@ inline int32_t rmq_msl(
             mx.array([kd.n_trees],                       dtype=mx.int32),
             mx.array([n_groups],                         dtype=mx.int32),
             mx.array([kd.n_global_taxa],                 dtype=mx.int32),
+        ]
+
+    def _steiner_inputs(kd, sorted_ids, n_quartets, n_groups):
+        """
+        Build the MLX input list for the Steiner topology kernel.
+
+        Extends ``_counts_inputs`` with the BL-variant CSR arrays needed for
+        per-variant Steiner computation.  ``all_rd_variants`` is converted from
+        float64 to float32 (Metal limitation, same as ``all_root_distance``).
+        """
+        # Sentinel for empty bl_variant_multiplicities / bl_node_offsets
+        bl_var_mults = (
+            kd.bl_variant_multiplicities if len(kd.bl_variant_multiplicities) > 0
+            else np.array([0], dtype=np.int32)
+        )
+        bl_node_offs = kd.bl_node_offsets
+        rd_variants = (
+            kd.all_rd_variants if len(kd.all_rd_variants) > 0
+            else np.array([0.0], dtype=np.float32)
+        )
+        return _counts_inputs(kd, sorted_ids, n_quartets, n_groups) + [
+            mx.array(kd.bl_variant_offsets,              dtype=mx.int32),
+            mx.array(bl_var_mults,                       dtype=mx.int32),
+            mx.array(bl_node_offs,                       dtype=mx.int32),
+            mx.array(rd_variants.astype("f4"),           dtype=mx.float32),
         ]
 
     def quartet_counts_mlx(kd, sorted_ids, n_quartets, n_groups):
@@ -626,7 +672,7 @@ inline int32_t rmq_msl(
         grid_x = ((n_quartets + tg_size - 1) // tg_size) * tg_size
 
         out = _counts_topology_kernel(
-            inputs=_topology_inputs(kd, sorted_ids, n_quartets, n_groups),
+            inputs=_counts_inputs(kd, sorted_ids, n_quartets, n_groups),
             output_shapes=[(n_quartets * n_groups * 4,)],
             output_dtypes=[mx.int32],
             grid=(grid_x, 1, 1),
@@ -1039,7 +1085,7 @@ inline int32_t resolve_topo_msl(
         grid_x = ((n_quartets + tg_size - 1) // tg_size) * tg_size
 
         out = _steiner_topology_kernel(
-            inputs=_topology_inputs(kd, sorted_ids, n_quartets, n_groups),
+            inputs=_steiner_inputs(kd, sorted_ids, n_quartets, n_groups),
             output_shapes=[shape, shape, shape, shape, shape],
             output_dtypes=[mx.int32, mx.float32, mx.float32, mx.float32, mx.float32],
             grid=(grid_x, 1, 1),

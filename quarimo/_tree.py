@@ -134,15 +134,42 @@ class Tree:
         # Empty for trees where no taxon_map was applied.
         self.paralog_groups: dict = {}
 
+    def topology_hash(self) -> bytes:
+        """
+        SHA-256 digest over tree topology and leaf names, **excluding branch
+        lengths**.  Two trees with the same bifurcating structure but different
+        branch lengths produce the same digest.
+
+        Used as the Case B deduplication key: trees with the same topology are
+        stored as a single representative; their distinct branch-length
+        assignments are tracked as BL variants.
+
+        Bootstrap ``support`` values are excluded for the same reason as in
+        :meth:`tree_hash`.
+        """
+        import hashlib
+        h = hashlib.sha256()
+        h.update(self.parent.tobytes())
+        h.update(self.left_child.tobytes())
+        h.update(self.right_child.tobytes())
+        for i in range(self.n_leaves):
+            h.update(self.names[i].encode("utf-8") + b"\x00")
+        poly_bytes = np.array(sorted(self.polytomy_node_ids), dtype=np.int32).tobytes()
+        h.update(poly_bytes)
+        return h.digest()
+
     def tree_hash(self) -> bytes:
         """
         SHA-256 digest over topology, branch lengths, leaf names, and polytomy
-        node IDs.  Two trees are considered identical (Case A deduplication) iff
-        their digests match.
+        node IDs.  Two trees are identical iff their digests match.
+
+        Used as the BL-variant key within a topology equivalence class: two
+        trees with the same ``topology_hash`` but different ``tree_hash`` values
+        are stored as separate BL variants of the same topology class.
 
         Bootstrap ``support`` values are deliberately excluded — trees that
-        differ only in support values are topologically and metrically identical
-        and produce the same quartet counts and Steiner statistics.
+        differ only in support values produce identical quartet counts and
+        Steiner statistics.
         """
         import hashlib
         h = hashlib.sha256()

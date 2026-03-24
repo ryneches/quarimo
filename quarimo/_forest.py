@@ -579,47 +579,127 @@ class Forest:
 
     def _deduplicate_tree_data(self) -> None:
         """
-        Identify duplicate trees (same topology and branch lengths within the
-        same group) and build the stored-tree representation.
+        Deduplicate input trees by **topology** (Case B, subsumes Case A).
 
-        Creates private attributes without modifying any public-facing attrs:
-            ``self._stored_trees``        — unique Tree objects (first occurrences).
-            ``self._stored_group_labels`` — group label per stored tree.
-            ``self._n_stored_trees``      — number of unique stored trees.
-            ``self._tree_multiplicities`` — int32[_n_stored_trees] weight per tree.
+        Two trees belong to the same topology class iff ``topology_hash()``
+        matches AND they belong to the same group.  Within a topology class,
+        distinct branch-length assignments are tracked as BL variants
+        (distinguished by ``tree_hash()``).
 
-        Cross-group trees are never merged (they accumulate into different
-        output slots).  The order of first occurrences is preserved.
+        Creates private attributes (public-facing attrs are NOT modified):
+
+        ``_stored_trees``         — list of representative Tree objects, one per
+                                    topology class × group (first occurrence wins).
+        ``_stored_group_labels``  — group label per stored tree.
+        ``_n_stored_trees``       — number of topology classes across all groups.
+        ``_tree_multiplicities``  — int32[_n_stored_trees]: total input-tree count
+                                    per topology class (sum of BL-variant counts).
+
+        BL-variant CSR arrays (Steiner computation):
+
+        ``_bl_variant_offsets``        — int32[_n_stored_trees + 1]: CSR offsets
+                                          into the variant arrays per stored tree.
+        ``_bl_variant_multiplicities`` — int32[total_variants]: count per BL variant.
+        ``_bl_node_offsets``           — int32[total_variants + 1]: CSR offsets into
+                                          ``_all_rd_variants`` per variant.
+        ``_all_rd_variants``           — float64[total_variant_nodes]: flat-packed
+                                          root-distance arrays for every BL variant.
         """
-        seen: dict = {}          # (hash_bytes, group_label) -> sequential stored index
-        keep_indices: list = []  # indices into self._trees / self.group_labels
+        # ── Pass 1: topology deduplication ───────────────────────────────
+        topo_seen: dict = {}     # (topology_hash, group) -> stored sequential index
+        keep_indices: list = []  # input-tree index of the representative for each class
+
+        # Per stored tree: ordered dict of bl_hash -> (root_distance copy, count)
+        # Use a list-keyed dict to preserve insertion order per stored tree.
+        variant_rd: list = []       # variant_rd[si] = dict: bl_hash -> rd_array
+        variant_cnt: list = []      # variant_cnt[si] = dict: bl_hash -> count
+        variant_order: list = []    # variant_order[si] = list of bl_hash in insertion order
 
         for i, (tree, grp) in enumerate(zip(self._trees, self.group_labels)):
-            key = (tree.tree_hash(), grp)
-            if key not in seen:
-                seen[key] = len(keep_indices)
+            topo_key = (tree.topology_hash(), grp)
+            if topo_key not in topo_seen:
+                si = len(keep_indices)
+                topo_seen[topo_key] = si
                 keep_indices.append(i)
+                variant_rd.append({})
+                variant_cnt.append({})
+                variant_order.append([])
 
-        n_dupes = self.n_trees - len(keep_indices)
+            si = topo_seen[topo_key]
+            bl_key = tree.tree_hash()
+            if bl_key not in variant_rd[si]:
+                variant_rd[si][bl_key] = tree.root_distance.copy()
+                variant_cnt[si][bl_key] = 0
+                variant_order[si].append(bl_key)
+            variant_cnt[si][bl_key] += 1
+
+        n_stored = len(keep_indices)
+        n_dupes = self.n_trees - n_stored
         if n_dupes > 0:
-            logger.info(
-                "🔁 Deduplication: %d/%d trees are duplicates; storing %d unique trees.",
-                n_dupes, self.n_trees, len(keep_indices),
-            )
+            n_bl_variants = sum(len(v) for v in variant_order)
+            if n_bl_variants < n_stored:
+                # All deduplication was topology-only (Case A was subsumed)
+                logger.info(
+                    "🔁 Deduplication: %d/%d trees removed; %d unique topologies stored.",
+                    n_dupes, self.n_trees, n_stored,
+                )
+            else:
+                logger.info(
+                    "🔁 Deduplication: %d/%d trees removed; "
+                    "%d unique topologies (%d BL variants total).",
+                    n_dupes, self.n_trees, n_stored, n_bl_variants,
+                )
 
-        # Compute multiplicities: count how many input trees map to each stored tree.
-        mult: dict = {}  # stored sequential index -> count
-        for tree, grp in zip(self._trees, self.group_labels):
-            key = (tree.tree_hash(), grp)
-            new_idx = seen[key]
-            mult[new_idx] = mult.get(new_idx, 0) + 1
-
+        # ── Pass 2: build stored tree list and multiplicities ─────────────
         self._stored_trees = [self._trees[i] for i in keep_indices]
         self._stored_group_labels = [self.group_labels[i] for i in keep_indices]
-        self._n_stored_trees = len(self._stored_trees)
+        self._n_stored_trees = n_stored
+
         self._tree_multiplicities = np.array(
-            [mult[new_i] for new_i in range(len(keep_indices))], dtype=np.int32
+            [sum(variant_cnt[si].values()) for si in range(n_stored)],
+            dtype=np.int32,
         )
+
+        # ── Pass 3: build BL-variant CSR arrays ───────────────────────────
+        # bl_variant_offsets[si] .. [si+1] = range of variant indices for stored tree si.
+        total_variants = sum(len(variant_order[si]) for si in range(n_stored))
+
+        bl_variant_offsets = np.zeros(n_stored + 1, dtype=np.int32)
+        for si in range(n_stored):
+            bl_variant_offsets[si + 1] = bl_variant_offsets[si] + len(variant_order[si])
+        self._bl_variant_offsets = bl_variant_offsets
+
+        bl_variant_multiplicities = np.empty(total_variants, dtype=np.int32)
+        bl_node_offsets = np.zeros(total_variants + 1, dtype=np.int32)
+
+        # Total nodes varies per stored tree; pre-compute each tree's node count.
+        n_nodes_per_stored = [self._stored_trees[si].n_nodes for si in range(n_stored)]
+
+        vi = 0
+        node_pos = 0
+        for si in range(n_stored):
+            n_nodes = n_nodes_per_stored[si]
+            for bl_key in variant_order[si]:
+                bl_variant_multiplicities[vi] = variant_cnt[si][bl_key]
+                bl_node_offsets[vi] = node_pos
+                node_pos += n_nodes
+                vi += 1
+        bl_node_offsets[total_variants] = node_pos
+        self._bl_variant_multiplicities = bl_variant_multiplicities
+        self._bl_node_offsets = bl_node_offsets
+
+        # Flat-pack all root-distance arrays in variant order.
+        total_variant_nodes = node_pos
+        all_rd_variants = np.empty(total_variant_nodes, dtype=np.float64)
+        vi = 0
+        for si in range(n_stored):
+            n_nodes = n_nodes_per_stored[si]
+            for bl_key in variant_order[si]:
+                rd = variant_rd[si][bl_key]
+                start = int(bl_node_offsets[vi])
+                all_rd_variants[start : start + n_nodes] = rd
+                vi += 1
+        self._all_rd_variants = all_rd_variants
 
     def _build_kernel_data(self) -> None:
         """Package all forest arrays into a ``ForestKernelData`` for kernel dispatch."""
@@ -640,6 +720,10 @@ class Forest:
             polytomy_offsets=self.polytomy_offsets,
             polytomy_nodes=self.polytomy_nodes,
             tree_multiplicities=self._tree_multiplicities,
+            bl_variant_offsets=self._bl_variant_offsets,
+            bl_variant_multiplicities=self._bl_variant_multiplicities,
+            bl_node_offsets=self._bl_node_offsets,
+            all_rd_variants=self._all_rd_variants,
             n_trees=self._n_stored_trees,
             n_global_taxa=self.n_global_taxa,
             n_groups=self.n_groups,
@@ -1997,6 +2081,10 @@ class Forest:
         polytomy_offsets: np.ndarray,
         polytomy_nodes: np.ndarray,
         tree_multiplicities: np.ndarray,
+        bl_variant_offsets: np.ndarray,
+        bl_variant_multiplicities: np.ndarray,
+        bl_node_offsets: np.ndarray,
+        all_rd_variants: np.ndarray,
         counts_out: np.ndarray,
         steiner_out: np.ndarray,
         steiner_min_out: np.ndarray,
@@ -2101,13 +2189,28 @@ class Forest:
                 counts_out[qi, gi, topo] += mult
 
                 if compute_steiner:
-                    sl = Forest._steiner_length(
-                        ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance,
-                    )
-                    Forest._accumulate_steiner(
-                        qi, gi, topo, sl, mult,
-                        steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
-                    )
+                    # Topology is fixed for all BL variants of this stored tree.
+                    # Compute the 6 LCA local node IDs once (topology-based),
+                    # then loop over BL variants for variant-specific Steiner values.
+                    lca01, lca23, lca02, lca13, lca03, lca12 = \
+                        Forest._compute_lca_nodes(
+                            fo0, fo1, fo2, fo3, tour_base, sp_base, lg_base, sp_stride,
+                            all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour,
+                        )
+                    v_start = int(bl_variant_offsets[ti])
+                    v_end   = int(bl_variant_offsets[ti + 1])
+                    for vi in range(v_start, v_end):
+                        mult_v = int(bl_variant_multiplicities[vi])
+                        rd_vbase = int(bl_node_offsets[vi])
+                        sl_v = Forest._steiner_from_lca_nodes(
+                            ln0, ln1, ln2, ln3,
+                            lca01, lca23, lca02, lca13, lca03, lca12,
+                            rd_vbase, all_rd_variants,
+                        )
+                        Forest._accumulate_steiner(
+                            qi, gi, topo, sl_v, mult_v,
+                            steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
+                        )
 
     @staticmethod
     def _qed_kernel(
@@ -2375,6 +2478,92 @@ class Forest:
             + float(all_root_distance[node_base + ln3])
         )
         return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
+
+    @staticmethod
+    def _compute_lca_nodes(
+        fo0, fo1, fo2, fo3,
+        tour_base, sp_base, lg_base, sp_stride,
+        all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour,
+    ):
+        """
+        **Private static.**  Compute the six pairwise LCA local node IDs.
+
+        Returns local node IDs (not Euler-tour positions) for all six pairs of
+        the four taxa.  These are topology-stable — they depend only on tree
+        structure, not on branch lengths — so they can be computed once for a
+        stored tree and reused across all BL variants.
+
+        Parameters
+        ----------
+        fo0..fo3 : int
+            First Euler-tour occurrences for the four taxa.
+        tour_base, sp_base, lg_base, sp_stride : int
+            CSR offsets and sparse-table stride for the stored tree.
+        all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour :
+            CSR-packed tree arrays.
+
+        Returns
+        -------
+        (lca01, lca23, lca02, lca13, lca03, lca12) : tuple of int
+            Local node IDs of the six pairwise LCAs.
+        """
+        def lca_node(oa, ob):
+            l, r = (oa, ob) if oa <= ob else (ob, oa)
+            return Forest._rmq_csr(
+                l, r, sp_base, sp_stride, all_sparse_table,
+                all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour,
+            )
+
+        return (
+            lca_node(fo0, fo1),  # lca01
+            lca_node(fo2, fo3),  # lca23
+            lca_node(fo0, fo2),  # lca02
+            lca_node(fo1, fo3),  # lca13
+            lca_node(fo0, fo3),  # lca03
+            lca_node(fo1, fo2),  # lca12
+        )
+
+    @staticmethod
+    def _steiner_from_lca_nodes(
+        ln0, ln1, ln2, ln3,
+        lca01, lca23, lca02, lca13, lca03, lca12,
+        rd_vbase, all_rd_variants,
+    ):
+        """
+        **Private static.**  Steiner length for one BL variant given precomputed
+        LCA local node IDs.
+
+        Uses variant-specific root distances from ``all_rd_variants`` at
+        ``rd_vbase``.  The LCA node IDs are topology-stable and shared across
+        all BL variants of the same stored tree; only the rd values change.
+
+        Parameters
+        ----------
+        ln0..ln3 : int
+            Local leaf node IDs of the four taxa.
+        lca01, lca23, lca02, lca13, lca03, lca12 : int
+            Pairwise LCA local node IDs (from ``_compute_lca_nodes``).
+        rd_vbase : int
+            Offset into ``all_rd_variants`` for this BL variant's node data.
+        all_rd_variants : np.ndarray
+            Flat array of per-variant root distances (float64).
+
+        Returns
+        -------
+        float
+            Steiner spanning length S >= 0.
+        """
+        r0_v = float(all_rd_variants[rd_vbase + lca01]) + float(all_rd_variants[rd_vbase + lca23])
+        r1_v = float(all_rd_variants[rd_vbase + lca02]) + float(all_rd_variants[rd_vbase + lca13])
+        r2_v = float(all_rd_variants[rd_vbase + lca03]) + float(all_rd_variants[rd_vbase + lca12])
+        leaf_sum = (
+            float(all_rd_variants[rd_vbase + ln0])
+            + float(all_rd_variants[rd_vbase + ln1])
+            + float(all_rd_variants[rd_vbase + ln2])
+            + float(all_rd_variants[rd_vbase + ln3])
+        )
+        r_winner = max(r0_v, r1_v, r2_v)
+        return leaf_sum - (r_winner + r0_v + r1_v + r2_v) * 0.5
 
     @staticmethod
     def _accumulate_steiner(

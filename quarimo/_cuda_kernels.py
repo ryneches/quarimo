@@ -242,6 +242,80 @@ if _CUDA_AVAILABLE:
         cuda.atomic.add(steiner_sum_sq_out, (qi, gi, topo), sl * sl * mult)
 
     @cuda.jit(device=True)
+    def _compute_lca_nodes_cuda(
+            fo0, fo1, fo2, fo3,
+            tour_base, sp_base, lg_base, sp_stride,
+            all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour):
+        """
+        Compute the six pairwise LCA local node IDs for four taxa (device-only).
+
+        Returns topology-stable local node IDs for all six pairs — computed once
+        per stored tree and reused across BL variants.  Device counterpart of
+        ``_compute_lca_nodes_nb``.
+        """
+        if fo0 <= fo1:
+            lca01 = _rmq_csr_cuda(fo0, fo1, sp_base, sp_stride, all_sparse_table,
+                                   all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+        else:
+            lca01 = _rmq_csr_cuda(fo1, fo0, sp_base, sp_stride, all_sparse_table,
+                                   all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+        if fo2 <= fo3:
+            lca23 = _rmq_csr_cuda(fo2, fo3, sp_base, sp_stride, all_sparse_table,
+                                   all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+        else:
+            lca23 = _rmq_csr_cuda(fo3, fo2, sp_base, sp_stride, all_sparse_table,
+                                   all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+        if fo0 <= fo2:
+            lca02 = _rmq_csr_cuda(fo0, fo2, sp_base, sp_stride, all_sparse_table,
+                                   all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+        else:
+            lca02 = _rmq_csr_cuda(fo2, fo0, sp_base, sp_stride, all_sparse_table,
+                                   all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+        if fo1 <= fo3:
+            lca13 = _rmq_csr_cuda(fo1, fo3, sp_base, sp_stride, all_sparse_table,
+                                   all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+        else:
+            lca13 = _rmq_csr_cuda(fo3, fo1, sp_base, sp_stride, all_sparse_table,
+                                   all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+        if fo0 <= fo3:
+            lca03 = _rmq_csr_cuda(fo0, fo3, sp_base, sp_stride, all_sparse_table,
+                                   all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+        else:
+            lca03 = _rmq_csr_cuda(fo3, fo0, sp_base, sp_stride, all_sparse_table,
+                                   all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+        if fo1 <= fo2:
+            lca12 = _rmq_csr_cuda(fo1, fo2, sp_base, sp_stride, all_sparse_table,
+                                   all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+        else:
+            lca12 = _rmq_csr_cuda(fo2, fo1, sp_base, sp_stride, all_sparse_table,
+                                   all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour)
+        return lca01, lca23, lca02, lca13, lca03, lca12
+
+    @cuda.jit(device=True)
+    def _steiner_from_lca_nodes_cuda(
+            ln0, ln1, ln2, ln3,
+            lca01, lca23, lca02, lca13, lca03, lca12,
+            rd_vbase, all_rd_variants):
+        """
+        Steiner length for one BL variant given precomputed LCA local node IDs
+        (device-only).  Device counterpart of ``_steiner_from_lca_nodes_nb``.
+        """
+        r0_v = all_rd_variants[rd_vbase + lca01] + all_rd_variants[rd_vbase + lca23]
+        r1_v = all_rd_variants[rd_vbase + lca02] + all_rd_variants[rd_vbase + lca13]
+        r2_v = all_rd_variants[rd_vbase + lca03] + all_rd_variants[rd_vbase + lca12]
+        leaf_sum = (all_rd_variants[rd_vbase + ln0]
+                    + all_rd_variants[rd_vbase + ln1]
+                    + all_rd_variants[rd_vbase + ln2]
+                    + all_rd_variants[rd_vbase + ln3])
+        if r0_v >= r1_v and r0_v >= r2_v:
+            r_winner = r0_v
+        elif r1_v >= r0_v and r1_v >= r2_v:
+            r_winner = r1_v
+        else:
+            r_winner = r2_v
+        return leaf_sum - (r_winner + r0_v + r1_v + r2_v) * 0.5
+
+    @cuda.jit(device=True)
     def _polytomy_check_cuda(fo0, fo1, fo2, fo3,
                               node_base, tour_base, sp_base, lg_base, sp_stride,
                               poly_start, poly_end, polytomy_nodes,
@@ -510,6 +584,10 @@ if _CUDA_AVAILABLE:
         polytomy_offsets,   # [n_trees + 1] int32 - CSR offsets for polytomy nodes
         polytomy_nodes,     # [total_polytomy] int32 - local node IDs of polytomy internals
         tree_multiplicities,  # [n_trees] int32 - deduplication weights
+        bl_variant_offsets,       # [n_trees + 1] int32 - CSR into bl_variant_multiplicities
+        bl_variant_multiplicities,  # [total_variants] int32 - per-variant counts
+        bl_node_offsets,          # [total_variants + 1] int32 - CSR into all_rd_variants
+        all_rd_variants,          # [total_variant_nodes] float64 - per-variant root distances
         # Output
         counts              # [count, n_groups, 4] int32 - topology counts per group
     ):
@@ -604,6 +682,10 @@ if _CUDA_AVAILABLE:
         polytomy_offsets,   # [n_trees + 1] int32 - CSR offsets for polytomy nodes
         polytomy_nodes,     # [total_polytomy] int32 - local node IDs of polytomy internals
         tree_multiplicities,  # [n_trees] int32 - deduplication weights
+        bl_variant_offsets,       # [n_trees + 1] int32 - CSR into bl_variant_multiplicities
+        bl_variant_multiplicities,  # [total_variants] int32 - per-variant counts
+        bl_node_offsets,          # [total_variants + 1] int32 - CSR into all_rd_variants
+        all_rd_variants,          # [total_variant_nodes] float64 - per-variant root distances
         # Outputs
         counts,             # [count, n_groups, 4] int32
         steiner_out,        # [count, n_groups, 4] float64 — summed Steiner
@@ -656,33 +738,36 @@ if _CUDA_AVAILABLE:
             all_euler_tour, all_root_distance,
         )
         mult = tree_multiplicities[ti]
-        if found:
-            gi = tree_to_group_idx[ti]
-            sl = _steiner_length_cuda(
-                ln0, ln1, ln2, ln3, node_base, r0, r1, r2, rw, all_root_distance,
+        if not found:
+            topo, r0, r1, r2, rw = _quartet_topology_and_rd_cuda(
+                fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
+                all_root_distance, all_sparse_table, all_euler_depth,
+                all_log2_table, all_euler_tour,
             )
-            cuda.atomic.add(counts, (qi, gi, topo), mult)
-            _accumulate_steiner_cuda(
-                qi, gi, topo, sl, mult,
-                steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
-            )
-            return
-
-        topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_cuda(
-            fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
-            all_root_distance, all_sparse_table, all_euler_depth,
-            all_log2_table, all_euler_tour,
-        )
 
         gi = tree_to_group_idx[ti]
-        sl = _steiner_length_cuda(
-            ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance,
-        )
         cuda.atomic.add(counts, (qi, gi, topo), mult)
-        _accumulate_steiner_cuda(
-            qi, gi, topo, sl, mult,
-            steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
+
+        # Topology is fixed for all BL variants; compute LCA nodes once, then
+        # loop over BL variants for variant-specific Steiner lengths.
+        lca01, lca23, lca02, lca13, lca03, lca12 = _compute_lca_nodes_cuda(
+            fo0, fo1, fo2, fo3, tour_base, sp_base, lg_base, sp_stride,
+            all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour,
         )
+        v_start = bl_variant_offsets[ti]
+        v_end   = bl_variant_offsets[ti + 1]
+        for vi in range(v_start, v_end):
+            mult_v = bl_variant_multiplicities[vi]
+            rd_vbase = bl_node_offsets[vi]
+            sl_v = _steiner_from_lca_nodes_cuda(
+                ln0, ln1, ln2, ln3,
+                lca01, lca23, lca02, lca13, lca03, lca12,
+                rd_vbase, all_rd_variants,
+            )
+            _accumulate_steiner_cuda(
+                qi, gi, topo, sl_v, mult_v,
+                steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
+            )
 
 
     @cuda.jit

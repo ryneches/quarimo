@@ -345,6 +345,93 @@ def _accumulate_steiner_nb(qi, gi, topo, sl, mult,
     steiner_sum_sq_out[qi, gi, topo] += sl * sl * mult
 
 
+@njit(cache=True)
+def _steiner_from_lca_nodes_nb(
+        ln0, ln1, ln2, ln3,
+        lca01, lca23, lca02, lca13, lca03, lca12,
+        rd_vbase, all_rd_variants):
+    """
+    Steiner length for one BL variant given precomputed LCA local node IDs.
+
+    Uses variant-specific root distances from ``all_rd_variants[rd_vbase:]``.
+    The LCA node IDs are topology-stable (shared across all BL variants of the
+    same stored tree); only the rd values differ between variants.
+
+    Parameters
+    ----------
+    ln0..ln3 : int
+        Local leaf node IDs of the four taxa.
+    lca01, lca23, lca02, lca13, lca03, lca12 : int
+        Pairwise LCA local node IDs.
+    rd_vbase : int
+        Offset into ``all_rd_variants`` for this BL variant's node data.
+    all_rd_variants : float64[:]
+        Flat array of per-variant root distances.
+
+    Returns
+    -------
+    float64
+        Steiner spanning length S >= 0.
+    """
+    r0_v = all_rd_variants[rd_vbase + lca01] + all_rd_variants[rd_vbase + lca23]
+    r1_v = all_rd_variants[rd_vbase + lca02] + all_rd_variants[rd_vbase + lca13]
+    r2_v = all_rd_variants[rd_vbase + lca03] + all_rd_variants[rd_vbase + lca12]
+    leaf_sum = (all_rd_variants[rd_vbase + ln0]
+                + all_rd_variants[rd_vbase + ln1]
+                + all_rd_variants[rd_vbase + ln2]
+                + all_rd_variants[rd_vbase + ln3])
+    if r0_v >= r1_v and r0_v >= r2_v:
+        r_winner = r0_v
+    elif r1_v >= r0_v and r1_v >= r2_v:
+        r_winner = r1_v
+    else:
+        r_winner = r2_v
+    return leaf_sum - (r_winner + r0_v + r1_v + r2_v) * 0.5
+
+
+@njit(cache=True)
+def _compute_lca_nodes_nb(
+        fo0, fo1, fo2, fo3,
+        tour_base, sp_base, lg_base, sp_stride,
+        all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour):
+    """
+    Compute the six pairwise LCA local node IDs for four taxa.
+
+    Returns local node IDs (not Euler-tour positions) for all six pairs.
+    These are topology-stable — they depend only on tree structure, not on
+    branch lengths — so they can be computed once and reused across all BL
+    variants of the same stored tree.
+
+    Parameters
+    ----------
+    fo0..fo3 : int
+        First Euler-tour occurrences of the four taxa.
+    tour_base, sp_base, lg_base, sp_stride : int
+        CSR offsets and sparse-table stride for the stored tree.
+
+    Returns
+    -------
+    (lca01, lca23, lca02, lca13, lca03, lca12) : 6-tuple of int
+        Local node IDs of the six pairwise LCAs.
+    """
+    def lca_node(oa, ob):
+        if oa <= ob:
+            l, r = oa, ob
+        else:
+            l, r = ob, oa
+        return _rmq_csr_nb(l, r, sp_base, sp_stride,
+                           all_sparse_table, all_euler_depth,
+                           all_log2_table, lg_base, tour_base, all_euler_tour)
+
+    lca01 = lca_node(fo0, fo1)
+    lca23 = lca_node(fo2, fo3)
+    lca02 = lca_node(fo0, fo2)
+    lca13 = lca_node(fo1, fo3)
+    lca03 = lca_node(fo0, fo3)
+    lca12 = lca_node(fo1, fo2)
+    return lca01, lca23, lca02, lca13, lca03, lca12
+
+
 @njit(parallel=True, cache=True)
 def _quartet_counts_njit(
         sorted_quartet_ids,
@@ -366,6 +453,10 @@ def _quartet_counts_njit(
         polytomy_offsets,
         polytomy_nodes,
         tree_multiplicities,
+        bl_variant_offsets,
+        bl_variant_multiplicities,
+        bl_node_offsets,
+        all_rd_variants,
         counts_out):
     """
     Numba-compiled counts-only quartet kernel.
@@ -446,6 +537,10 @@ def _quartet_steiner_njit(
         polytomy_offsets,
         polytomy_nodes,
         tree_multiplicities,
+        bl_variant_offsets,
+        bl_variant_multiplicities,
+        bl_node_offsets,
+        all_rd_variants,
         counts_out,
         steiner_out,
         steiner_min_out,
@@ -512,14 +607,28 @@ def _quartet_steiner_njit(
             )
             gi = tree_to_group_idx[ti]
             mult = tree_multiplicities[ti]
-            sl = _steiner_length_nb(
-                ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance,
-            )
             counts_out[qi, gi, topo] += mult
-            _accumulate_steiner_nb(
-                qi, gi, topo, sl, mult,
-                steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
+
+            # Compute topology-stable LCA node IDs once per stored tree.
+            # Loop over BL variants for variant-specific Steiner lengths.
+            lca01, lca23, lca02, lca13, lca03, lca12 = _compute_lca_nodes_nb(
+                fo0, fo1, fo2, fo3, tour_base, sp_base, lg_base, sp_stride,
+                all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour,
             )
+            v_start = bl_variant_offsets[ti]
+            v_end   = bl_variant_offsets[ti + 1]
+            for vi in range(v_start, v_end):
+                mult_v = bl_variant_multiplicities[vi]
+                rd_vbase = bl_node_offsets[vi]
+                sl_v = _steiner_from_lca_nodes_nb(
+                    ln0, ln1, ln2, ln3,
+                    lca01, lca23, lca02, lca13, lca03, lca12,
+                    rd_vbase, all_rd_variants,
+                )
+                _accumulate_steiner_nb(
+                    qi, gi, topo, sl_v, mult_v,
+                    steiner_out, steiner_min_out, steiner_max_out, steiner_sum_sq_out,
+                )
 
 
 # ======================================================================== #
