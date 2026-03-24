@@ -4,7 +4,8 @@ test_deduplication.py
 Tests for automatic deduplication of identical trees during Forest construction.
 
 Case A: trees with identical topology AND identical branch lengths are merged
-into a single representative tree; ``tree_multiplicities`` records the weight.
+into a single stored representative; ``_tree_multiplicities`` records the weight.
+Public ``n_trees`` always reflects the number of input trees loaded by the user.
 
 Correctness criterion: a Forest constructed from k copies of the same tree
 must produce the same counts (scaled by k) as a Forest with one copy.
@@ -68,54 +69,56 @@ class TestTreeHash:
 class TestDeduplicationMetadata:
     def test_no_duplicates_multiplicity_all_ones(self):
         forest = Forest([TREE_A, TREE_B])
-        assert forest.n_input_trees == 2
-        assert forest.n_trees == 2
-        np.testing.assert_array_equal(forest.tree_multiplicities, [1, 1])
+        assert forest.n_trees == 2           # public: input count
+        assert forest._n_stored_trees == 2   # private: stored count
+        np.testing.assert_array_equal(forest._tree_multiplicities, [1, 1])
 
     def test_two_copies_deduplicated(self):
         forest = Forest([TREE_A, TREE_A])
-        assert forest.n_input_trees == 2
-        assert forest.n_trees == 1
-        np.testing.assert_array_equal(forest.tree_multiplicities, [2])
+        assert forest.n_trees == 2           # public: input count unchanged
+        assert forest._n_stored_trees == 1   # private: 1 unique stored
+        np.testing.assert_array_equal(forest._tree_multiplicities, [2])
 
     def test_three_copies_one_unique(self):
         forest = Forest([TREE_A, TREE_A, TREE_A])
-        assert forest.n_input_trees == 3
-        assert forest.n_trees == 1
-        np.testing.assert_array_equal(forest.tree_multiplicities, [3])
+        assert forest.n_trees == 3
+        assert forest._n_stored_trees == 1
+        np.testing.assert_array_equal(forest._tree_multiplicities, [3])
 
     def test_mixed_deduplication(self):
         # TREE_A appears twice, TREE_B once
         forest = Forest([TREE_A, TREE_B, TREE_A])
-        assert forest.n_input_trees == 3
-        assert forest.n_trees == 2
+        assert forest.n_trees == 3
+        assert forest._n_stored_trees == 2
 
         # First occurrence wins; TREE_A is at index 0, TREE_B at index 1
         # (order preserved: first occurrence of each unique tree)
-        total = int(forest.tree_multiplicities.sum())
+        total = int(forest._tree_multiplicities.sum())
         assert total == 3
-        assert forest.tree_multiplicities[0] == 2  # TREE_A x2
-        assert forest.tree_multiplicities[1] == 1  # TREE_B x1
+        assert forest._tree_multiplicities[0] == 2  # TREE_A x2
+        assert forest._tree_multiplicities[1] == 1  # TREE_B x1
 
     def test_different_bl_not_deduplicated(self):
         """Trees with different branch lengths must NOT be merged."""
         forest = Forest([TREE_A, TREE_A_DIFF_BL])
         assert forest.n_trees == 2
-        np.testing.assert_array_equal(forest.tree_multiplicities, [1, 1])
+        assert forest._n_stored_trees == 2
+        np.testing.assert_array_equal(forest._tree_multiplicities, [1, 1])
 
     def test_different_support_deduplicated(self):
         """Trees differing only in support values ARE merged (support excluded from hash)."""
         forest = Forest([TREE_A, TREE_A_DIFF_SUPPORT])
-        assert forest.n_trees == 1
-        np.testing.assert_array_equal(forest.tree_multiplicities, [2])
+        assert forest.n_trees == 2
+        assert forest._n_stored_trees == 1
+        np.testing.assert_array_equal(forest._tree_multiplicities, [2])
 
     def test_multiplicities_dtype(self):
         forest = Forest([TREE_A, TREE_B])
-        assert forest.tree_multiplicities.dtype == np.int32
+        assert forest._tree_multiplicities.dtype == np.int32
 
     def test_multiplicities_sum_equals_n_input(self):
         forest = Forest([TREE_A, TREE_B, TREE_A])
-        assert int(forest.tree_multiplicities.sum()) == forest.n_input_trees
+        assert int(forest._tree_multiplicities.sum()) == forest.n_trees
 
 
 # ---------------------------------------------------------------------------
@@ -127,12 +130,14 @@ class TestCrossGroupDeduplication:
         forest = Forest({"group1": [TREE_A], "group2": [TREE_A]})
         # Both groups have TREE_A; they must not be merged
         assert forest.n_trees == 2
-        np.testing.assert_array_equal(forest.tree_multiplicities, [1, 1])
+        assert forest._n_stored_trees == 2
+        np.testing.assert_array_equal(forest._tree_multiplicities, [1, 1])
 
     def test_same_tree_same_group_merged(self):
         forest = Forest({"group1": [TREE_A, TREE_A], "group2": [TREE_B]})
-        assert forest.n_trees == 2  # one for group1 (deduped), one for group2
-        total = int(forest.tree_multiplicities.sum())
+        assert forest.n_trees == 3           # public: 3 input trees
+        assert forest._n_stored_trees == 2   # private: 2 unique stored
+        total = int(forest._tree_multiplicities.sum())
         assert total == 3  # 2 + 1
 
 
@@ -224,14 +229,15 @@ class TestCountCorrectness:
 class TestCSRIntegrityAfterDeduplication:
     def test_csr_offsets_consistent(self):
         forest = Forest([TREE_A, TREE_A, TREE_B])
-        # After dedup: 2 trees
-        assert forest.n_trees == 2
-        assert len(forest.node_offsets) == forest.n_trees + 1
-        assert len(forest.tour_offsets) == forest.n_trees + 1
-        assert forest.global_to_local.shape[0] == forest.n_trees
+        # Input: 3 trees; stored (unique): 2 trees
+        assert forest.n_trees == 3               # public: input count
+        assert forest._n_stored_trees == 2       # private: stored count
+        assert len(forest.node_offsets) == forest._n_stored_trees + 1
+        assert len(forest.tour_offsets) == forest._n_stored_trees + 1
+        assert forest.global_to_local.shape[0] == forest._n_stored_trees
 
     def test_tree_multiplicities_in_kernel_data(self):
         forest = Forest([TREE_A, TREE_A, TREE_B])
         kd = forest._kernel_data
         assert hasattr(kd, "tree_multiplicities")
-        np.testing.assert_array_equal(kd.tree_multiplicities, forest.tree_multiplicities)
+        np.testing.assert_array_equal(kd.tree_multiplicities, forest._tree_multiplicities)

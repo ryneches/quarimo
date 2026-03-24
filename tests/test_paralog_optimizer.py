@@ -217,7 +217,7 @@ def test_assignments_shape_and_dtype():
 
     n_pg = len(f.paralog_genome_names)
     assert opt.assignments.shape[0] == n_pg
-    assert opt.assignments.shape[2] == f.n_trees
+    assert opt.assignments.shape[2] == f._n_stored_trees
     assert opt.assignments.dtype == np.int32
 
 

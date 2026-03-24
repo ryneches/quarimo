@@ -311,7 +311,7 @@ class ParalogOptimizer:
         end = int(self.paralog_data.copy_offsets[li + 1])
         for ci in range(end - start):
             gid = int(self.paralog_data.copy_global_ids[start + ci])
-            for ti in range(self.forest.n_trees):
+            for ti in range(self.forest._n_stored_trees):
                 self.paralog_data.assignments[li, ci, ti] = int(new_g2l[ti, gid])
 
     def _delta_on_device(

@@ -508,8 +508,9 @@ class Forest:
                 t._apply_taxon_map(taxon_map)
 
         # Deduplicate completely identical trees (same topology + branch lengths)
-        # within each group.  Sets self.tree_multiplicities and self.n_input_trees.
-        self._deduplicate_trees()
+        # within each group.  Populates private _stored_trees, _n_stored_trees,
+        # _stored_group_labels, _tree_multiplicities.  Public n_trees unchanged.
+        self._deduplicate_tree_data()
 
         # Build group mappings
         self._build_group_mappings()
@@ -521,7 +522,7 @@ class Forest:
 
         logger.info("📦 Packing arrays into CSR flat layout...")
         self._pack_csr()
-        log_polytomy_statistics(self.polytomy_offsets, self.n_trees)
+        log_polytomy_statistics(self.polytomy_offsets, self._n_stored_trees)
 
         n_zero_trees = sum(1 for t in self._trees if t.n_zero_length_branches > 0)
         if n_zero_trees > 0:
@@ -549,8 +550,10 @@ class Forest:
         self._log_statistics_method()
 
     def _build_group_mappings(self) -> None:
-        """Build group → tree indices mappings."""
-        # Forward mapping: group_name -> array of tree indices
+        """Build group → tree indices mappings (input-semantics + stored-semantics)."""
+        group_to_idx = {g: i for i, g in enumerate(self.unique_groups)}
+
+        # Public: input-tree semantics
         self.group_to_tree_indices = {
             group_name: np.array(
                 [i for i, g in enumerate(self.group_labels) if g == group_name],
@@ -558,31 +561,37 @@ class Forest:
             )
             for group_name in self.unique_groups
         }
-
-        # Reverse mapping: tree_idx -> group index in unique_groups
-        group_to_idx = {g: i for i, g in enumerate(self.unique_groups)}
         self.tree_to_group_idx = np.array(
             [group_to_idx[g] for g in self.group_labels], dtype=np.int32
         )
 
-    def _deduplicate_trees(self) -> None:
+        # Private: stored-tree semantics (used by kernels and logging)
+        self._stored_tree_to_group_idx = np.array(
+            [group_to_idx[g] for g in self._stored_group_labels], dtype=np.int32
+        )
+        self._stored_group_to_tree_indices = {
+            group_name: np.array(
+                [i for i, g in enumerate(self._stored_group_labels) if g == group_name],
+                dtype=np.int64,
+            )
+            for group_name in self.unique_groups
+        }
+
+    def _deduplicate_tree_data(self) -> None:
         """
-        Remove completely identical trees (same topology and branch lengths)
-        within each group, recording how many copies each unique tree represents.
+        Identify duplicate trees (same topology and branch lengths within the
+        same group) and build the stored-tree representation.
 
-        Sets:
-            ``self.tree_multiplicities`` — int32[n_trees] weight for each tree.
-            ``self.n_input_trees``       — original tree count before deduplication.
+        Creates private attributes without modifying any public-facing attrs:
+            ``self._stored_trees``        — unique Tree objects (first occurrences).
+            ``self._stored_group_labels`` — group label per stored tree.
+            ``self._n_stored_trees``      — number of unique stored trees.
+            ``self._tree_multiplicities`` — int32[_n_stored_trees] weight per tree.
 
-        Two trees are considered identical iff ``tree_hash()`` matches AND they
-        belong to the same group (cross-group trees are never merged because they
-        accumulate into different output slots).
-
-        The order of trees is preserved (first occurrence wins).
+        Cross-group trees are never merged (they accumulate into different
+        output slots).  The order of first occurrences is preserved.
         """
-        self.n_input_trees = self.n_trees
-
-        seen: dict = {}          # (hash_bytes, group_label) -> first occurrence index
+        seen: dict = {}          # (hash_bytes, group_label) -> sequential stored index
         keep_indices: list = []  # indices into self._trees / self.group_labels
 
         for i, (tree, grp) in enumerate(zip(self._trees, self.group_labels)):
@@ -591,28 +600,24 @@ class Forest:
                 seen[key] = len(keep_indices)
                 keep_indices.append(i)
 
-        n_dupes = self.n_input_trees - len(keep_indices)
+        n_dupes = self.n_trees - len(keep_indices)
         if n_dupes > 0:
             logger.info(
-                "🔁 Deduplication: removed %d/%d duplicate trees (%d unique).",
-                n_dupes, self.n_input_trees, len(keep_indices),
+                "🔁 Deduplication: %d/%d trees are duplicates; storing %d unique trees.",
+                n_dupes, self.n_trees, len(keep_indices),
             )
 
-        # Compute multiplicities: count how many input trees map to each unique tree.
-        # seen[key] = the sequential index in keep_indices (0, 1, 2, ...).
-        mult: dict = {}  # new sequential index -> count
+        # Compute multiplicities: count how many input trees map to each stored tree.
+        mult: dict = {}  # stored sequential index -> count
         for tree, grp in zip(self._trees, self.group_labels):
             key = (tree.tree_hash(), grp)
             new_idx = seen[key]
             mult[new_idx] = mult.get(new_idx, 0) + 1
 
-        # Rebuild _trees and group_labels to contain only unique trees
-        self._trees = [self._trees[i] for i in keep_indices]
-        self.group_labels = [self.group_labels[i] for i in keep_indices]
-        self.n_trees = len(self._trees)
-
-        # Build the multiplicities array in the new tree order
-        self.tree_multiplicities = np.array(
+        self._stored_trees = [self._trees[i] for i in keep_indices]
+        self._stored_group_labels = [self.group_labels[i] for i in keep_indices]
+        self._n_stored_trees = len(self._stored_trees)
+        self._tree_multiplicities = np.array(
             [mult[new_i] for new_i in range(len(keep_indices))], dtype=np.int32
         )
 
@@ -631,11 +636,11 @@ class Forest:
             sp_offsets=self.sp_offsets,
             lg_offsets=self.lg_offsets,
             sp_tour_widths=self.sp_tour_widths,
-            tree_to_group_idx=self.tree_to_group_idx,
+            tree_to_group_idx=self._stored_tree_to_group_idx,
             polytomy_offsets=self.polytomy_offsets,
             polytomy_nodes=self.polytomy_nodes,
-            tree_multiplicities=self.tree_multiplicities,
-            n_trees=self.n_trees,
+            tree_multiplicities=self._tree_multiplicities,
+            n_trees=self._n_stored_trees,
             n_global_taxa=self.n_global_taxa,
             n_groups=self.n_groups,
         )
@@ -675,7 +680,7 @@ class Forest:
         """Log taxon namespace coverage within and between groups."""
         log_namespace_coverage(
             self.unique_groups,
-            self.group_to_tree_indices,
+            self._stored_group_to_tree_indices,
             self.taxa_present,
         )
 
@@ -709,7 +714,7 @@ class Forest:
         ga = self._resolve_global(taxon_a)
         gb = self._resolve_global(taxon_b)
 
-        distances_out = np.full(self.n_trees, np.nan, dtype=np.float64)
+        distances_out = np.full(self._n_stored_trees, np.nan, dtype=np.float64)
 
         kd = self._kernel_data
         g2l = kd.global_to_local
@@ -725,7 +730,7 @@ class Forest:
         lo_ = kd.lg_offsets
         stw = kd.sp_tour_widths
 
-        for ti in range(self.n_trees):
+        for ti in range(self._n_stored_trees):
             la = int(g2l[ti, ga])
             lb = int(g2l[ti, gb])
             if la < 0 or lb < 0:
@@ -1592,12 +1597,12 @@ class Forest:
         Without ``taxon_map``, duplicate leaf names across any tree raise
         ``ValueError`` (existing behaviour).
         """
-        NT = self.n_trees
+        NT = self._n_stored_trees
 
         # ---- Count max copies per genome name across all trees ----------- #
         # For non-paralog forests this is trivially 1 everywhere.
         name_max_copies: Dict[str, int] = {}
-        for t in self._trees:
+        for t in self._stored_trees:
             # Count occurrences of each name within this tree
             tree_counts: Dict[str, int] = {}
             for i in range(t.n_leaves):
@@ -1642,7 +1647,7 @@ class Forest:
         G = self.n_global_taxa
 
         # ---- Leaf offset array ------------------------------------------- #
-        leaf_sizes = np.array([t.n_leaves for t in self._trees], dtype=np.int64)
+        leaf_sizes = np.array([t.n_leaves for t in self._stored_trees], dtype=np.int64)
         self.leaf_offsets = np.zeros(NT + 1, dtype=np.int64)
         self.leaf_offsets[1:] = np.cumsum(leaf_sizes)
         total_leaves = int(self.leaf_offsets[-1])
@@ -1651,7 +1656,7 @@ class Forest:
         self.global_to_local = np.full((NT, G), -1, dtype=np.int32)
         self.local_to_global = np.full(total_leaves, -1, dtype=np.int32)
 
-        for ti, t in enumerate(self._trees):
+        for ti, t in enumerate(self._stored_trees):
             lo = int(self.leaf_offsets[ti])
 
             if not paralog_genome_names:
@@ -1737,7 +1742,7 @@ class Forest:
             that genome has fewer than ``max_copies`` copies in tree ``ti``.
         """
         n_paralog = len(self.paralog_genome_names)
-        NT = self.n_trees
+        NT = self._n_stored_trees
 
         if n_paralog == 0:
             # No paralogs — build empty sentinel arrays so downstream code
@@ -1824,8 +1829,8 @@ class Forest:
         The value is a *local* tour position (0-based within tree i's tour);
         add tour_offsets[i] to obtain the global position in all_euler_tour.
         """
-        trees = self._trees
-        NT = self.n_trees
+        trees = self._stored_trees
+        NT = self._n_stored_trees
 
         # ---- Per-tree dimension vectors -------------------------------- #
         node_sizes = np.array([t.n_nodes for t in trees], dtype=np.int64)
