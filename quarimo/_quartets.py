@@ -3,7 +3,10 @@ Quartets class for quartet sampling and generation.
 """
 
 import numpy as np
-from typing import Union, List, Tuple, Optional, Iterator
+from typing import TYPE_CHECKING, Union, List, Tuple, Optional, Iterator
+
+if TYPE_CHECKING:
+    import polars as pl
 
 # Maximum global taxon ID for which the staged int64 combinadic computation
 # is safe from intermediate overflow.  For d < this value every intermediate
@@ -94,9 +97,13 @@ class Quartets:
         
         # Normalize and validate seed
         self.seed = self._normalize_seed(seed)
-        
+
         # Derive RNG seed from seed quartets (computed on CPU once)
         self.rng_seed = self._hash_seed(self.seed)
+
+        # Lazy cache for _materialise() — invalidated if rng_seed is rewritten
+        # (e.g. by Quartets.random() after construction).
+        self._cache: Optional[tuple] = None
     
     def _normalize_seed(self, seed) -> List[Tuple[int, int, int, int]]:
         """
@@ -678,6 +685,278 @@ class Quartets:
             for r in rows
         ]
 
+    @staticmethod
+    def _generate_random_batch(
+        rng_seed: int, rng_offsets: np.ndarray, n_taxa: int
+    ) -> np.ndarray:
+        """
+        Vectorised XorShift128 quartet generation for a batch of random quartets.
+
+        Runs the same algorithm as ``_init_rng`` + ``_sample_quartet`` for an
+        entire batch simultaneously using numpy array operations, avoiding the
+        per-quartet Python interpreter overhead of the scalar path.
+
+        Parameters
+        ----------
+        rng_seed : int
+            32-bit RNG seed (from ``self.rng_seed``).
+        rng_offsets : int64[N]
+            Position in the random sub-sequence for each quartet
+            (= absolute_idx - n_seed).
+        n_taxa : int
+            Global taxon namespace size.
+
+        Returns
+        -------
+        int32[N, 4]
+            Sorted global taxon IDs, one quartet per row.
+        """
+        N = len(rng_offsets)
+        if N == 0:
+            return np.empty((0, 4), dtype=np.int32)
+
+        # Rejection-sampling draw budget per quartet.  For the k-th unique
+        # slot (1-indexed), the per-draw failure probability is (k-1)/n_taxa,
+        # so slot 4 needs geometric(1 - 3/n_taxa) tries.  K=32 is safe for
+        # n_taxa >= 10; larger K for smaller namespaces (which always have
+        # small N, so the extra steps are cheap).
+        K = max(32, 512 // max(n_taxa - 3, 1))
+
+        # Initialise one XorShift128 state per quartet — matches _init_rng.
+        base = np.int64(rng_seed) + rng_offsets.astype(np.int64)
+        s0 = (base & np.int64(0xFFFFFFFF)).astype(np.uint32)
+        s1 = ((base >> np.int64(32)) & np.int64(0xFFFFFFFF)).astype(np.uint32)
+        s2 = np.full(N, np.uint32(0x9e3779b9), dtype=np.uint32)
+        s3 = np.full(N, np.uint32(0x7f4a7c13), dtype=np.uint32)
+
+        # Run K XorShift128 steps for all N quartets simultaneously.
+        # candidates[i, k] = (k+1)-th raw draw for quartet i.
+        candidates = np.empty((N, K), dtype=np.int32)
+        n_u32 = np.uint32(n_taxa)
+        for k in range(K):
+            t = s3.copy()
+            s = s0.copy()
+            s3 = s2
+            s2 = s1
+            s1 = s
+            t ^= (t << np.uint32(11))
+            t ^= (t >> np.uint32(8))
+            s0 = t ^ s ^ (s >> np.uint32(19))
+            candidates[:, k] = (s0 % n_u32).astype(np.int32)
+
+        # accepted[i, k] = True iff candidates[i, k] is distinct from all
+        # of candidates[i, 0:k] (i.e. not a rejection).
+        accepted = np.ones((N, K), dtype=bool)
+        for k in range(1, K):
+            accepted[:, k] = ~(candidates[:, :k] == candidates[:, k:k+1]).any(axis=1)
+
+        # cumcount[i, k] = number of distinct values in candidates[i, 0:k+1]
+        cumcount = np.cumsum(accepted, axis=1)  # (N, K)
+
+        # Extract the p-th distinct candidate for each row (p = 0..3).
+        row_idx = np.arange(N)
+        out = np.empty((N, 4), dtype=np.int32)
+        for p in range(4):
+            # First column position where cumcount reaches p+1.
+            pos = (cumcount == (p + 1)).argmax(axis=1)
+            out[:, p] = candidates[row_idx, pos]
+
+        # Sort taxa within each quartet (ascending global IDs, matches scalar).
+        out.sort(axis=1)
+
+        # Scalar fallback for any row where K draws were exhausted before
+        # 4 unique taxa were found.  Astronomically rare for n_taxa >= 10
+        # with the K formula above; only possible for very small namespaces.
+        failed = np.where(cumcount[:, -1] < 4)[0]
+        for i in failed:
+            rng_off = int(rng_offsets[i])
+            base_i = (int(rng_seed) + rng_off) & 0xFFFFFFFFFFFFFFFF
+            state = np.array(
+                [base_i & 0xFFFFFFFF, (base_i >> 32) & 0xFFFFFFFF,
+                 0x9e3779b9, 0x7f4a7c13],
+                dtype=np.uint32,
+            )
+            samples: list = []
+            while len(samples) < 4:
+                t_s = int(state[3])
+                s_s = int(state[0])
+                state[3] = state[2]
+                state[2] = state[1]
+                state[1] = s_s
+                t_s = (t_s ^ ((t_s << 11) & 0xFFFFFFFF)) & 0xFFFFFFFF
+                t_s = (t_s ^ (t_s >> 8)) & 0xFFFFFFFF
+                state[0] = (t_s ^ s_s ^ (s_s >> 19)) & 0xFFFFFFFF
+                candidate = int(state[0]) % n_taxa
+                if candidate not in samples:
+                    samples.append(candidate)
+            out[i] = sorted(samples)
+
+        return out
+
+    def _materialise(self) -> tuple:
+        """
+        Materialise the quartet sequence, caching the result.
+
+        Called by the public bulk-access methods (:meth:`to_numpy`,
+        :meth:`index_array`, :meth:`to_frame`) so that the vectorised
+        XorShift generation runs at most once per ``Quartets`` object.
+
+        Returns
+        -------
+        ids : int32[n_quartets, 4]
+            Global taxon IDs for each quartet, sorted ascending.
+        idx : int64[n_quartets] or object[n_quartets]
+            Combinadic index for each quartet (see :meth:`index_array`).
+        """
+        if self._cache is not None:
+            return self._cache
+
+        n_seed = len(self.seed)
+
+        # Seed portion: window intersect with [0, n_seed)
+        seed_start = min(n_seed, self.offset)
+        seed_end = min(n_seed, self.offset + self.count)
+        seed_count = max(0, seed_end - seed_start)
+
+        # Random portion: window intersect with [n_seed, ∞)
+        rand_start_abs = max(n_seed, self.offset)
+        rand_count = max(0, (self.offset + self.count) - rand_start_abs)
+
+        parts = []
+
+        if seed_count > 0:
+            parts.append(
+                np.array(self.seed[seed_start:seed_end], dtype=np.int32)
+            )
+
+        if rand_count > 0:
+            rng_offsets = np.arange(
+                rand_start_abs - n_seed,
+                rand_start_abs - n_seed + rand_count,
+                dtype=np.int64,
+            )
+            parts.append(
+                self._generate_random_batch(
+                    self.rng_seed, rng_offsets, self.forest.n_global_taxa
+                )
+            )
+
+        if not parts:
+            self._cache = (
+                np.empty((0, 4), dtype=np.int32),
+                np.empty(0, dtype=np.int64),
+            )
+            return self._cache
+
+        raw = parts[0] if len(parts) == 1 else np.concatenate(parts, axis=0)
+
+        # Compute combinadic index from the materialised IDs.
+        a = raw[:, 0].astype(np.int64)
+        b = raw[:, 1].astype(np.int64)
+        c = raw[:, 2].astype(np.int64)
+        d = raw[:, 3].astype(np.int64)
+
+        if int(d.max()) < _QUARTET_IDX_INT64_THRESHOLD:
+            # Fast path: staged integer division — exact, no int64 overflow.
+            b2 = b * (b - 1) // 2
+            c3 = c * (c - 1) // 2 * (c - 2) // 3
+            d4 = d * (d - 1) // 2 * (d - 2) // 3 * (d - 3) // 4
+            idx = (a + b2 + c3 + d4).astype(np.int64)
+        else:
+            # Slow path: Python-int arithmetic for arbitrary precision.
+            a_o, b_o, c_o, d_o = (x.astype(object) for x in (a, b, c, d))
+            idx = (
+                a_o
+                + b_o * (b_o - 1) // 2
+                + c_o * (c_o - 1) * (c_o - 2) // 6
+                + d_o * (d_o - 1) * (d_o - 2) * (d_o - 3) // 24
+            )
+
+        self._cache = (raw, idx)
+        return self._cache
+
+    # ------------------------------------------------------------------
+    # Bulk conversion — public API
+    # ------------------------------------------------------------------
+
+    def to_numpy(self) -> np.ndarray:
+        """
+        Return all quartets as a numpy array.
+
+        Returns
+        -------
+        np.ndarray, int32, shape (n_quartets, 4)
+            Each row is one quartet: four global taxon IDs sorted in
+            ascending order.  Columns correspond to the taxa labelled
+            ``a, b, c, d`` in :meth:`to_frame`.
+
+        Examples
+        --------
+        >>> ids = quartets.to_numpy()
+        >>> ids.shape
+        (1000, 4)
+        >>> ids[0]          # first quartet as sorted global IDs
+        array([ 3, 12, 27, 41], dtype=int32)
+        """
+        ids, _ = self._materialise()
+        return ids
+
+    def __array__(self, dtype=None, copy=None) -> np.ndarray:
+        """Numpy array protocol — delegates to :meth:`to_numpy`."""
+        arr = self.to_numpy()
+        if dtype is not None:
+            arr = arr.astype(dtype)
+        return arr
+
+    def to_frame(self) -> "pl.DataFrame":
+        """
+        Return all quartets as a Polars DataFrame.
+
+        Returns
+        -------
+        polars.DataFrame
+            Columns:
+
+            ``quartet_idx``
+                Combinadic integer that uniquely identifies the quartet
+                by its four global taxon IDs.  Use as a join key with
+                :meth:`~quarimo._results.QuartetTopologyResult.to_frame`
+                and :meth:`~quarimo._results.QEDResult.to_frame`.
+
+            ``a``, ``b``, ``c``, ``d``
+                Taxon names, sorted by global ID (ascending).
+
+        Examples
+        --------
+        >>> quartets.to_frame()
+        shape: (1000, 5)
+        ┌─────────────┬─────┬─────┬─────┬─────┐
+        │ quartet_idx ┆ a   ┆ b   ┆ c   ┆ d   │
+        │ ---         ┆ --- ┆ --- ┆ --- ┆ --- │
+        │ i64         ┆ str ┆ str ┆ str ┆ str │
+        ╞═════════════╪═════╪═════╪═════╪═════╡
+        │ …           ┆ …   ┆ …   ┆ …   ┆ …   │
+        └─────────────┴─────┴─────┴─────┴─────┘
+        """
+        import polars as pl
+
+        ids, idx = self._materialise()
+        idx_dtype = pl.Int128 if idx.dtype == object else pl.Int64
+
+        if idx.dtype == object:
+            idx_col = pl.Series("quartet_idx", idx.tolist(), dtype=idx_dtype)
+        else:
+            idx_col = pl.Series(idx)
+
+        name_s = pl.Series(self.forest.global_names)
+        return pl.DataFrame({
+            "quartet_idx": idx_col,
+            "a": name_s.gather(pl.Series(ids[:, 0])),
+            "b": name_s.gather(pl.Series(ids[:, 1])),
+            "c": name_s.gather(pl.Series(ids[:, 2])),
+            "d": name_s.gather(pl.Series(ids[:, 3])),
+        })
+
     def index_array(self) -> np.ndarray:
         """
         Combinadic indices for all quartets in this object.
@@ -695,40 +974,9 @@ class Quartets:
             transparently handled by :meth:`~._results.QuartetTopologyResult.to_frame`
             and :meth:`~._results.QEDResult.to_frame` as a Polars ``Int128``
             column.
-
-        Notes
-        -----
-        Calling this method materialises the full quartet sequence; for large
-        random windows this may be slow.  The result is not cached.
         """
-        ids = np.array(list(self), dtype=np.int64)
-        if len(ids) == 0:
-            return np.empty(0, dtype=np.int64)
-
-        a, b, c, d = ids[:, 0], ids[:, 1], ids[:, 2], ids[:, 3]
-
-        if int(d.max()) < _QUARTET_IDX_INT64_THRESHOLD:
-            # Fast path: staged integer division.
-            # Each // step is exact (product of k consecutive integers is
-            # divisible by k!), and no intermediate value exceeds int64 max.
-            b2 = b * (b - 1) // 2
-            c3 = c * (c - 1) // 2 * (c - 2) // 3
-            d4 = d * (d - 1) // 2 * (d - 2) // 3 * (d - 3) // 4
-            return (a + b2 + c3 + d4).astype(np.int64)
-        else:
-            # Slow path: Python int arithmetic — arbitrary precision.
-            # Returns object dtype; callers that produce Polars DataFrames
-            # use pl.Int128 for this column.
-            a_o = a.astype(object)
-            b_o = b.astype(object)
-            c_o = c.astype(object)
-            d_o = d.astype(object)
-            return (
-                a_o
-                + b_o * (b_o - 1) // 2
-                + c_o * (c_o - 1) * (c_o - 2) // 6
-                + d_o * (d_o - 1) * (d_o - 2) * (d_o - 3) // 24
-            )
+        _, idx = self._materialise()
+        return idx
 
     def __repr__(self) -> str:
         """String representation."""

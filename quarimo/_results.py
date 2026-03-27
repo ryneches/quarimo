@@ -203,33 +203,25 @@ class QuartetTopologyResult:
 
         n_q, n_g, _ = self.counts.shape
 
-        # Materialise quartet global IDs and combinadic indices
-        ids = np.array(list(self.quartets), dtype=np.int32)  # (n_q, 4)
-        idx = self.quartets.index_array()
-        idx_dtype = pl.Int128 if idx.dtype == object else pl.Int64
-
-        # Zero-copy string lookup Series (small; shared across all taxon columns)
-        name_s = pl.Series(self.global_names)
+        # Quartet identity columns — cached in the Quartets object, zero extra cost
+        # on repeated calls.  Row order matches the kernel output exactly.
+        q_df = self.quartets.to_frame()  # n_q rows: quartet_idx, a, b, c, d
 
         if form == "long":
+            # Expand each quartet row n_g * 4 times (one per group × topology).
+            # repeat_by + explode is a native polars operation — no numpy round-trip.
+            base = q_df.select([
+                pl.col(c).repeat_by(n_g * 4).explode() for c in q_df.columns
+            ])
+
             gi = np.tile(np.repeat(np.arange(n_g, dtype=np.int32), 4), n_q)
             ti = np.tile(np.arange(4, dtype=np.int32), n_q * n_g)
 
-            # quartet_idx: Int128 requires Python ints; Int64 is zero-copy
-            if idx.dtype == object:
-                idx_col = pl.Series("quartet_idx", np.repeat(idx, n_g * 4).tolist(), dtype=idx_dtype)
-            else:
-                idx_col = pl.Series(np.repeat(idx, n_g * 4))
-
             data: dict = {
-                "quartet_idx": idx_col,
-                "a": name_s.gather(pl.Series(np.repeat(ids[:, 0], n_g * 4))),
-                "b": name_s.gather(pl.Series(np.repeat(ids[:, 1], n_g * 4))),
-                "c": name_s.gather(pl.Series(np.repeat(ids[:, 2], n_g * 4))),
-                "d": name_s.gather(pl.Series(np.repeat(ids[:, 3], n_g * 4))),
-                "group": pl.Series(self.groups).gather(pl.Series(gi)),
+                **{c: base[c] for c in base.columns},
+                "group":    pl.Series(self.groups).gather(pl.Series(gi)),
                 "topology": pl.Series(ti),
-                "count": pl.Series(self.counts.ravel()),
+                "count":    pl.Series(self.counts.ravel()),
             }
             if self.steiner is not None:
                 data["steiner_sum"] = pl.Series(self.steiner.ravel())
@@ -241,23 +233,13 @@ class QuartetTopologyResult:
             return df.unique() if deduplicate else df
 
         elif form == "wide":
-            if idx.dtype == object:
-                idx_col = pl.Series("quartet_idx", idx.tolist(), dtype=idx_dtype)
-            else:
-                idx_col = pl.Series(idx)
-
-            data = {
-                "quartet_idx": idx_col,
-                "a": name_s.gather(pl.Series(ids[:, 0])),
-                "b": name_s.gather(pl.Series(ids[:, 1])),
-                "c": name_s.gather(pl.Series(ids[:, 2])),
-                "d": name_s.gather(pl.Series(ids[:, 3])),
-            }
+            # Wide: one row per quartet — q_df is already the right shape.
+            data = {c: q_df[c] for c in q_df.columns}
             for gi, group in enumerate(self.groups):
                 for k in range(4):
                     data[f"{group}_t{k}"] = pl.Series(self.counts[:, gi, k])
                     if self.steiner is not None:
-                        data[f"{group}_steiner_t{k}"] = pl.Series(self.steiner[:, gi, k])
+                        data[f"{group}_steiner_t{k}"]     = pl.Series(self.steiner[:, gi, k])
                         data[f"{group}_steiner_min_t{k}"] = pl.Series(self.steiner_min[:, gi, k]).fill_nan(None)
                         data[f"{group}_steiner_max_t{k}"] = pl.Series(self.steiner_max[:, gi, k]).fill_nan(None)
                         data[f"{group}_steiner_var_t{k}"] = pl.Series(self.steiner_var[:, gi, k]).fill_nan(None)
@@ -422,58 +404,36 @@ class QEDResult:
         import polars as pl
 
         n_q, n_pairs = self.scores.shape
-        ids = np.array(list(self.quartets), dtype=np.int32)  # (n_q, 4)
-        idx = self.quartets.index_array()
-        idx_dtype = pl.Int128 if idx.dtype == object else pl.Int64
 
-        # Zero-copy string lookup Series
-        name_s = pl.Series(self.global_names)
+        # Quartet identity columns — cached in the Quartets object.
+        q_df = self.quartets.to_frame()  # n_q rows: quartet_idx, a, b, c, d
 
-        # Pre-compute string labels for each pair (small lists, n_pairs entries)
+        # String labels for each group pair (small; one entry per pair)
         pair_ga = [self.groups[int(self.group_pairs[pi, 0])] for pi in range(n_pairs)]
         pair_gb = [self.groups[int(self.group_pairs[pi, 1])] for pi in range(n_pairs)]
 
         if form == "long":
-            # C-order ravel: qi major, pi minor → matches scores.ravel()
+            # Expand each quartet row n_pairs times (C-order: qi major, pi minor).
+            base = q_df.select([
+                pl.col(c).repeat_by(n_pairs).explode() for c in q_df.columns
+            ])
+
             pi = np.tile(np.arange(n_pairs, dtype=np.int32), n_q)
 
-            if idx.dtype == object:
-                idx_col = pl.Series("quartet_idx", np.repeat(idx, n_pairs).tolist(), dtype=idx_dtype)
-            else:
-                idx_col = pl.Series(np.repeat(idx, n_pairs))
-
-            pair_ga_s = pl.Series(pair_ga)
-            pair_gb_s = pl.Series(pair_gb)
-
             data: dict = {
-                "quartet_idx": idx_col,
-                "a": name_s.gather(pl.Series(np.repeat(ids[:, 0], n_pairs))),
-                "b": name_s.gather(pl.Series(np.repeat(ids[:, 1], n_pairs))),
-                "c": name_s.gather(pl.Series(np.repeat(ids[:, 2], n_pairs))),
-                "d": name_s.gather(pl.Series(np.repeat(ids[:, 3], n_pairs))),
-                "group_a": pair_ga_s.gather(pl.Series(pi)),
-                "group_b": pair_gb_s.gather(pl.Series(pi)),
-                "qed": pl.Series(self.scores.ravel()),
+                **{c: base[c] for c in base.columns},
+                "group_a": pl.Series(pair_ga).gather(pl.Series(pi)),
+                "group_b": pl.Series(pair_gb).gather(pl.Series(pi)),
+                "qed":     pl.Series(self.scores.ravel()),
             }
             df = pl.DataFrame(data)
             return df.unique() if deduplicate else df
 
         elif form == "wide":
-            if idx.dtype == object:
-                idx_col = pl.Series("quartet_idx", idx.tolist(), dtype=idx_dtype)
-            else:
-                idx_col = pl.Series(idx)
-
-            data = {
-                "quartet_idx": idx_col,
-                "a": name_s.gather(pl.Series(ids[:, 0])),
-                "b": name_s.gather(pl.Series(ids[:, 1])),
-                "c": name_s.gather(pl.Series(ids[:, 2])),
-                "d": name_s.gather(pl.Series(ids[:, 3])),
-            }
+            # Wide: one row per quartet — q_df is already the right shape.
+            data = {c: q_df[c] for c in q_df.columns}
             for pi in range(n_pairs):
-                col = f"{pair_ga[pi]}_vs_{pair_gb[pi]}"
-                data[col] = pl.Series(self.scores[:, pi])
+                data[f"{pair_ga[pi]}_vs_{pair_gb[pi]}"] = pl.Series(self.scores[:, pi])
             df = pl.DataFrame(data)
             return df.unique() if deduplicate else df
 

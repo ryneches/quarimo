@@ -1077,7 +1077,7 @@ class Forest:
                 from quarimo._mlx_kernels import quartet_counts_mlx, quartet_steiner_mlx
 
                 _t_ql0 = perf_counter()
-                sorted_ids = np.array(list(quartets), dtype=np.int32)
+                sorted_ids = quartets.to_numpy()
                 _t_ql = perf_counter() - _t_ql0
 
                 _t_c0 = perf_counter()
@@ -1101,7 +1101,7 @@ class Forest:
             else:
                 # CPU/Python backends: materialise quartets to array
                 _t_ql0 = perf_counter()
-                sorted_ids = np.array(list(quartets), dtype=np.int32)
+                sorted_ids = quartets.to_numpy()
                 common_args = self._kernel_data.cpu_common_args(sorted_ids, n_quartets)
 
                 counts_out = np.zeros((n_quartets, self.n_groups, 4), dtype=np.int32)
