@@ -17,10 +17,7 @@ _resolve_quartet_nb : njit function
     Map four global taxon IDs to per-tree local positions (helper).
 
 _quartet_topology_and_rd_nb : njit function
-    Six LCA calls + four-point condition → topology and pair-sums (helper).
-
-_steiner_length_nb : njit function
-    Steiner spanning length of the winning quartet topology (helper).
+    Six LCA calls + four-point condition → topology, pair-sums, and LCA IDs (helper).
 
 _quartet_counts_njit : njit function
     Parallel quartet topology counts (no Steiner distances).
@@ -205,6 +202,8 @@ def _quartet_topology_and_rd_nb(fo0, fo1, fo2, fo3,
         Pair-sums for each of the three topologies; all 0.0 when topo==3.
     r_winner : float64
         Score of the winning topology; 0.0 when topo==3.
+    lca01, lca23, lca02, lca13, lca03, lca12 : int
+        Local node IDs of the six pairwise LCAs.
     """
     l = fo0; r = fo1
     if l > r: l, r = r, l
@@ -254,7 +253,7 @@ def _quartet_topology_and_rd_nb(fo0, fo1, fo2, fo3,
             if (pn == lca01 or pn == lca02 or pn == lca03
                     or pn == lca12 or pn == lca13 or pn == lca23):
                 if r0 == r1 and r1 == r2:
-                    return np.int32(3), r0, r1, r2, r0
+                    return np.int32(3), r0, r1, r2, r0, lca01, lca23, lca02, lca13, lca03, lca12
                 break  # polytomy node found but no tie: fall through to resolved
 
     if r0 >= r1 and r0 >= r2:
@@ -264,46 +263,7 @@ def _quartet_topology_and_rd_nb(fo0, fo1, fo2, fo3,
     else:
         topo = np.int32(2); r_winner = r2
 
-    return topo, r0, r1, r2, r_winner
-
-
-@njit(cache=True)
-def _steiner_length_nb(ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance):
-    """
-    Steiner spanning length of the winning quartet topology.
-
-    Given the four local leaf IDs and the three pair-sums already computed by
-    ``_quartet_topology_and_rd_nb``, returns the Steiner spanning length of the
-    minimal subtree connecting the four taxa.
-
-    Parameters
-    ----------
-    ln0..ln3 : int
-        Local leaf IDs in tree *ti* (all must be >= 0; caller has checked).
-    node_base : int
-        Node-array CSR offset for tree *ti*.
-    r0, r1, r2 : float64
-        Pair-sums for each of the three topologies (from
-        ``_quartet_topology_and_rd_nb``).
-    r_winner : float64
-        Score of the winning topology (max of r0, r1, r2).
-    all_root_distance : float64[:]
-        CSR-packed root distances.
-
-    Returns
-    -------
-    float64
-        Steiner spanning length S >= 0.
-
-    Notes
-    -----
-    Formula: S = Σ rd(leaf_i) − 0.5 * (r_winner + r0 + r1 + r2)
-    """
-    leaf_sum = (all_root_distance[node_base + ln0]
-              + all_root_distance[node_base + ln1]
-              + all_root_distance[node_base + ln2]
-              + all_root_distance[node_base + ln3])
-    return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
+    return topo, r0, r1, r2, r_winner, lca01, lca23, lca02, lca13, lca03, lca12
 
 
 @njit(cache=True)
@@ -389,49 +349,6 @@ def _steiner_from_lca_nodes_nb(
     return leaf_sum - (r_winner + r0_v + r1_v + r2_v) * 0.5
 
 
-@njit(cache=True)
-def _compute_lca_nodes_nb(
-        fo0, fo1, fo2, fo3,
-        tour_base, sp_base, lg_base, sp_stride,
-        all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour):
-    """
-    Compute the six pairwise LCA local node IDs for four taxa.
-
-    Returns local node IDs (not Euler-tour positions) for all six pairs.
-    These are topology-stable — they depend only on tree structure, not on
-    branch lengths — so they can be computed once and reused across all BL
-    variants of the same stored tree.
-
-    Parameters
-    ----------
-    fo0..fo3 : int
-        First Euler-tour occurrences of the four taxa.
-    tour_base, sp_base, lg_base, sp_stride : int
-        CSR offsets and sparse-table stride for the stored tree.
-
-    Returns
-    -------
-    (lca01, lca23, lca02, lca13, lca03, lca12) : 6-tuple of int
-        Local node IDs of the six pairwise LCAs.
-    """
-    def lca_node(oa, ob):
-        if oa <= ob:
-            l, r = oa, ob
-        else:
-            l, r = ob, oa
-        return _rmq_csr_nb(l, r, sp_base, sp_stride,
-                           all_sparse_table, all_euler_depth,
-                           all_log2_table, lg_base, tour_base, all_euler_tour)
-
-    lca01 = lca_node(fo0, fo1)
-    lca23 = lca_node(fo2, fo3)
-    lca02 = lca_node(fo0, fo2)
-    lca13 = lca_node(fo1, fo3)
-    lca03 = lca_node(fo0, fo3)
-    lca12 = lca_node(fo1, fo2)
-    return lca01, lca23, lca02, lca13, lca03, lca12
-
-
 @njit(parallel=True, cache=True)
 def _quartet_counts_njit(
         sorted_quartet_ids,
@@ -507,12 +424,13 @@ def _quartet_counts_njit(
             fo3 = all_first_occ[node_base + ln3]
             poly_start = polytomy_offsets[ti]
             poly_end = polytomy_offsets[ti + 1]
-            topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_nb(
-                fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
-                all_root_distance, all_sparse_table, all_euler_depth,
-                all_log2_table, all_euler_tour,
-                poly_start, poly_end, polytomy_nodes,
-            )
+            topo, r0, r1, r2, r_winner, lca01, lca23, lca02, lca13, lca03, lca12 = \
+                _quartet_topology_and_rd_nb(
+                    fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
+                    all_root_distance, all_sparse_table, all_euler_depth,
+                    all_log2_table, all_euler_tour,
+                    poly_start, poly_end, polytomy_nodes,
+                )
             counts_out[qi, tree_to_group_idx[ti], topo] += tree_multiplicities[ti]
 
 
@@ -599,22 +517,17 @@ def _quartet_steiner_njit(
             fo3 = all_first_occ[node_base + ln3]
             poly_start = polytomy_offsets[ti]
             poly_end = polytomy_offsets[ti + 1]
-            topo, r0, r1, r2, r_winner = _quartet_topology_and_rd_nb(
-                fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
-                all_root_distance, all_sparse_table, all_euler_depth,
-                all_log2_table, all_euler_tour,
-                poly_start, poly_end, polytomy_nodes,
-            )
+            topo, r0, r1, r2, r_winner, lca01, lca23, lca02, lca13, lca03, lca12 = \
+                _quartet_topology_and_rd_nb(
+                    fo0, fo1, fo2, fo3, node_base, tour_base, sp_base, lg_base, sp_stride,
+                    all_root_distance, all_sparse_table, all_euler_depth,
+                    all_log2_table, all_euler_tour,
+                    poly_start, poly_end, polytomy_nodes,
+                )
             gi = tree_to_group_idx[ti]
             mult = tree_multiplicities[ti]
             counts_out[qi, gi, topo] += mult
 
-            # Compute topology-stable LCA node IDs once per stored tree.
-            # Loop over BL variants for variant-specific Steiner lengths.
-            lca01, lca23, lca02, lca13, lca03, lca12 = _compute_lca_nodes_nb(
-                fo0, fo1, fo2, fo3, tour_base, sp_base, lg_base, sp_stride,
-                all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour,
-            )
             v_start = bl_variant_offsets[ti]
             v_end   = bl_variant_offsets[ti + 1]
             for vi in range(v_start, v_end):
@@ -729,7 +642,7 @@ def _quartet_counts_delta_nb(
             fo3_old = all_first_occ[node_base + ln3_old]
             poly_start = polytomy_offsets[ti]
             poly_end   = polytomy_offsets[ti + 1]
-            old_topo, _, _, _, _ = _quartet_topology_and_rd_nb(
+            old_topo, _, _, _, _, _, _, _, _, _, _ = _quartet_topology_and_rd_nb(
                 fo0_old, fo1_old, fo2_old, fo3_old,
                 node_base, tour_base, sp_base, lg_base, sp_stride,
                 all_root_distance, all_sparse_table, all_euler_depth,
@@ -749,7 +662,7 @@ def _quartet_counts_delta_nb(
             fo1_new = all_first_occ[node_base + ln1_new]
             fo2_new = all_first_occ[node_base + ln2_new]
             fo3_new = all_first_occ[node_base + ln3_new]
-            new_topo, _, _, _, _ = _quartet_topology_and_rd_nb(
+            new_topo, _, _, _, _, _, _, _, _, _, _ = _quartet_topology_and_rd_nb(
                 fo0_new, fo1_new, fo2_new, fo3_new,
                 node_base, tour_base, sp_base, lg_base, sp_stride,
                 all_root_distance, all_sparse_table, all_euler_depth,

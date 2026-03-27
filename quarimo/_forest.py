@@ -2162,25 +2162,26 @@ class Forest:
                 fo3 = int(all_first_occ[node_base + ln3])
                 poly_start = int(polytomy_offsets[ti])
                 poly_end = int(polytomy_offsets[ti + 1])
-                topo, r0, r1, r2, r_winner = Forest._quartet_topology_and_rd(
-                    fo0,
-                    fo1,
-                    fo2,
-                    fo3,
-                    node_base,
-                    tour_base,
-                    sp_base,
-                    lg_base,
-                    sp_stride,
-                    all_root_distance,
-                    all_sparse_table,
-                    all_euler_depth,
-                    all_log2_table,
-                    all_euler_tour,
-                    poly_start,
-                    poly_end,
-                    polytomy_nodes,
-                )
+                topo, r0, r1, r2, r_winner, lca01, lca23, lca02, lca13, lca03, lca12 = \
+                    Forest._quartet_topology_and_rd(
+                        fo0,
+                        fo1,
+                        fo2,
+                        fo3,
+                        node_base,
+                        tour_base,
+                        sp_base,
+                        lg_base,
+                        sp_stride,
+                        all_root_distance,
+                        all_sparse_table,
+                        all_euler_depth,
+                        all_log2_table,
+                        all_euler_tour,
+                        poly_start,
+                        poly_end,
+                        polytomy_nodes,
+                    )
 
                 gi = int(tree_to_group_idx[ti])
                 mult = int(tree_multiplicities[ti])
@@ -2188,13 +2189,8 @@ class Forest:
 
                 if compute_steiner:
                     # Topology is fixed for all BL variants of this stored tree.
-                    # Compute the 6 LCA local node IDs once (topology-based),
-                    # then loop over BL variants for variant-specific Steiner values.
-                    lca01, lca23, lca02, lca13, lca03, lca12 = \
-                        Forest._compute_lca_nodes(
-                            fo0, fo1, fo2, fo3, tour_base, sp_base, lg_base, sp_stride,
-                            all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour,
-                        )
+                    # LCA node IDs are returned by _quartet_topology_and_rd above.
+                    # Loop over BL variants for variant-specific Steiner values.
                     v_start = int(bl_variant_offsets[ti])
                     v_end   = int(bl_variant_offsets[ti + 1])
                     for vi in range(v_start, v_end):
@@ -2377,6 +2373,8 @@ class Forest:
             Pair-sums for each of the three topologies.
         r_winner : float
             Score of the winning topology (max of r0, r1, r2).
+        lca01, lca23, lca02, lca13, lca03, lca12 : int
+            Local node IDs of the six pairwise LCAs.
 
         Pure-Python counterpart of ``_quartet_topology_and_rd_nb`` and
         ``_quartet_topology_and_rd_cuda``.
@@ -2389,19 +2387,19 @@ class Forest:
                 all_log2_table, lg_base, tour_base, all_euler_tour,
             )
 
-        lid01 = lca_id(fo0, fo1)
-        lid02 = lca_id(fo0, fo2)
-        lid03 = lca_id(fo0, fo3)
-        lid12 = lca_id(fo1, fo2)
-        lid13 = lca_id(fo1, fo3)
-        lid23 = lca_id(fo2, fo3)
+        lca01 = lca_id(fo0, fo1)
+        lca02 = lca_id(fo0, fo2)
+        lca03 = lca_id(fo0, fo3)
+        lca12 = lca_id(fo1, fo2)
+        lca13 = lca_id(fo1, fo3)
+        lca23 = lca_id(fo2, fo3)
 
-        rd01 = float(all_root_distance[node_base + lid01])
-        rd02 = float(all_root_distance[node_base + lid02])
-        rd03 = float(all_root_distance[node_base + lid03])
-        rd12 = float(all_root_distance[node_base + lid12])
-        rd13 = float(all_root_distance[node_base + lid13])
-        rd23 = float(all_root_distance[node_base + lid23])
+        rd01 = float(all_root_distance[node_base + lca01])
+        rd02 = float(all_root_distance[node_base + lca02])
+        rd03 = float(all_root_distance[node_base + lca03])
+        rd12 = float(all_root_distance[node_base + lca12])
+        rd13 = float(all_root_distance[node_base + lca13])
+        rd23 = float(all_root_distance[node_base + lca23])
 
         r0 = rd01 + rd23  # topology 0: (t0,t1)|(t2,t3)
         r1 = rd02 + rd13  # topology 1: (t0,t2)|(t1,t3)
@@ -2415,9 +2413,9 @@ class Forest:
         if poly_end > poly_start:
             for j in range(poly_start, poly_end):
                 pn = int(polytomy_nodes[j])
-                if pn in (lid01, lid02, lid03, lid12, lid13, lid23):
+                if pn in (lca01, lca02, lca03, lca12, lca13, lca23):
                     if r0 == r1 and r1 == r2:
-                        return 3, r0, r1, r2, r0
+                        return 3, r0, r1, r2, r0, lca01, lca23, lca02, lca13, lca03, lca12
                     break  # polytomy node is LCA but quartet is resolved; fall through
 
         if r0 >= r1 and r0 >= r2:
@@ -2430,96 +2428,7 @@ class Forest:
             topo = 2
             r_winner = r2
 
-        return topo, r0, r1, r2, r_winner
-
-    @staticmethod
-    def _steiner_length(
-        ln0, ln1, ln2, ln3, node_base, r0, r1, r2, r_winner, all_root_distance
-    ):
-        """
-        **Private static.**  Steiner spanning length of the winning quartet
-        topology.
-
-        Given the four local leaf IDs and the three pair-sums already computed
-        by ``Forest._quartet_topology_and_rd``, returns the Steiner spanning
-        length of the minimal subtree connecting the four taxa.
-
-        Parameters
-        ----------
-        ln0..ln3 : int
-            Local leaf IDs in tree *ti* (all must be >= 0).
-        node_base : int
-            Node-array CSR offset for tree *ti*.
-        r0, r1, r2 : float
-            Pair-sums for the three topologies.
-        r_winner : float
-            Score of the winning topology (max of r0, r1, r2).
-        all_root_distance : np.ndarray
-            CSR-packed root distances.
-
-        Returns
-        -------
-        float
-            Steiner spanning length S >= 0.
-
-        Notes
-        -----
-        Formula: S = Σ rd(leaf_i) − 0.5 * (r_winner + r0 + r1 + r2)
-
-        Pure-Python counterpart of ``_steiner_length_nb`` and
-        ``_steiner_length_cuda``.
-        """
-        leaf_sum = (
-            float(all_root_distance[node_base + ln0])
-            + float(all_root_distance[node_base + ln1])
-            + float(all_root_distance[node_base + ln2])
-            + float(all_root_distance[node_base + ln3])
-        )
-        return leaf_sum - (r_winner + r0 + r1 + r2) * 0.5
-
-    @staticmethod
-    def _compute_lca_nodes(
-        fo0, fo1, fo2, fo3,
-        tour_base, sp_base, lg_base, sp_stride,
-        all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour,
-    ):
-        """
-        **Private static.**  Compute the six pairwise LCA local node IDs.
-
-        Returns local node IDs (not Euler-tour positions) for all six pairs of
-        the four taxa.  These are topology-stable — they depend only on tree
-        structure, not on branch lengths — so they can be computed once for a
-        stored tree and reused across all BL variants.
-
-        Parameters
-        ----------
-        fo0..fo3 : int
-            First Euler-tour occurrences for the four taxa.
-        tour_base, sp_base, lg_base, sp_stride : int
-            CSR offsets and sparse-table stride for the stored tree.
-        all_sparse_table, all_euler_depth, all_log2_table, all_euler_tour :
-            CSR-packed tree arrays.
-
-        Returns
-        -------
-        (lca01, lca23, lca02, lca13, lca03, lca12) : tuple of int
-            Local node IDs of the six pairwise LCAs.
-        """
-        def lca_node(oa, ob):
-            l, r = (oa, ob) if oa <= ob else (ob, oa)
-            return Forest._rmq_csr(
-                l, r, sp_base, sp_stride, all_sparse_table,
-                all_euler_depth, all_log2_table, lg_base, tour_base, all_euler_tour,
-            )
-
-        return (
-            lca_node(fo0, fo1),  # lca01
-            lca_node(fo2, fo3),  # lca23
-            lca_node(fo0, fo2),  # lca02
-            lca_node(fo1, fo3),  # lca13
-            lca_node(fo0, fo3),  # lca03
-            lca_node(fo1, fo2),  # lca12
-        )
+        return topo, r0, r1, r2, r_winner, lca01, lca23, lca02, lca13, lca03, lca12
 
     @staticmethod
     def _steiner_from_lca_nodes(
@@ -2647,7 +2556,7 @@ class Forest:
                 fo3 = int(all_first_occ[node_base + ln3_old])
                 poly_start = int(polytomy_offsets[ti])
                 poly_end   = int(polytomy_offsets[ti + 1])
-                old_topo, _, _, _, _ = Forest._quartet_topology_and_rd(
+                old_topo, _, _, _, _, _, _, _, _, _, _ = Forest._quartet_topology_and_rd(
                     fo0, fo1, fo2, fo3,
                     node_base, tour_base, sp_base, lg_base, sp_stride,
                     all_root_distance, all_sparse_table, all_euler_depth,
@@ -2667,7 +2576,7 @@ class Forest:
                 fo1 = int(all_first_occ[node_base + ln1_new])
                 fo2 = int(all_first_occ[node_base + ln2_new])
                 fo3 = int(all_first_occ[node_base + ln3_new])
-                new_topo, _, _, _, _ = Forest._quartet_topology_and_rd(
+                new_topo, _, _, _, _, _, _, _, _, _, _ = Forest._quartet_topology_and_rd(
                     fo0, fo1, fo2, fo3,
                     node_base, tour_base, sp_base, lg_base, sp_stride,
                     all_root_distance, all_sparse_table, all_euler_depth,
