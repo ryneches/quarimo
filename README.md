@@ -24,7 +24,7 @@ Quarimo is a made up word formed by smashing "quartet" and "mori" (森, forest) 
 - **Multiple backends** : Python, CPU-parallel (Numba), CUDA GPU, and Apple Silicon Metal GPU
 - **Memory efficient** : CSR-like flat-packed layout; GPU arrays uploaded once at construction
 - **Clean API** : Context managers for logging and backend selection
-- **Well tested** : Comprehensive test suite with 520+ tests
+- **Well tested** : Comprehensive test suite with 700+ tests
 
 ## Installation
 
@@ -105,6 +105,28 @@ q = Quartets(forest, seed=[('A', 'B', 'C', 'D')], offset=0, count=50_000)
 **Type rule:** all elements in every quartet must be the same type — either all `str`
 (taxon names) or all `int` (global IDs).  Mixing types raises `TypeError`.
 
+### Numpy and Polars native interface
+
+`Quartets` supports bulk conversion to numpy arrays and Polars DataFrames.
+All conversion results are cached internally, so repeated calls are free after the first.
+
+```python
+import numpy as np
+
+ids = q.to_numpy()      # int32[n, 4] — global taxon IDs, zero-copy after first call
+arr = np.array(q)       # same as to_numpy() via __array__ protocol
+idx = q.index_array()   # int64[n] — combinadic quartet indices (join key)
+df  = q.to_frame()      # pl.DataFrame with columns: quartet_idx, a, b, c, d
+
+# Python iteration still works, yielding (int, int, int, int) tuples
+for quartet in q:
+    ...
+```
+
+`to_frame()` on result objects (`QuartetTopologyResult`, `QEDResult`) calls
+`self.quartets.to_frame()` internally, so the taxon identity columns are shared
+from the same cache.
+
 ## Advanced Usage
 
 ### Per-Group Topology Counts
@@ -173,6 +195,9 @@ branch into an explicit multifurcation in the NEWICK string before loading.
 
 `quartet_topology()` returns a `QuartetTopologyResult` dataclass with direct access to the
 underlying arrays and a `to_frame()` method for labelled DataFrame output.
+Repeated calls to `to_frame()` on the same result are fast because the quartet identity
+columns (`quartet_idx`, `a`, `b`, `c`, `d`) are cached in the `Quartets` object and
+reused without recomputation.
 
 ```python
 result = forest.quartet_topology(q, steiner=True)
