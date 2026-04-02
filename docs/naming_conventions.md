@@ -190,3 +190,163 @@ the quartet args vary per call.
 Arrays named `all_*` are flat CSR-packed versions of per-tree data. They are
 always indexed via the corresponding `*_offsets` and `*_base` variables. The
 prefix signals "all trees, concatenated".
+
+---
+
+## Notation, structure and formatting (N1–N9)
+
+These rules govern how mathematics and technical content are written across
+different contexts: Markdown documentation, Python code, docstrings, and
+notebooks. The core principle is that the rendering environment determines
+the appropriate notation: use the richest notation the renderer supports,
+and no more.
+
+---
+
+### N1 — LaTeX math in Markdown
+
+In contexts that will be processed as Markdown — `.md` files and notebook
+Markdown cells — equations must be formatted using LaTeX math mode. Write
+inline quantities as `$...$` and standalone equations as `$$...$$`. The
+target renderer is MathJax, so standard LaTeX math commands are available.
+
+---
+
+### N2 — No Unicode math in documentation
+
+Unicode mathematical symbols (e.g., `×`, `≥`, `Σ`, `δ̂`) must not appear in
+documentation source files. Use LaTeX math mode instead (N1). Typography and
+symbol choices should be governed by the stylesheet and renderer, not
+embedded in the source.
+
+This rule does not apply to plain-text table separators, arrows used as
+prose connectives (`→`), or similar layout characters that carry no
+mathematical meaning.
+
+---
+
+### N3 — Unicode symbols in code
+
+Unicode symbols and special characters may be used in code only where they
+serve a clear purpose that cannot be served by plain ASCII, and only in
+output-facing contexts: logging messages, notebook cell output, and formatted
+results. Examples that are acceptable:
+
+- `δ̂=` and `p̂=` in a formatted string passed to `mo.md()`.
+- `↑` / `↓` in a console progress line to indicate direction of a trend.
+
+Unicode must not appear in variable names, import aliases, or any context
+where it would require a reader to type or search for the character.
+
+---
+
+### N4 — Mathematics in docstrings and comments
+
+Complex mathematical notation should generally not appear in Python
+docstrings or inline comments. Prefer clear English explanations that
+describe the algorithm in terms of the variable names involved, formatted
+`like_this`.
+
+When mathematical notation is clearly more appropriate than English — for
+example, when defining a non-trivial closed-form expression — the docstring
+should reference the corresponding section in the `docs/` directory rather
+than reproducing the notation inline:
+
+```python
+def quartet_score(p_hat, n_qsupp, n_trees):
+    """
+    Compute the delta_hat score for a single branch.
+
+    The scoring formula is defined in
+    :doc:`/docs/quartet_consensus_scoring`.
+    The key parameters are ``p_hat`` (estimated disagreement rate),
+    ``n_qsupp`` (number of straddling quartets), and ``n_trees``.
+    """
+```
+
+The corresponding Markdown document should include a reciprocal link back
+to the API reference so that both directions resolve correctly after
+processing with mkdocs and mkdocstrings.
+
+---
+
+### N5 — Inline code formatting in Markdown prose
+
+Variable names, function names, class names, and parameter names appearing
+in prose — in `.md` files, notebook Markdown cells, or docstrings — must be
+formatted with backticks: `` `like_this` ``. This includes names that are
+also used in LaTeX math (write both: "the resolved fraction
+`total_resolved / n_relevant` approximates $1 - \hat p$").
+
+---
+
+### N6 — LaTeX–Python name correspondence
+
+When LaTeX math refers to a quantity that has a Python variable name, the
+LaTeX should follow these conventions so that the correspondence is
+unambiguous:
+
+| Python name pattern | LaTeX convention | Example |
+|---|---|---|
+| `n_foo` (dimension scalar) | `$n_\text{foo}$` | `n_trees` → $n_\text{trees}$ |
+| `foo_hat` (estimate) | `$\hat\foo$` or `$\hat{f}$` | `delta_hat` → $\hat\delta$, `p_hat` → $\hat p$ |
+| `foo_bar` (compound) | `$\text{foo\_bar}$` if no natural symbol | `total_resolved` → $\text{total\_resolved}$ |
+
+Multi-character subscripts always use `\text{}`. Single-character subscripts
+may use the bare subscript form.
+
+---
+
+### N7 — Display vs inline math
+
+- **Inline** `$...$`: quantities and short expressions embedded in running
+  prose ("the score is $\hat\delta = N_\text{qsupp} \cdot n_\text{trees}
+  \cdot (2\hat p - 1)$").
+- **Display** `$$...$$`: standalone equations that are the primary subject of
+  a paragraph, or any expression too long to read inline.
+- Numbered equations are not used. Cross-references to equations are made
+  by quoting the surrounding prose, not by equation number.
+
+---
+
+### N8 — Notebook cell organisation
+
+A `hide_code=True` Markdown cell introduces a concept, section, or
+design decision. The immediately following visible code cell implements it.
+The Markdown cell explains *why*; the code explains *what*.
+
+Markdown cells must not restate what the code already says. A Markdown cell
+that says "the following cell defines `_score_active_branches`" adds no
+information — write instead about the design rationale, the algorithm, or
+the known limitations.
+
+---
+
+### N9 — Docstring style
+
+All docstrings use **NumPy style** parameter and returns sections:
+
+```python
+def foo(x, y):
+    """
+    One-line summary.
+
+    Longer description if needed.
+
+    Parameters
+    ----------
+    x : int
+        Description of x.
+    y : float
+        Description of y.
+
+    Returns
+    -------
+    float
+        Description of the return value.
+    """
+```
+
+Type annotations in the function signature take precedence over types
+repeated in the docstring; when annotations are present, the type field in
+the docstring may be omitted.

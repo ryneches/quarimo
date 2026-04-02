@@ -18,7 +18,7 @@ from itertools import combinations
 from typing import Any, Dict, List
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('quarimo')
 
 
 # ============================================================================ #

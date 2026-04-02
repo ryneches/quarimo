@@ -180,7 +180,7 @@ if backends.numba:
         _quartet_counts_delta_nb,
     )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('quarimo.forest')
 
 # ── Global CPU thread cap ─────────────────────────────────────────────────────
 # None means "no cap — use all available CPUs".  A future public setter will

@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('quarimo.backend')
 
 # ---------------------------------------------------------------------------
 # Kernel implementation registry

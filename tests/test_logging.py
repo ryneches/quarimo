@@ -92,7 +92,7 @@ class TestLogBackendAvailability:
 
     def test_emits_info_records(self, caplog):
         """log_backend_availability must emit at least one INFO record."""
-        with caplog.at_level(logging.INFO, logger="quarimo._logging"):
+        with caplog.at_level(logging.INFO, logger="quarimo"):
             log_backend_availability(backends)
 
         info_records = [r for r in caplog.records if r.levelno == logging.INFO]
@@ -100,7 +100,7 @@ class TestLogBackendAvailability:
 
     def test_no_records_above_info(self, caplog):
         """log_backend_availability must not emit WARNING or higher."""
-        with caplog.at_level(logging.DEBUG, logger="quarimo._logging"):
+        with caplog.at_level(logging.DEBUG, logger="quarimo"):
             log_backend_availability(backends)
 
         noisy = [r for r in caplog.records if r.levelno > logging.INFO]
@@ -108,7 +108,7 @@ class TestLogBackendAvailability:
 
     def test_output_mentions_all_backends(self, caplog):
         """Every backend name from backends.status() appears in the log output."""
-        with caplog.at_level(logging.INFO, logger="quarimo._logging"):
+        with caplog.at_level(logging.INFO, logger="quarimo"):
             log_backend_availability(backends)
 
         full_text = "\n".join(r.getMessage() for r in caplog.records)
@@ -117,7 +117,7 @@ class TestLogBackendAvailability:
 
     def test_output_mentions_best(self, caplog):
         """The best backend name must appear in the log output."""
-        with caplog.at_level(logging.INFO, logger="quarimo._logging"):
+        with caplog.at_level(logging.INFO, logger="quarimo"):
             log_backend_availability(backends)
 
         full_text = "\n".join(r.getMessage() for r in caplog.records)
@@ -223,7 +223,7 @@ class TestUseKernelFallback:
         This test works on every machine because it does not require any
         optional hardware — it exercises the fallback logic directly.
         """
-        with caplog.at_level(logging.WARNING, logger="quarimo._context"):
+        with caplog.at_level(logging.WARNING, logger="quarimo"):
             with use_kernel("unregistered_kernel", "python") as b:
                 actual = b
 

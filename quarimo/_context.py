@@ -16,7 +16,7 @@ import warnings
 from contextlib import contextmanager
 from typing import Optional, Type
 
-_logger = logging.getLogger(__name__)
+_logger = logging.getLogger('quarimo')
 
 # Module-level state for backend override
 _backend_override = None
@@ -38,7 +38,7 @@ def suppress_logger(logger_name: str, level: int = logging.CRITICAL):
     Parameters
     ----------
     logger_name : str
-        Name of the logger to suppress (e.g., 'tree', 'forest')
+        Name of the logger to suppress (e.g., ``'quarimo'``, ``'quarimo.forest'``)
     level : int, default logging.CRITICAL
         Temporary logging level. Common values:
         - logging.CRITICAL: Suppress almost everything
@@ -54,19 +54,18 @@ def suppress_logger(logger_name: str, level: int = logging.CRITICAL):
 
     Examples
     --------
-    >>> # Suppress tree's verbose output during construction
-    >>> with suppress_logger('tree'):
-    ...     trees = [Tree(nwk) for nwk in newicks]
+    >>> # Suppress all quarimo logging during construction
+    >>> with suppress_logger('quarimo'):
+    ...     forest = Forest(newicks)
 
-    >>> # Temporarily reduce logging to warnings only
-    >>> with suppress_logger('forest', logging.WARNING):
-    ...     c = Forest(trees)
+    >>> # Temporarily reduce forest logging to warnings only
+    >>> with suppress_logger('quarimo.forest', logging.WARNING):
+    ...     forest = Forest(trees)
 
     >>> # Nested suppression works correctly
-    >>> with suppress_logger('tree'):
-    ...     with suppress_logger('forest'):
-    ...         # Both loggers suppressed
-    ...         c = Forest(trees)
+    >>> with suppress_logger('quarimo.forest'):
+    ...     with suppress_logger('quarimo.backend'):
+    ...         counts = forest.quartet_topology(quartets)
 
     Notes
     -----
@@ -90,7 +89,7 @@ def quiet(level: int = logging.CRITICAL):
     Temporarily suppress all quarimo logging.
 
     Suppresses the ``quarimo`` parent logger, which covers all child loggers
-    (``quarimo._forest``, ``quarimo._tree``, ``quarimo._logging``, etc.).
+    (``quarimo.forest``, ``quarimo.backend``, etc.).
 
     Parameters
     ----------
