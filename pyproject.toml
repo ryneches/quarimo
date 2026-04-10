@@ -80,8 +80,11 @@ dev = [
 #     "sphinx-autodoc-typehints>=1.18.0",
 # ]
 
+# Zstandard compression support for NewickFile
+zstd = ["zstandard>=0.18.0"]
+
 # All optional dependencies
-all = ["numba>=0.55.0", "psutil>=5.8.0"]
+all = ["numba>=0.55.0", "psutil>=5.8.0", "zstandard>=0.18.0"]
 
 [project.urls]
 Homepage = "https://github.com/ryneches/quarimo"

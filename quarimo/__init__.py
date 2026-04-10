@@ -7,6 +7,11 @@ Forest    : Collection of trees; dispatches quartet topology queries to backends
 Tree      : Single phylogenetic tree; NEWICK parsing, LCA via RMQ, Steiner lengths
 Quartets  : Deterministic quartet sequence; explicit lists, random sampling, on-GPU generation
 
+File I/O  (_io)
+----------------
+NewickFile : Context manager that auto-detects compression (gzip/bzip2/xz/zstd)
+             and returns a text-mode file-like object for NEWICK data.
+
 Context managers  (_context)
 -----------------------------
 use_backend       : Force a specific computational backend for a block of code
@@ -45,6 +50,9 @@ __license__ = "BSD-3-Clause"
 from ._forest import Forest
 from ._tree import Tree
 from ._quartets import Quartets
+
+# File I/O
+from ._io import NewickFile
 
 # Result dataclasses
 from ._results import QuartetTopologyResult, QEDResult
@@ -87,6 +95,8 @@ __all__ = [
     "Forest",
     "Tree",
     "Quartets",
+    # File I/O
+    "NewickFile",
     # Result dataclasses
     "QuartetTopologyResult",
     "QEDResult",

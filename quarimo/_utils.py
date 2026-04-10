@@ -291,10 +291,17 @@ def _load_newick_file(path: Path, context: str = "") -> list:
     list[str]
         Validated single-tree NEWICK strings.
     """
+    from quarimo._io import NewickFile  # local import avoids circular dependency
+
     ctx = context or str(path)
     try:
-        text = path.read_text(encoding="utf-8")
+        with NewickFile(path) as fh:
+            text = fh.read()
     except OSError as exc:
+        raise ValueError(f"{ctx}: cannot read file — {exc}") from exc
+    except (ValueError, ImportError):
+        raise
+    except Exception as exc:
         raise ValueError(f"{ctx}: cannot read file — {exc}") from exc
     return _split_newick_block(text, context=ctx)
 

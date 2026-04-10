@@ -68,6 +68,10 @@ def pytest_configure(config):
         "markers",
         "polytomy: topology tests for polytomous/tied quartet-tree pairs",
     )
+    config.addinivalue_line(
+        "markers",
+        "requires_zstd: skip if the zstandard package is not installed",
+    )
 
     try:
         from numba.core.errors import NumbaPerformanceWarning
@@ -81,6 +85,13 @@ def pytest_collection_modifyitems(config, items):
     skip_cuda = pytest.mark.skip(reason="CUDA (Numba + NVIDIA GPU) not available")
     skip_mlx = pytest.mark.skip(reason="MLX with Metal GPU not available (Apple Silicon)")
     skip_parallel = pytest.mark.skip(reason="Numba not installed")
+    skip_zstd = pytest.mark.skip(reason="zstandard package not installed")
+
+    try:
+        import zstandard  # noqa: F401
+        _zstd_available = True
+    except ImportError:
+        _zstd_available = False
 
     for item in items:
         if "requires_cuda" in item.keywords and not backends.cuda:
@@ -89,6 +100,8 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_mlx)
         if "requires_cpu_parallel" in item.keywords and not backends.numba:
             item.add_marker(skip_parallel)
+        if "requires_zstd" in item.keywords and not _zstd_available:
+            item.add_marker(skip_zstd)
 
 
 def pytest_unconfigure(config):
