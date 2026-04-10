@@ -5,8 +5,16 @@ File I/O helpers with automatic compression detection.
 
 NewickFile
 ----------
-Context manager that detects compression format from file magic bytes and
-returns a text-mode ``io.StringIO`` object suitable for reading NEWICK data.
+Context manager that detects compression format from magic bytes and returns a
+text-mode ``io.StringIO`` object suitable for reading NEWICK data.
+
+The constructor accepts a file path, raw bytes, or any binary-readable object
+(e.g. a member extracted from a ``tarfile`` archive):
+
+- ``NewickFile("run.ufboot.gz")``           — file path
+- ``NewickFile(Path("run.ufboot.gz"))``      — pathlib.Path
+- ``NewickFile(raw_bytes)``                  — already-read bytes
+- ``NewickFile(tar.extractfile(member))``    — binary file-like object
 
 Supported formats
 ~~~~~~~~~~~~~~~~~
@@ -16,7 +24,7 @@ Supported formats
 - xz / lzma        (magic: ``\\xfd7zXZ\\x00``)
 - zstd              (magic: ``\\x28\\xb5\\x2f\\xfd``) — requires ``pip install quarimo[zstd]``
 
-Detection reads the first 6 bytes of the file; filename extensions are ignored.
+Detection reads the first 6 bytes of the bytestream; filename extensions are ignored.
 """
 
 import bz2
@@ -24,18 +32,33 @@ import gzip
 import io
 import lzma
 from pathlib import Path
+from typing import BinaryIO, Union
+
+# Accepted source types for the constructor and detect()
+_Source = Union[str, Path, bytes, BinaryIO]
 
 
 class NewickFile:
-    """Context manager for reading NEWICK files with automatic decompression.
+    """Context manager for reading NEWICK data with automatic decompression.
 
     Detects compression format from magic bytes (not filename extension) and
     returns a readable, iterable :class:`io.StringIO` object.
 
     Parameters
     ----------
-    path : str or Path
-        Path to the file to open.
+    source : str, Path, bytes, or binary file-like object
+        The NEWICK source.  Accepted forms:
+
+        - A file path (``str`` or :class:`~pathlib.Path`) — read from disk.
+        - Raw ``bytes`` — already-read content, possibly compressed.
+        - A binary-readable object (anything with a ``.read()`` method that
+          returns ``bytes``) — for example, a member extracted from a
+          :mod:`tarfile` archive.
+
+    label : str, optional
+        Short description of the source used in error messages.  Defaults to
+        the file path string, ``"<bytes>"``, or the stream's ``.name``
+        attribute (if present).
 
     Examples
     --------
@@ -55,6 +78,14 @@ class NewickFile:
     >>> from quarimo import Forest, NewickFile
     >>> with NewickFile("run.ufboot.gz") as f:
     ...     forest = Forest(f.read())
+
+    Load a gzip-compressed member from a tar.gz archive:
+
+    >>> import tarfile
+    >>> with tarfile.open("bootstrap-genetrees.tar.gz", "r:gz") as tar:
+    ...     fobj = tar.extractfile("allgenes/intron-10002/RAxML_bootstrap.all.gz")
+    ...     with NewickFile(fobj, label="intron-10002") as f:
+    ...         forest = Forest(f.read())
     """
 
     # (format_name, magic_prefix) — checked in order; first match wins.
@@ -67,8 +98,9 @@ class NewickFile:
     ]
     _HEADER_BYTES: int = 6  # length of longest signature
 
-    def __init__(self, path: str | Path) -> None:
-        self._path = Path(path)
+    def __init__(self, source: _Source, *, label: str | None = None) -> None:
+        self._source = source
+        self._label = label
         self._sio: io.StringIO | None = None
 
     # ------------------------------------------------------------------
@@ -76,16 +108,17 @@ class NewickFile:
     # ------------------------------------------------------------------
 
     @classmethod
-    def detect(cls, path: str | Path) -> str:
-        """Return the compression format name, or ``'text'`` for plain files.
+    def detect(cls, source: _Source) -> str:
+        """Return the compression format name, or ``'text'`` for plain data.
 
-        Reads only the first :attr:`_HEADER_BYTES` bytes of the file;
-        filename extensions are not considered.
+        Reads only the first :attr:`_HEADER_BYTES` bytes; filename extensions
+        are not considered.
 
         Parameters
         ----------
-        path : str or Path
-            File to inspect.
+        source : str, Path, bytes, or binary file-like object
+            The data to inspect.  For file-like objects, the first
+            :attr:`_HEADER_BYTES` bytes are consumed from the current position.
 
         Returns
         -------
@@ -93,18 +126,23 @@ class NewickFile:
             One of ``'gzip'``, ``'bzip2'``, ``'xz'``, ``'zstd'``, or
             ``'text'``.
         """
-        with open(path, "rb") as fh:
-            header = fh.read(cls._HEADER_BYTES)
-        return cls._detect_bytes(header)
+        if isinstance(source, bytes):
+            return cls._detect_bytes(source)
+        if isinstance(source, (str, Path)):
+            with open(source, "rb") as fh:
+                header = fh.read(cls._HEADER_BYTES)
+            return cls._detect_bytes(header)
+        # binary file-like object
+        return cls._detect_bytes(source.read(cls._HEADER_BYTES))
 
     # ------------------------------------------------------------------
     # Context manager protocol
     # ------------------------------------------------------------------
 
     def __enter__(self) -> io.StringIO:
-        raw = self._path.read_bytes()
+        raw, label = self._read_raw()
         fmt = self._detect_bytes(raw)
-        text = self._decode(raw, fmt, str(self._path))
+        text = self._decode(raw, fmt, label)
         self._sio = io.StringIO(text)
         return self._sio
 
@@ -121,9 +159,8 @@ class NewickFile:
     def decompress_bytes(cls, data: bytes, source: str = "<bytes>") -> str:
         """Detect compression from *data*, decompress, and return UTF-8 text.
 
-        Useful when compressed content has already been read into memory —
-        for example, a member extracted from a ``tarfile`` archive — where
-        no file path exists to pass to the :class:`NewickFile` constructor.
+        Convenience wrapper for callers that already hold the raw bytes in
+        memory and do not need a context manager.
 
         Parameters
         ----------
@@ -136,29 +173,6 @@ class NewickFile:
         -------
         str
             Decoded UTF-8 text.
-
-        Examples
-        --------
-        Load every gene-family bootstrap file from a tar.gz archive into a
-        grouped :class:`~quarimo.Forest`:
-
-        >>> import tarfile
-        >>> from pathlib import PurePosixPath
-        >>> from quarimo import Forest, NewickFile
-        >>>
-        >>> trees = {}
-        >>> with tarfile.open("bootstrap-genetrees.tar.gz", "r:gz") as tar:
-        ...     for member in tar.getmembers():
-        ...         parts = PurePosixPath(member.name).parts
-        ...         if len(parts) != 3:
-        ...             continue
-        ...         locus = parts[1]
-        ...         fobj = tar.extractfile(member)
-        ...         if fobj is None:
-        ...             continue
-        ...         text = NewickFile.decompress_bytes(fobj.read(), source=member.name)
-        ...         trees[locus] = text.strip().splitlines()
-        >>> forest = Forest(trees)
         """
         fmt = cls._detect_bytes(data)
         return cls._decode(data, fmt, source)
@@ -166,6 +180,19 @@ class NewickFile:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _read_raw(self) -> tuple[bytes, str]:
+        """Return ``(raw_bytes, label)`` from whichever source was provided."""
+        src = self._source
+        if isinstance(src, bytes):
+            return src, self._label or "<bytes>"
+        if isinstance(src, (str, Path)):
+            path = Path(src)
+            label = self._label or str(path)
+            return path.read_bytes(), label
+        # binary file-like object
+        label = self._label or getattr(src, "name", "<stream>")
+        return src.read(), label
 
     @classmethod
     def _detect_bytes(cls, data: bytes) -> str:
